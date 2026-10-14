@@ -149,6 +149,51 @@ test('update 向下也单调（生气会慢慢平复）', () => {
   assert.ok(e.anger < 0.001);
 });
 
+test('update 的步长非等价性被如实钉住（刻意如此，不是待修的 bug）', () => {
+  // src/emotions.js 的 update 注释里写了三个具体数字，说明"大 dt 一次算完"
+  // 与"小 dt 分多步算"并**不**等价。注释里的数字若没有测试托底，
+  // 迟早会变成一句谁都没验证过的断言（Task 3 就栽过一次：注释声称平局顺序
+  // "被测试钉住"，实际没有任何测试对顺序敏感）。所以这里把数字变成可执行的。
+  //
+  // 这条测试的性质是**特征化**（characterization）：它记录当前公式的既定行为，
+  // 不是声称该行为理想。前向欧拉的 k = min(1, inertia*dt) 与 dt 成正比，
+  // 而真正的指数趋近要 k = 1 - exp(-inertia*dt)；两者在 dt=1/60 下差约 1.7%。
+  //
+  // 为什么不改成指数形式：dt 在运行时恒为 CONFIG.fixedDt = 1/60（固定步长累加器
+  // 在计划 2 的 main.js 里），dt 恒定 ⇒ 结果确定可复现，这才是本项目要的性质。
+  // 改公式会连带改动所有已钉住的字面量，却换不来任何可观察的收益。
+  const target = { joy: 1, anger: 0, fear: 0, curiosity: 0, sleepy: 0, arousal: 0 };
+  const run = (steps, dt) => {
+    const e = createEmotions();
+    for (let i = 0; i < steps; i++) update(e, target, dt);
+    return e.joy;
+  };
+
+  // 1 模拟秒：60 步 × 1/60。解析值 1-(1-1.6/60)^60 = 0.802441…
+  const fine = run(60, 1 / 60);
+  assert.ok(Math.abs(fine - 0.802441) < 1e-6, `60×(1/60) → ${fine}，期望 ≈0.802441`);
+
+  // 1 模拟秒：1 步 × 1。k = min(1, 1.6×1) = 1 ⇒ 一步直接跳到目标。
+  // 这个 1.0 是精确的，用 equal 而非容差。
+  const coarse = run(1, 1);
+  assert.equal(coarse, 1, `1×1 → ${coarse}，k 被 min 夹到 1，应恰好等于目标值`);
+
+  // 两者相差约 0.198 —— 这就是"不等价"的确切幅度。
+  // 若哪天有人把公式换成真正的指数形式，coarse 会变成 1-exp(-1.6)=0.798，
+  // 这条断言会立刻变红，提示他去同步 update 的注释（那三个数字都会变）。
+  assert.ok(Math.abs(coarse - fine) > 0.19,
+    `粗细步长应显著不等价：差 ${coarse - fine}`);
+
+  // 4× 快进若被错误地实现成"放大 dt"而非"子步进"，1 模拟秒会推进到这里。
+  // 与 1× 的 0.802441 相差 1.669% —— 计划 2 的 main.js 必须用子步进，
+  // 否则 4× 下的生物会与 1× 下表现不同，而这个偏差只出现在情绪层（needs 是线性速率，
+  // 不受影响），格外难查。这条断言就是把那个陷阱的幅度留成可量化的记录。
+  const fastForward = run(15, 4 / 60);
+  assert.ok(Math.abs(fastForward - 0.815837) < 1e-6,
+    `15×(4/60) → ${fastForward}，期望 ≈0.815837`);
+  assert.ok(fastForward > fine, '放大 dt 会让情绪推进得更快 —— 这正是必须用子步进的原因');
+});
+
 test('大 dt 不会导致振荡（min(1, inertia*dt) 的作用）', () => {
   const e = createEmotions();
   const target = { ...createEmotions(), joy: 0.6 };
@@ -222,6 +267,34 @@ test('所有 EVENT_KINDS 都在 CONFIG 中有定义且不会抛错', () => {
 
 test('未知事件名抛错（尽早暴露拼写错误）', () => {
   assert.throws(() => applyEvent(createEmotions(), 'tickled'), /未知情绪事件/);
+});
+
+test('原型链上的键也算未知事件，必须抛错而非静默无操作', () => {
+  // 上面那条只试了一个"普通"的错名字 'tickled'，它拦不住一类真实的漏洞：
+  // CONFIG.emotions.eventMagnitude 是普通对象字面量，原型链上有
+  // constructor / toString / valueOf / hasOwnProperty 等键，取出来都是**真值**，
+  // 于是早先的 `const deltas = …[kind]; if (!deltas) throw` 会放行它们。
+  // 放行之后 Object.entries(一个函数) 是空数组 ⇒ 循环体一次都不执行 ⇒
+  // applyEvent 静默地什么都不做，既不抛错也不改状态。
+  //
+  // 为什么这值得修：Task 9 的 behavior.js 会拿意图名/事件名去派发，
+  // 一个拼错的字符串正好可能撞上这些原型键，届时症状是"这只生物挨了戳
+  // 却毫无反应"—— 没有异常、没有日志，只有行为层少了一次情绪冲击。
+  // 这与 src/rng.js 让 pick([]) 抛错、needs.mostUrgent 绝不返回 undefined
+  // 是同一条原则：契约要覆盖全部输入，不只覆盖看起来合理的输入。
+  for (const key of ['constructor', 'toString', 'valueOf', 'hasOwnProperty',
+                     'isPrototypeOf', 'propertyIsEnumerable', 'toLocaleString']) {
+    const e = createEmotions();
+    assert.throws(() => applyEvent(e, key), /未知情绪事件/,
+      `${key} 是原型键，必须按未知事件抛错`);
+    // 抛错之外还要确认状态确实没被动过（防止"抛了错但已经写了一半"）
+    assert.deepEqual(e, createEmotions(), `${key} 不得改动任何分量`);
+  }
+
+  // 反面对照：合法事件仍须照常生效，别把修复做成"一律抛错"
+  const ok = createEmotions();
+  assert.doesNotThrow(() => applyEvent(ok, 'poked'));
+  assert.ok(ok.fear > 0, 'poked 应真的写入 fear');
 });
 
 test('dominant 返回最高分量，全 0 返回 null', () => {
