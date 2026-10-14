@@ -1,6 +1,23 @@
+// needs.js —— 四条匮乏度（deprivation）随时间的线性积分，受基因性状调制。
+//
+// 模块级契约（Task 10 的 sim 是唯一消费者，动这个文件之前先读）：
+// 所有 mutator —— decay / feed / startle / comfort —— 都**原地修改**传入的 needs 对象，
+// 并且**返回 undefined**。它们不返回新对象，也不复制。所以调用方必须写：
+//
+//   decay(c.needs, dt, c.traits, ctx);        // ✅ needs 被就地推进
+//   c.needs = decay(c.needs, dt, c.traits, ctx);   // ❌ c.needs 变成 undefined
+//
+// 只有 createNeeds() 会产生新对象；mostUrgent() 是纯读函数，不修改入参。
+//
+// 精力匮乏的恢复没有单独入口：休息时把 ctx.resting 置真交给 decay，
+// decay 会走 CONFIG.needs.energyRateRest 这条负速率分支。
 import { CONFIG } from './config.js';
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+// 必须与 createNeeds() 的对象字面量保持同步：这里漏掉一个键，
+// mostUrgent() 就永远不会返回那条需求 —— 不报错、不抛异常，
+// 只是那条需求在行为评分里静默失去发言权。新增第五条需求时两处一起改。
 const KEYS = ['hunger', 'energy', 'social', 'safety'];
 
 // 初值刻意不是全 0：新孵化的幼体带一点饥饿，好让它立刻开始觅食，
@@ -22,7 +39,10 @@ export function decay(needs, dt, traits, ctx) {
     needs.hunger + CONFIG.needs.hungerRate * sizeFactor * gluttonFactor * dt,
   );
 
-  // 精力：休息时恢复；否则按是否移动分档消耗
+  // 精力：休息时恢复；否则按是否移动分档消耗。
+  // 恢复的唯一入口就是这里的 ctx.resting 分支（energyRateRest 是负速率）——
+  // 不要再另开一个 rest() 之类的快捷函数，那会让"只调它"冻结另外三条需求、
+  // "两个都调"把精力恢复跑成 2 倍速。
   const energyRate = ctx.resting
     ? CONFIG.needs.energyRateRest
     : (ctx.moving ? CONFIG.needs.energyRateActive : CONFIG.needs.energyRateIdle);
@@ -50,10 +70,6 @@ export function startle(needs, amount = CONFIG.needs.startleAmount) {
 
 export function comfort(needs, amount = CONFIG.needs.startleAmount) {
   needs.safety = clamp01(needs.safety - amount);
-}
-
-export function rest(needs, dt) {
-  needs.energy = clamp01(needs.energy + CONFIG.needs.energyRateRest * dt);
 }
 
 // 返回最匮乏的一条。全零时返回 'hunger' 作为稳定默认值，

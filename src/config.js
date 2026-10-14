@@ -30,7 +30,15 @@ const CONFIG = {
 
   // ---- 需求（每秒变化率）----
   needs: {
-    hungerRate: 0.0083,        // 约 120s 从 0 到 1
+    hungerRate: 0.0083,        // 裸速率下 1/0.0083 ≈ 120s，但这不是"从 0 到 1"的真实耗时：
+                               // decay 还要乘 sizeFactor × gluttonFactor，而
+                               // sizeFactor = 0.7 + size/maxSize×0.6 是按 maxSize 归一化的
+                               // （不是以中型体型为中心），所以中性个体 size = (14+38)/2 = 26
+                               // 的因子是 1.1105 而非 1.0。真实耗时 = 1/(rate×两因子)：
+                               //   中性个体（size 26, gluttonous 0.5）≈ 108.5s
+                               //   最快（size = maxSize 38, gluttonous 1）≈ 71.3s
+                               //   最慢（size = minSize 14, gluttonous 0）≈ 186.9s
+                               // 写测试窗口时按 108.5s 算，别按 120s —— 120s 已经越过 clamp。
     energyRateActive: 0.0042,  // 移动时约 240s 耗尽
     energyRateIdle: 0.0017,    // 静止时消耗更慢
     energyRateRest: -0.017,    // 休息时恢复，约 60s 回满
