@@ -15,10 +15,16 @@ import { CONFIG } from './config.js';
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
-// 必须与 createNeeds() 的对象字面量保持同步：这里漏掉一个键，
-// mostUrgent() 就永远不会返回那条需求 —— 不报错、不抛异常，
-// 只是那条需求在行为评分里静默失去发言权。新增第五条需求时两处一起改。
-const KEYS = ['hunger', 'energy', 'social', 'safety'];
+// 从 createNeeds() 派生，而不是再抄一份键名。
+// 早先这里是独立的字面量数组，靠注释提醒"两处一起改"—— 但注释挡不住漂移，
+// 而漏改的后果是静默的：KEYS 少一条，mostUrgent() 就永远不会返回那条需求，
+// 不报错、不抛异常，只是那条需求在行为评分里失去发言权。
+// 派生之后这个失败模式在结构上不可能发生。
+//
+// 顺序即 mostUrgent() 的平局优先级（全零时返回第一个键 'hunger'），
+// 而对象字面量的键序就是插入序，故 hunger > energy > social > safety：
+// 饿死优先于累死、累死优先于孤独、孤独优先于不安。这条优先级被测试钉住。
+const KEYS = Object.keys(createNeeds());
 
 // 初值刻意不是全 0：新孵化的幼体带一点饥饿，好让它立刻开始觅食，
 // 玩家不必干等两分钟才看到第一个行为。
@@ -68,6 +74,13 @@ export function startle(needs, amount = CONFIG.needs.startleAmount) {
   needs.safety = clamp01(needs.safety + amount);
 }
 
+// 默认份量刻意复用 startleAmount，不另设 comfortAmount：
+// 设计意图是"一次安抚恰好抵消一次惊吓"—— 玩家温柔地摸一下，
+// 应当正好抹平刚才戳一下造成的不安，两者是同一件事的正反面。
+//
+// 因此改 startleAmount 会**同时**改变这两个方向：想让戳更吓人，
+// 就会让摸也更有效。这不是疏忽，是耦合得有意的；若要打破这种对称，
+// 需要同时改这里、改 spec 的交互章节、并补一条钉住两者比例的测试。
 export function comfort(needs, amount = CONFIG.needs.startleAmount) {
   needs.safety = clamp01(needs.safety - amount);
 }

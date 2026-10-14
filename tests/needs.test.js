@@ -54,12 +54,38 @@ test('时间流逝使饥饿上升', () => {
   assert.ok(n.hunger > 0);
 });
 
-test('约 120 秒饥饿升到可观水平但不越界', () => {
+test('长时间无人照料：需求饱和于边界且始终有限', () => {
+  // 这条测试曾经叫"约 120 秒饥饿升到可观水平但不越界"，断言 hunger > 0.4 && <= 1。
+  // 那个名字是假的：按真实速率，hunger 在约 108.5s 就撞到上界 clamp，
+  // 之后一直停在 1，所以断言检验的是 clamp01 而不是速率 —— 把 hungerRate
+  // 改大 10 倍它照样通过。而 src/config.js 里恰好有一条注释警告
+  // "别用 120s 窗口，已经越过 clamp"，两者自相矛盾。
+  //
+  // 速率的**绝对量级**由下面那条显式性状的钉桩测试负责（20s 线性区 + 字面量）。
+  // 这条测试的职责是另一件事，也是它那条 <= 1 断言从头到尾真正在测的东西：
+  // 长时间放养之后，每条需求都停在边界上，且不会溢出、不会变成 NaN。
+  //
+  // 别把它"修"回速率测试 —— 那会重新变成一条名字骗人的空断言。
   const n = createNeeds();
   n.hunger = 0;
   const t = neutralTraits();
-  for (let i = 0; i < 120 * 60; i++) decay(n, 1 / 60, t, IDLE);
-  assert.ok(n.hunger > 0.4 && n.hunger <= 1, `120s 后饥饿 = ${n.hunger}`);
+  for (let i = 0; i < 600 * 60; i++) decay(n, 1 / 60, t, IDLE);   // 10 分钟模拟时间
+
+  // 从不喂食 ⇒ hunger 走满上界。用 exact 相等：clamp 之后它就是字面量 1，
+  // 任何"超过 1 又没被夹住"的实现都会在这里露出来（600s 裸积分约 5.5）。
+  assert.equal(n.hunger, 1, `600s 不喂食后 hunger 应饱和于 1，实际 ${n.hunger}`);
+  // safety 只随时间下降且初值为 0 ⇒ 恒为 0，绝不能变成负数（spec 8.1：满足后不会变负）。
+  assert.equal(n.safety, 0, `safety 应停在下界 0，实际 ${n.safety}`);
+
+  // energy 与 social 在 600s 下同样饱和于 1，这里只要求它们合法，
+  // 免得把初值/速率的任何调整都变成对这条测试的破坏。
+  for (const [k, v] of Object.entries(n)) {
+    assert.ok(v >= 0 && v <= 1, `${k} 越界: ${v}`);
+    // 这一条比看上去重要：clamp01 会原样放过 NaN（NaN < 0 与 NaN > 1 都是 false），
+    // 而 mostUrgent() 里 NaN > bestV 也恒为 false —— 于是一个 NaN 需求会
+    // 在行为评分里静默失去发言权，全程不报错。长时间积分正是它最可能现形的地方。
+    assert.ok(Number.isFinite(v), `${k} 非有限数: ${v}`);
+  }
 });
 
 test('所有需求永远被 clamp 在 [0,1]', () => {
@@ -304,6 +330,69 @@ test('startle 提高不安全、comfort 降低不安全，均 clamp', () => {
   assert.equal(n.safety, 1, '不得超过 1');
   for (let i = 0; i < 10; i++) comfort(n);
   assert.equal(n.safety, 0, '不得低于 0');
+});
+
+test('两个冲激常量的绝对量级被字面量钉住（feedAmount / startleAmount）', () => {
+  // 上一轮把四条**速率**钉住了，但两个**冲激**常量仍然只有下界：
+  // 旧断言 `n.safety > 0.4` 对 startleAmount = 0.45 和 = 1.0 都成立，
+  // feedAmount 只要 >= 0.2 也能过。这两个数是"手感"常量 ——
+  // 喂一口能压下去多少饥饿、戳一下能吓出多少不安 —— 数量级写错
+  // 不会让任何测试变红，只会让整个照料节奏悄悄变味。
+  //
+  // 起点刻意选在不触发 clamp 的位置，否则断言测的是 clamp01 而不是常量本身
+  // （这正是"约 120 秒"那条测试曾经犯过的错，见其注释）。
+  // 字面量必须是字面量：写成 0.9 - CONFIG.needs.feedAmount 就是同义反复，
+  // 常量改成什么它都跟着变，永远通过。
+
+  // startle: 0 + startleAmount = 0 + 0.55 = 0.55（安全感的匮乏度上升）
+  const a = createNeeds(); a.safety = 0;
+  startle(a);
+  assert.ok(Math.abs(a.safety - 0.55) < 1e-9, `startle 后 safety = ${a.safety}，期望 0.55`);
+
+  // feed: 0.9 - feedAmount = 0.9 - 0.45 = 0.45（饥饿下降）
+  const b = createNeeds(); b.hunger = 0.9;
+  feed(b);
+  assert.ok(Math.abs(b.hunger - 0.45) < 1e-9, `feed 后 hunger = ${b.hunger}，期望 0.45`);
+
+  // comfort: 0.9 - startleAmount = 0.9 - 0.55 = 0.35
+  // 这一条同时钉住了 comfort 默认复用 startleAmount 的那个耦合：
+  // 若哪天有人给 comfort 换成别的默认值（或把两个常量拆开），这里会立刻变红。
+  const c = createNeeds(); c.safety = 0.9;
+  comfort(c);
+  assert.ok(Math.abs(c.safety - 0.35) < 1e-9, `comfort 后 safety = ${c.safety}，期望 0.35`);
+});
+
+test('ctx.resting 与 ctx.moving 同时为真时，休息优先', () => {
+  // src/needs.js 里那个三元表达式把 resting 放在外层，是一条**刻意的优先级规则**：
+  // 一只躺下休息的生物不该因为"刚刚游过来"就按移动速率继续耗能。
+  // 但此前没有任何测试同时把两个标志置真，所以这条规则是未被验证的 ——
+  // 把三元内外调换（改成 moving 优先）不会让任何测试失败。
+  //
+  // Task 10 理论上不该构造出这种 ctx，但规则本身值得钉住：
+  // 它是"休息能恢复精力"这条玩家可感知的承诺的前提。
+  // energy 速率不受任何性状调制，故这里用 PINNED_TRAITS 只为形状一致。
+  const HORIZON = 20;   // 与量级钉桩测试同一窗口，便于对照三个分支的字面量
+
+  const both = createNeeds(); both.energy = 0.5;
+  decay(both, HORIZON, PINNED_TRAITS, { moving: true, resting: true, companions: 0 });
+
+  const restingOnly = createNeeds(); restingOnly.energy = 0.5;
+  decay(restingOnly, HORIZON, PINNED_TRAITS, { moving: false, resting: true, companions: 0 });
+
+  const movingOnly = createNeeds(); movingOnly.energy = 0.5;
+  decay(movingOnly, HORIZON, PINNED_TRAITS, { moving: true, resting: false, companions: 0 });
+
+  // 0.5 - 0.017×20 = 0.16。用容差而非 assert.equal：IEEE-754 下它算出
+  // 0.15999999999999998，exact 相等会假失败。
+  assert.ok(Math.abs(both.energy - 0.16) < 1e-9,
+    `两者同真时 energy = ${both.energy}，期望走休息速率得 0.16`);
+  // 与"只休息"逐位相同 —— 这才是"优先"的确切含义
+  assert.equal(both.energy, restingOnly.energy, 'resting 应当压过 moving，结果须与纯休息一致');
+  // 反面对照：若规则被调换，both 会等于这个值（0.5 + 0.0042×20 = 0.584）
+  assert.ok(Math.abs(movingOnly.energy - 0.584) < 1e-9,
+    `纯移动时 energy = ${movingOnly.energy}，期望 0.584`);
+  assert.notEqual(both.energy, movingOnly.energy,
+    '若这条失败，说明 resting 已不再优先于 moving');
 });
 
 test('mostUrgent 返回最匮乏的一条', () => {
