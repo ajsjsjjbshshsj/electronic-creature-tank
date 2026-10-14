@@ -28,7 +28,8 @@ import { CONFIG } from './config.js';
 // 两个数组都冻结：它们会被 Task 9 / Task 10 导入，而一次意外的就地
 // .sort() / .push() / .reverse() 会静默改变分量集合或 dominant() 的平局顺序
 // （严格 > 配 bestV=0 起手 ⇒ 平局取数组中靠前者）。这与 src/config.js 深冻结
-// 共享常量是同一条纪律；needs.js 不导出键数组，所以这里是本项目第一例。
+// 共享常量、src/genes.js 冻结四个导出基因数组是同一条纪律。
+// 实测冻结前 push / sort 都静默成功，冻结后都抛 TypeError。
 export const EMOTION_KEYS = Object.freeze(
   ['joy', 'anger', 'fear', 'curiosity', 'sleepy', 'arousal'],
 );

@@ -1,14 +1,25 @@
 import { CONFIG } from './config.js';
 
-export const APPEARANCE_GENES = [
+// 四个导出数组全部冻结，与 src/config.js 深冻结共享常量、src/emotions.js 冻结
+// EMOTION_KEYS / EVENT_KINDS 是同一条纪律：这些数组会被 creature / breeding / sim
+// 导入，一次意外的就地 .sort() / .push() / .reverse() 会静默改变基因集合或
+// pattern 的分桶顺序，且全程不报错 —— 症状是"所有生物的花纹突然变了"，极难追溯。
+// 实测：冻结前 PATTERNS.reverse() 静默成功（变成 stars,clouds,rings,spots,none），
+// ALL_GENES.push('affection') 让长度从 14 变成 15；冻结后两者都抛 TypeError。
+//
+// 冻结不影响读取与展开：ALL_GENES 用 [...] 生成新数组，randomGenome / decode /
+// patternBucket 只遍历不修改，故冻结是纯粹的防呆，无行为变化。
+export const APPEARANCE_GENES = Object.freeze([
   'hue', 'sat', 'lum', 'size', 'glow', 'pattern', 'patternDensity', 'wobble',
-];
-export const PERSONALITY_GENES = [
+]);
+export const PERSONALITY_GENES = Object.freeze([
   'bold', 'clingy', 'irritable', 'gluttonous', 'curious', 'libido',
-];
-export const ALL_GENES = [...APPEARANCE_GENES, ...PERSONALITY_GENES];
+]);
+export const ALL_GENES = Object.freeze([...APPEARANCE_GENES, ...PERSONALITY_GENES]);
 
-export const PATTERNS = ['none', 'spots', 'rings', 'clouds', 'stars'];
+// PATTERNS 的**顺序是承重的**：patternBucket(v) 按 v 落在哪个五等分区间来选花纹，
+// 索引 0..4 直接映射到这五个名字。就地重排它不会报错，只会让所有生物的花纹错位。
+export const PATTERNS = Object.freeze(['none', 'spots', 'rings', 'clouds', 'stars']);
 
 // 显性度：0.5 = 共显性（表现型为两等位基因均值），>0.5 = 第一个等位基因偏显性。
 // "显性"在这里是位点属性而非等位基因属性 —— 这是为了让 pattern 这类离散性状

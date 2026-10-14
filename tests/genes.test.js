@@ -14,6 +14,37 @@ test('基因清单完整且无重复', () => {
   assert.equal(PERSONALITY_GENES.length, 6);
 });
 
+test('四个导出基因数组都被冻结（就地修改必须抛错，不得静默成功）', () => {
+  // 这些数组会被 creature / breeding / sim 导入共享。冻结前实测：
+  //   PATTERNS.reverse()          静默成功 → 变成 stars,clouds,rings,spots,none
+  //   ALL_GENES.push('affection') 静默成功 → 长度 14 变 15
+  // 两者都不报错，而后果是全局的：patternBucket(v) 按索引 0..4 映射花纹名，
+  // 重排 PATTERNS 会让所有生物的花纹错位；给 ALL_GENES 加一个不存在的基因名
+  // 会让 randomGenome / inherit 遍历到它并产出 undefined 等位基因。
+  // 症状是"整缸生物突然变样"，没有任何一处抛错 —— 正是最难追溯的那类 bug。
+  //
+  // 这条测试的存在理由：冻结是**易失的**属性。有人为了在别处 sort 一下而摘掉
+  // Object.freeze，不会让任何一条既有测试变红。所以冻结本身必须被钉住。
+  for (const [name, arr] of [
+    ['APPEARANCE_GENES', APPEARANCE_GENES],
+    ['PERSONALITY_GENES', PERSONALITY_GENES],
+    ['ALL_GENES', ALL_GENES],
+    ['PATTERNS', PATTERNS],
+  ]) {
+    assert.ok(Object.isFrozen(arr), `${name} 应被冻结`);
+    assert.throws(() => arr.push('__probe__'), TypeError, `${name}.push 应抛 TypeError`);
+    assert.throws(() => arr.reverse(), TypeError, `${name}.reverse 应抛 TypeError`);
+    assert.throws(() => { arr[0] = '__probe__'; }, TypeError, `${name}[0] 赋值应抛 TypeError`);
+    // 反向确认：冻结只挡写，不挡读与展开（否则 randomGenome / decode 会跟着坏）
+    assert.equal(typeof [...arr].sort().join(','), 'string', `${name} 仍应可展开`);
+  }
+
+  // PATTERNS 的顺序是承重的：patternBucket(v) 按 v 落在哪个五等分区间取 PATTERNS[i]，
+  // 所以索引 0..4 直接决定花纹名。单独钉住顺序本身 ——
+  // 区间边界的穷举已由下面 'patternBucket 分五桶且边界正确' 那条负责，此处不重复。
+  assert.deepEqual([...PATTERNS], ['none', 'spots', 'rings', 'clouds', 'stars']);
+});
+
 test('randomGenome 为每个基因生成两个 [0,1] 等位基因', () => {
   const g = randomGenome(createRng(1));
   for (const name of ALL_GENES) {

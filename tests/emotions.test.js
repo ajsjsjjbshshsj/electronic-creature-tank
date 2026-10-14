@@ -23,6 +23,34 @@ test('情绪向量恰好六个分量，且不含 affection（spec 4.5 注意事�
   for (const v of Object.values(e)) assert.equal(v, 0);
 });
 
+test('两个导出数组都被冻结（就地修改必须抛错，不得静默成功）', () => {
+  // 冻结是**易失**属性：有人为了在 Task 9 / Task 10 里 sort 一下而摘掉 Object.freeze，
+  // 不会让上面那条 deepEqual 变红 —— 它只比内容，摘掉冻结后内容照旧。
+  // 所以冻结本身必须被单独钉住，否则它随时可能被无声地撤销。
+  //
+  // 后果为什么严重：EMOTION_KEYS 的**顺序**决定 dominant() / secondary() 的平局裁决
+  // （两者都是严格 > 配 bestV = 0 起手 ⇒ 平局取数组中靠前者），而 EVENT_KINDS 的
+  // 内容决定哪些事件名合法。一次就地 .sort() 或 .push() 会静默改变它们，
+  // 症状是"身体语言的分量配比变了"或"某个事件不再抛错"，全程无异常。
+  // 实测：冻结前 EMOTION_KEYS.push('affection') 与 .sort() 都静默成功。
+  for (const [name, arr] of [['EMOTION_KEYS', EMOTION_KEYS], ['EVENT_KINDS', EVENT_KINDS]]) {
+    assert.ok(Object.isFrozen(arr), `${name} 应被冻结`);
+    assert.throws(() => arr.push('__probe__'), TypeError, `${name}.push 应抛 TypeError`);
+    assert.throws(() => arr.sort(), TypeError, `${name}.sort 应抛 TypeError`);
+    assert.throws(() => { arr[0] = '__probe__'; }, TypeError, `${name}[0] 赋值应抛 TypeError`);
+    // 反向确认：冻结只挡写，不挡读与展开（否则 createEmotions / dominant 会跟着坏）
+    assert.equal(typeof [...arr].sort().join(','), 'string', `${name} 仍应可展开`);
+  }
+
+  // 平局裁决确实依赖顺序：把 joy 与 anger 同时置为最高值，
+  // dominant() 必须返回数组中靠前的那个。这条让"顺序承重"从注释变成可执行的事实。
+  const tie = createEmotions();
+  tie.joy = 0.6;
+  tie.anger = 0.6;
+  assert.equal(dominant(tie), 'joy', '平局时应取 EMOTION_KEYS 中靠前的 joy');
+  assert.equal(secondary(tie), 'anger', '次高与主导相等时（0.6 >= 0.3）应泄漏 anger');
+});
+
 test('computeTargets 输出同样的六个键', () => {
   const t = computeTargets(createNeeds(), calmCtx, traits());
   assert.deepEqual(Object.keys(t).sort(), [...EMOTION_KEYS].sort());
