@@ -191,6 +191,26 @@ test('槽位约定：slot 0 = 母方、slot 1 = 父方，对 dom ≠ 0.5 的位�
   assert.equal(decode(maternalFirst).hue, decode(paternalFirst).hue);
 });
 
+test('inherit 把 genesA 的等位基因放进 slot 0（母方）', () => {
+  // 上一条钉住了 combine 的槽位约定；这一条把同一契约钉在 inherit 的实参顺序上 ——
+  // Task 8 调用的是 inherit(rng, mother.genes, father.genes)，若有人把 inherit 的实现
+  // 改写成 combine(gamete(rng, genesB), gamete(rng, genesA))，母/父映射即被反转，
+  // 而此前没有任何测试能发现：现有 inherit 测试要么双亲对称（pure × pure），
+  // 要么只观察 dom = 0.5 的 hue（对顺序天然失明）。
+  //
+  // 为什么本测试不可能偶发失败：双亲都是纯合的 ⇒ 分离不是干扰项，
+  // slot 0 的等位基因只可能来自母方的 0.1，slot 1 只可能来自父方的 0.9；
+  // 变异是零均值高斯、σ = CONFIG.mutationRate = 0.06，要把 0.1 推过 0.5
+  // 需要约 6.7 个标准差；且使用固定种子，结果由种子唯一决定，完全确定。
+  const rng = createRng(14);
+  const mother = {};
+  const father = {};
+  for (const g of ALL_GENES) { mother[g] = [0.1, 0.1]; father[g] = [0.9, 0.9]; }
+  const child = inherit(rng, mother, father);   // 纯合亲本 ⇒ 每个 slot 只可能来自对应亲本
+  assert.ok(child.pattern[0] < 0.5, `slot 0 应来自母方 0.1，实际 ${child.pattern[0]}`);
+  assert.ok(child.pattern[1] > 0.5, `slot 1 应来自父方 0.9，实际 ${child.pattern[1]}`);
+});
+
 test('patternBucket 分五桶且边界正确', () => {
   assert.equal(patternBucket(0), 'none');
   assert.equal(patternBucket(0.19), 'none');
