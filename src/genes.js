@@ -13,6 +13,14 @@ export const PATTERNS = ['none', 'spots', 'rings', 'clouds', 'stars'];
 // 显性度：0.5 = 共显性（表现型为两等位基因均值），>0.5 = 第一个等位基因偏显性。
 // "显性"在这里是位点属性而非等位基因属性 —— 这是为了让 pattern 这类离散性状
 // 能稳定地"像某一方"，而不是永远卡在两桶之间。
+//
+// 槽位约定（承重契约，由 tests/genes.test.js 钉住，不要"改成顺序无关"）：
+// slot 0 是母方等位基因、slot 1 是父方等位基因，因为 Task 8 的
+// layEggs(mother, father, …) 调用 inherit(rng, mother.genes, father.genes)。
+// 于是 dom > 0.5 的含义是"该性状偏向母方"：pattern(0.7) 与 glow(0.6) 都会
+// 因为交换双亲参数而改变取值（0.1/0.9 这对配子下 pattern 在 'spots' 与
+// 'clouds' 之间翻转），而 dom = 0.5 的位点（含最显眼的 hue）严格与顺序无关。
+// 公式本身来自 spec 第 145 行（phenotype = a × dom + b × (1 − dom)），逐字实现。
 const DOMINANCE = {
   hue: 0.5, sat: 0.5, lum: 0.5, size: 0.5,
   glow: 0.6, pattern: 0.7, patternDensity: 0.5, wobble: 0.5,
@@ -59,6 +67,10 @@ export function combine(gameteA, gameteB) {
   return genes;
 }
 
+// 实参顺序有意义：genesA 的等位基因落在 slot 0（母方），genesB 落在 slot 1（父方）。
+// 对 dom !== 0.5 的位点（glow 0.6、pattern 0.7）交换两个实参会得到不同的表现型，
+// 对 dom = 0.5 的位点则完全等价。调用方（Task 8）必须始终按 (母, 父) 传入。
+// 每次调用都重新形成两份配子 —— 同一对双亲的每枚蛋因此各自独立，互不相同。
 export function inherit(rng, genesA, genesB) {
   return combine(gamete(rng, genesA), gamete(rng, genesB));
 }

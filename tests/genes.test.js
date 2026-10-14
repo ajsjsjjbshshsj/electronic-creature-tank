@@ -104,12 +104,91 @@ test('同一种子下 inherit 完全可复现', () => {
   assert.deepEqual(inherit(createRng(77), A, B), inherit(createRng(77), A, B));
 });
 
+test('同一对双亲的 40 个后代互不相同，且共显性位点有非零表现型方差', () => {
+  // spec 要求一窝的每枚蛋各自独立地"分离 + 重组 + 变异"（"所以每枚都不同"）。
+  // 现有测试里没有一条能发现"inherit 每次都返回同一个孩子"这类回归 ——
+  // 例如配子只算一次然后被复用、或变异被漏掉。这里把它钉住。
+  //
+  // 用固定种子 ⇒ 本测试完全确定，不可能偶发失败：这 40 个基因型要么全不相同，
+  // 要么不是，由种子唯一决定（实测 seed 202 下 40 个全不相同）。
+  // 要撞上重复，需要 14 个位点全部选中同一个亲本等位基因并得到完全相同的高斯扰动。
+  const rng = createRng(202);
+  const mother = randomGenome(rng);
+  const father = randomGenome(rng);
+  const genotypes = new Set();
+  let minHue = Infinity;
+  let maxHue = -Infinity;
+  for (let i = 0; i < 40; i++) {
+    // 单个持续推进的 rng：模拟真实的产卵循环，而不是每枚蛋重开一个流。
+    const child = inherit(rng, mother, father);
+    genotypes.add(JSON.stringify(child));
+    const h = phenotype('hue', child.hue);
+    if (h < minHue) minHue = h;
+    if (h > maxHue) maxHue = h;
+  }
+  assert.equal(genotypes.size, 40, `40 个后代的基因型应全部不同，实际只有 ${genotypes.size} 种`);
+  // hue 是共显性位点（dom = 0.5），纯分离 + 变异就应当产生非零方差。
+  // 只断言"大于 0"而非某个具体区间 —— 这里要抓的是"完全没变化"，不是分布形状。
+  const spread = maxHue - minHue;
+  assert.ok(spread > 0, `hue 表现型极差应大于 0，实际 ${spread}（min=${minHue}, max=${maxHue}）`);
+});
+
 test('combine 让双亲各贡献一个等位基因且顺序稳定', () => {
   const ga = {};
   const gb = {};
   for (const g of ALL_GENES) { ga[g] = 0.1; gb[g] = 0.9; }
   const child = combine(ga, gb);
   for (const g of ALL_GENES) assert.deepEqual(child[g], [0.1, 0.9]);
+});
+
+test('槽位约定：slot 0 = 母方、slot 1 = 父方，对 dom ≠ 0.5 的位点改变可见性状', () => {
+  // 上一条测试钉住了 combine 的顺序本身；这一条钉住它的后果 —— 这才是承重的部分。
+  // Task 8 的 layEggs(mother, father, …) 调用 inherit(rng, mother.genes, father.genes)，
+  // 所以 slot 0 是母方、slot 1 是父方，dom > 0.5 意味着性状偏向母方。
+  // 如果哪天有人悄悄调换了实参顺序（或把 phenotype 换成顺序无关的取值方式），
+  // 缸里每只宠物的 pattern 与 glow 都会变，而这条测试会立刻失败。
+  // 构造沿用上面的 combine 测试：两个合成配子，每个位点分别取 0.1 / 0.9。
+  const ga = {};
+  const gb = {};
+  for (const g of ALL_GENES) { ga[g] = 0.1; gb[g] = 0.9; }
+  const maternalFirst = combine(ga, gb);   // 母方 0.1 落在 slot 0
+  const paternalFirst = combine(gb, ga);   // 父方 0.9 落在 slot 0
+
+  // pattern（dom = 0.7）：同样的遗传物质，换个顺序，花纹桶就换了。
+  //   母在前：0.1*0.7 + 0.9*0.3 = 0.34 → 'spots'
+  //   父在前：0.9*0.7 + 0.1*0.3 = 0.66 → 'clouds'
+  // 这是本条测试的核心断言：基因完全相同，只是双亲顺序相反，动物看起来就不一样。
+  const pMaternal = phenotype('pattern', maternalFirst.pattern);
+  const pPaternal = phenotype('pattern', paternalFirst.pattern);
+  assert.ok(Math.abs(pMaternal - 0.34) < 1e-9, `pattern（母在前）应为 0.34，实际 ${pMaternal}`);
+  assert.ok(Math.abs(pPaternal - 0.66) < 1e-9, `pattern（父在前）应为 0.66，实际 ${pPaternal}`);
+  assert.equal(patternBucket(pMaternal), 'spots');
+  assert.equal(patternBucket(pPaternal), 'clouds');
+  // 同一个结论走到 decode 这一层（真正决定画面上长什么样的地方）也成立。
+  assert.equal(decode(maternalFirst).pattern, 'spots');
+  assert.equal(decode(paternalFirst).pattern, 'clouds');
+
+  // glow（dom = 0.6）：两个顺序给出不同值，且偏向母方的顺序给出较低的那个
+  // （因为 slot 0 携带的是 0.1）：0.1*0.6 + 0.9*0.4 = 0.42 vs 0.9*0.6 + 0.1*0.4 = 0.58。
+  const gMaternal = phenotype('glow', maternalFirst.glow);
+  const gPaternal = phenotype('glow', paternalFirst.glow);
+  assert.ok(Math.abs(gMaternal - 0.42) < 1e-9, `glow（母在前）应为 0.42，实际 ${gMaternal}`);
+  assert.ok(Math.abs(gPaternal - 0.58) < 1e-9, `glow（父在前）应为 0.58，实际 ${gPaternal}`);
+  assert.notEqual(gMaternal, gPaternal, 'dom = 0.6 的位点必须与双亲顺序有关');
+  assert.ok(gMaternal < gPaternal, 'slot 0 携带 0.1，偏母方的顺序应给出较低的 glow');
+  assert.notEqual(decode(maternalFirst).glow, decode(paternalFirst).glow);
+
+  // hue（dom = 0.5）：共显性保证 —— 两个顺序必须给出同一个值 0.5。
+  // 这一条的分量与它的长度不成正比：色相是全项目最显眼的性状，
+  // 它必须是双亲的公平混合，绝不能因为"谁被写在前面"而偏移。
+  assert.equal(phenotype('hue', maternalFirst.hue), 0.5);
+  assert.equal(phenotype('hue', paternalFirst.hue), 0.5);
+  assert.equal(
+    phenotype('hue', maternalFirst.hue),
+    phenotype('hue', paternalFirst.hue),
+    '共显性位点必须与双亲顺序无关',
+  );
+  assert.equal(decode(maternalFirst).hue, decode(paternalFirst).hue);
 });
 
 test('patternBucket 分五桶且边界正确', () => {
