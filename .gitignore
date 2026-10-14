@@ -18,3 +18,6 @@ desktop.ini
 # 日志
 *.log
 npm-debug.log*
+
+# SDD 脚手架：任务简报、实现报告、审查包、进度台账（短期产物，不入库）
+.superpowers/
