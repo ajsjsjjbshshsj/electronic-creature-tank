@@ -157,11 +157,16 @@ test('update 的步长非等价性被如实钉住（刻意如此，不是待修�
   //
   // 这条测试的性质是**特征化**（characterization）：它记录当前公式的既定行为，
   // 不是声称该行为理想。前向欧拉的 k = min(1, inertia*dt) 与 dt 成正比，
-  // 而真正的指数趋近要 k = 1 - exp(-inertia*dt)；两者在 dt=1/60 下差约 1.7%。
+  // 而真正的指数趋近要 k = 1 - exp(-inertia*dt)。两者在 inertia=1.6、dt=1/60 下：
+  //   k 本身       0.0266667 vs 0.0263143   → 相差 1.32%
+  //   一秒推进量   0.8024415 vs 0.7981035   → 相差 0.54%
+  // 注意别把这些百分比与下面 4× 那段的 1.669% 混为一谈 —— 那是"放大 dt 实现倍速"
+  // 的偏差，是另一件事。
   //
   // 为什么不改成指数形式：dt 在运行时恒为 CONFIG.fixedDt = 1/60（固定步长累加器
   // 在计划 2 的 main.js 里），dt 恒定 ⇒ 结果确定可复现，这才是本项目要的性质。
-  // 改公式会连带改动所有已钉住的字面量，却换不来任何可观察的收益。
+  // 换公式的收益为零，成本是下面两个字面量与 :452 那条 inertia 钉桩要重算
+  // （黄金向量、MAGNITUDES、长跑窗口都不受影响 —— 它们不碰 inertia 的函数形式）。
   const target = { joy: 1, anger: 0, fear: 0, curiosity: 0, sleepy: 0, arousal: 0 };
   const run = (steps, dt) => {
     const e = createEmotions();
@@ -169,9 +174,11 @@ test('update 的步长非等价性被如实钉住（刻意如此，不是待修�
     return e.joy;
   };
 
-  // 1 模拟秒：60 步 × 1/60。解析值 1-(1-1.6/60)^60 = 0.802441…
+  // 1 模拟秒：60 步 × 1/60。闭式 1-(1-1.6/60)^60 = 0.8024414619317645，
+  // 迭代累加实测 0.80244146193176447（末位差 8e-16，双精度必然如此，不抖动）。
   const fine = run(60, 1 / 60);
-  assert.ok(Math.abs(fine - 0.802441) < 1e-6, `60×(1/60) → ${fine}，期望 ≈0.802441`);
+  assert.ok(Math.abs(fine - 0.802441461932) < 1e-9,
+    `60×(1/60) → ${fine}，期望 ≈0.802441461932`);
 
   // 1 模拟秒：1 步 × 1。k = min(1, 1.6×1) = 1 ⇒ 一步直接跳到目标。
   // 这个 1.0 是精确的，用 equal 而非容差。
@@ -179,18 +186,23 @@ test('update 的步长非等价性被如实钉住（刻意如此，不是待修�
   assert.equal(coarse, 1, `1×1 → ${coarse}，k 被 min 夹到 1，应恰好等于目标值`);
 
   // 两者相差约 0.198 —— 这就是"不等价"的确切幅度。
-  // 若哪天有人把公式换成真正的指数形式，coarse 会变成 1-exp(-1.6)=0.798，
-  // 这条断言会立刻变红，提示他去同步 update 的注释（那三个数字都会变）。
+  // 若哪天有人把公式换成真正的指数形式，fine 会变成 1-exp(-1.6)=0.798103，
+  // 上面那条断言会先变红并中止本测试（node:test 语义：assert 抛出即终止），
+  // 所以**这条**断言在那种变异下其实执行不到 —— 说"这条测试会立刻变红"才准确，
+  // 别说成"这条断言会立刻变红"。它防的是另一类回归：k 被改成与 dt 无关的常数。
+  // 阈值 0.19 的选取：它同时对 inertia 敏感（inertia 降到 0.5 时差值只剩约 0.106），
+  // 所以失败信息里必须提示这个可能，否则开发者会以为"不等价性变了"。
   assert.ok(Math.abs(coarse - fine) > 0.19,
-    `粗细步长应显著不等价：差 ${coarse - fine}`);
+    `粗细步长应显著不等价：差 ${coarse - fine}（若差值缩小，也可能是 CONFIG.emotions.inertia 被改动了）`);
 
   // 4× 快进若被错误地实现成"放大 dt"而非"子步进"，1 模拟秒会推进到这里。
-  // 与 1× 的 0.802441 相差 1.669% —— 计划 2 的 main.js 必须用子步进，
+  // 与 1× 的 0.802441461932 相差 1.6693% —— 计划 2 的 main.js 必须用子步进，
   // 否则 4× 下的生物会与 1× 下表现不同，而这个偏差只出现在情绪层（needs 是线性速率，
   // 不受影响），格外难查。这条断言就是把那个陷阱的幅度留成可量化的记录。
+  // 实测 0.81583669948650650；先前这里写的 0.815837234 是错的，靠 1e-6 的松容差蒙混过关。
   const fastForward = run(15, 4 / 60);
-  assert.ok(Math.abs(fastForward - 0.815837) < 1e-6,
-    `15×(4/60) → ${fastForward}，期望 ≈0.815837`);
+  assert.ok(Math.abs(fastForward - 0.815836699487) < 1e-9,
+    `15×(4/60) → ${fastForward}，期望 ≈0.815836699487`);
   assert.ok(fastForward > fine, '放大 dt 会让情绪推进得更快 —— 这正是必须用子步进的原因');
 });
 
@@ -312,6 +324,31 @@ test('secondary 在次高值不足主导一半时返回 null（避免泄漏不�
   assert.equal(secondary(e), null, '0.3 < 0.8/2 = 0.4，不应泄漏');
   e.fear = 0.5;
   assert.equal(secondary(e), 'fear');
+});
+
+test('secondary 阈值恰为一半时应当泄漏（钉住 >= 而非 >）', () => {
+  // src/emotions.js 把 "主导值的一半" 称为「害怕地缩着却还是往前探了一点」能成立的边界，
+  // 而 brief 的契约写的是"次高值**不足**主导值一半时返回 null" —— 即恰好一半要泄漏，
+  // 所以实现里的 `>=` 是正确读法。
+  //
+  // 但此前只有**下方**被钉住（0.3 vs 阈值 0.4），"恰好相等"这一侧全仓库无一例：
+  // 0.5 vs 0.4、0.4 vs 0.35 都严格大于阈值。把 `>=` 改成 `>` 会让 38 条测试全绿，
+  // 而那条被注释标为承重的边界就悄悄挪了半格 —— 表现层会在"刚好一半"时
+  // 少泄漏一层情绪，症状是身体语言变得比设计更单薄，且不报错。
+  const e = createEmotions();
+  e.joy = 0.8;
+  e.fear = 0.4;                       // 恰好 = 0.8 * 0.5
+  assert.equal(secondary(e), 'fear', '恰为一半应当泄漏（实现须用 >=，不是 >）');
+
+  // 再往下一点点就必须切断，确认这不是"总是泄漏"
+  e.fear = 0.3999;
+  assert.equal(secondary(e), null, '略低于一半不应泄漏');
+
+  // 0.5 * 0.5 走另一条浮点路径（0.25 可精确表示），一并钉住
+  const f = createEmotions();
+  f.curiosity = 0.5;
+  f.sleepy = 0.25;
+  assert.equal(secondary(f), 'sleepy', '0.25 = 0.5 的一半，应当泄漏');
 });
 
 test('secondary 在没有主导时返回 null', () => {
@@ -457,6 +494,41 @@ test('惯性系数被字面量钉住：单步趋近比例恰为 inertia × dt（
   }
 });
 
+test('六个分量共用同一个 k（不是每个分量各有一套速率）', () => {
+  // 上一条只让 joy 一个分量非零，所以它钉住的是"存在某个 k 使 joy 按 1.6/60 推进"，
+  // 钉不住"六个分量用的是同一个 k"。形如
+  //     emotions[key] += (targets[key] - emotions[key]) * (key === 'curiosity' ? k*2 : k)
+  // 的变异能让全套测试通过：本条上面那版只走 joy；300 步的并存测试在速率翻倍下
+  // 仍然满足 curiosity > 0.35；"并存向量互不清零"那条把 curiosity 的目标设成其当前值，
+  // k 取多少都无所谓；黄金向量根本不调 update。
+  //
+  // 而"六个分量同速趋近"是 spec 4.5 的隐含前提：情绪向量的意义在于六个分量
+  // 处在**同一个时间尺度**上，这样才能读出"害怕 0.7 + 好奇 0.4"这种稳定的组合。
+  // 若某个分量单独快一倍，那只生物的身体语言会随时间飘移成另一种情绪配比，
+  // 而没有任何一处报错。
+  const e = createEmotions();
+  // 同时点亮两个分量，且给它们**不同**的目标值：这样"共用 k"与"各自缩放"
+  // 会产生可区分的数值，而不是恰好相等。
+  const target = { ...createEmotions(), joy: 1, curiosity: 0.5 };
+  update(e, target, 1 / 60);
+
+  const k = 1.6 / 60;
+  // joy: 0 + (1 - 0) * k = k
+  assert.ok(Math.abs(e.joy - k) < 1e-12, `joy = ${e.joy}，期望 ${k}`);
+  // curiosity: 0 + (0.5 - 0) * k = 0.5k —— 比例关系必须与 joy 完全一致
+  assert.ok(Math.abs(e.curiosity - 0.5 * k) < 1e-12,
+    `curiosity = ${e.curiosity}，期望 0.5×${k} = ${0.5 * k}`);
+  // 直接比对推进量之比：这排除了"两个分量各自硬编码成恰好正确"的巧合
+  assert.ok(Math.abs(e.joy / e.curiosity - 2) < 1e-12,
+    `joy/curiosity = ${e.joy / e.curiosity}，期望恰为 2（目标比 1 : 0.5）`);
+  // 其余四个分量仍须纹丝不动
+  for (const key of EMOTION_KEYS) {
+    if (key !== 'joy' && key !== 'curiosity') {
+      assert.equal(e[key], 0, `${key} 被无关的趋近改动了`);
+    }
+  }
+});
+
 test('computeTargets 的黄金向量：六个分量的全部内联系数被一次钉住', () => {
   // brief 对 computeTargets 的断言全是**方向性**的：joy > 0.5、anger > 0、
   // brave.fear < timid.fear、arousal > 0.3。方向对量级毫无约束力 ——
@@ -467,7 +539,17 @@ test('computeTargets 的黄金向量：六个分量的全部内联系数被一�
   //
   // 输入刻意不走 decode(randomGenome(...))：那条路径的 personality 由 rng 决定，
   // 期望值无法手算（needs.test.js 的 neutralTraits 注释里写过同一条理由）。
-  // 这里只给 computeTargets 实际读取的字段。
+  // 这里给的是 computeTargets 会读的字段，**外加三个刻意不被读取的字段**：
+  // needs.social 与 personality.clingy / gluttonous。
+  // computeTargets 只读 needs.hunger / energy / safety、ctx 五项、
+  // 以及 personality 的 irritable / bold / curious / libido。
+  //
+  // 那三个多余字段不是疏忽，而是哨兵：clingy 只调制社交需求的上升速率
+  // （spec 4.8 / needs.js），gluttonous 只调制饥饿速率，social 只喂 needs 层 ——
+  // 它们本就不该出现在情绪目标的推导里。把它们摆在这里并且给足非零值，
+  // 一旦将来有人给它们接上一个系数（例如"孤独也让人不开心"），
+  // 下面六组期望值会立刻变红，改动者被迫来这里显式更新数字并说明理由。
+  // 少了这三个字段，那种改动会静默通过。
   const CASES = [
     {
       name: '六路输入全开',

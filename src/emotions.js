@@ -24,8 +24,15 @@
 import { CONFIG } from './config.js';
 
 // 恰好六个分量。affection 不在这里 —— 它是 memory 的关系性数值（spec 4.5）。
-export const EMOTION_KEYS = ['joy', 'anger', 'fear', 'curiosity', 'sleepy', 'arousal'];
-export const EVENT_KINDS = Object.keys(CONFIG.emotions.eventMagnitude);
+//
+// 两个数组都冻结：它们会被 Task 9 / Task 10 导入，而一次意外的就地
+// .sort() / .push() / .reverse() 会静默改变分量集合或 dominant() 的平局顺序
+// （严格 > 配 bestV=0 起手 ⇒ 平局取数组中靠前者）。这与 src/config.js 深冻结
+// 共享常量是同一条纪律；needs.js 不导出键数组，所以这里是本项目第一例。
+export const EMOTION_KEYS = Object.freeze(
+  ['joy', 'anger', 'fear', 'curiosity', 'sleepy', 'arousal'],
+);
+export const EVENT_KINDS = Object.freeze(Object.keys(CONFIG.emotions.eventMagnitude));
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
@@ -71,26 +78,30 @@ export function computeTargets(needs, ctx, traits) {
 // 而真正的指数趋近需要 k = 1 - exp(-inertia * dt)。实测（inertia = 1.6，
 // 从 0 趋近 1，推进 1 模拟秒）：
 //
-//     60 步 × dt=1/60  →  0.8024
-//      1 步 × dt=1    →  1.0000      （k 被 min 夹到 1，一步跳到目标）
+//     60 步 × dt=1/60  →  0.802441      （k 线性形式）
+//     60 步 × dt=1/60  →  0.798103      （k 指数形式，差 0.54%）
+//      1 步 × dt=1    →  1.000000      （k 被 min 夹到 1，一步跳到目标）
 //
 // 所以本模块**刻意没有**"结果与时间步长无关"的测试，也不该有：那样一条测试
 // 在当前公式下永远不可能通过，写出来只会是一条被迫放宽到毫无约束力的假断言。
-// （计划 spec 追溯表把该测试列给了 Task 4，这一条已作为计划缺陷上报，见 task-4-report.md。）
+// 取而代之的是一条**特征化测试**（'update 的步长非等价性被如实钉住'），
+// 它断言的是这个不等价本身，并把幅度量化 —— 改公式会让它变红，
+// 提醒改动者同步这里的所有数字。
 //
-// 为什么这不是 bug：Task 10 的 tickWorld(world, dt) 只是把 dt 透传下来，
-// 真正的固定步长累加器在计划 2 的 main.js 里（计划 line 5688 明确：
-// "Task 10 由计划 2 的 main.js 实现"），它把 dt 钉死在 CONFIG.fixedDt = 1/60。
-// dt 恒定 ⇒ 结果确定可复现，这正是本项目要的性质。
-//
-// ⚠️ 给计划 2 的 main.js 的硬性要求：**timeScales（0.5/1/2/4）必须用"子步进"实现**，
-// 即每帧跑 N 个 fixedDt 子步，绝不能改成把 dt 放大。若把 dt 放大到 4/60，
-// 情绪推进会变成 0.8158 而非 0.8024（约 1.7% 偏差），4× 快进下的生物
-// 会与 1× 下表现得不同 —— 而 needs.decay 是线性速率，不会有这个问题，
-// 所以这个偏差只会出现在情绪层，格外难查。
+// 前向欧拉不是疏漏而是 brief 逐字指定的形式，改成指数形式属于计划级决定。
+// 它之所以安全：dt 在运行时恒为 CONFIG.fixedDt = 1/60，dt 恒定 ⇒ 结果确定可复现。
+// 固定步长累加器与倍速（timeScales）的实现要求记在计划里，不在这里 ——
+// 源码注释不是跨计划交接的载体，它会腐烂且没有任何东西能强制它。
 export function update(emotions, targets, dt) {
   const k = Math.min(1, CONFIG.emotions.inertia * dt);
   for (const key of EMOTION_KEYS) {
+    // 防御性 clamp，在当前所有调用路径上**不可达**：两个操作数恒在 [0,1]
+    // （createEmotions 给 0，computeTargets 的六个输出各自过了 clamp01），
+    // k 又被 min 夹在 [0,1]，凸组合不可能越界。删掉它测试依然全绿 ——
+    // 这是刻意的，我们不为不可达分支伪造测试。
+    // 对比：applyEvent 里那个 clamp 是**承重**的（事件冲击可以叠加越界），
+    // 删掉它会有两条测试变红。这个不对称值得写下来，否则下一个人
+    // 要么误以为它有保护，要么在没有依据的情况下把它删掉。
     emotions[key] = clamp01(emotions[key] + (targets[key] - emotions[key]) * k);
   }
 }
@@ -110,10 +121,15 @@ export function update(emotions, targets, dt) {
 // 这与 src/rng.js 里 pick([]) 改为抛错、needs.mostUrgent 不返回 undefined 是同一类决定：
 // 契约要覆盖全部输入，而不是只覆盖"看起来合理"的输入。
 export function applyEvent(emotions, kind, scale = 1) {
-  const deltas = Object.hasOwn(CONFIG.emotions.eventMagnitude, kind)
-    ? CONFIG.emotions.eventMagnitude[kind]
-    : undefined;
-  if (!deltas) throw new Error(`未知情绪事件: ${kind}`);
+  // 先判自有属性再取一次值：Object.hasOwn 排除了原型链上的
+  // constructor / toString / valueOf / hasOwnProperty 等键（它们取出来是真值，
+  // `!deltas` 拦不住，会让 applyEvent 静默地什么都不做而不抛错）。
+  // 不再保留 `!deltas` 兜底：hasOwn 为真时取到的必然是配置里写的对象，
+  // 而"自有属性但值为 null"是 CONFIG 自身的配置错误，不该被报成"未知情绪事件"。
+  if (!Object.hasOwn(CONFIG.emotions.eventMagnitude, kind)) {
+    throw new Error(`未知情绪事件: ${kind}`);
+  }
+  const deltas = CONFIG.emotions.eventMagnitude[kind];
   for (const [key, delta] of Object.entries(deltas)) {
     emotions[key] = clamp01(emotions[key] + delta * scale);
   }
