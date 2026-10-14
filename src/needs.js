@@ -1,6 +1,6 @@
 // needs.js —— 四条匮乏度（deprivation）随时间的线性积分，受基因性状调制。
 //
-// 模块级契约（Task 10 的 sim 是唯一消费者，动这个文件之前先读）：
+// 模块级契约（Task 10 的 sim 是主要消费者，动这个文件之前先读）：
 // 所有 mutator —— decay / feed / startle / comfort —— 都**原地修改**传入的 needs 对象，
 // 并且**返回 undefined**。它们不返回新对象，也不复制。所以调用方必须写：
 //

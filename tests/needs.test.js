@@ -54,7 +54,7 @@ test('时间流逝使饥饿上升', () => {
   assert.ok(n.hunger > 0);
 });
 
-test('长时间无人照料：需求饱和于边界且始终有限', () => {
+test('长时间无人照料：需求饱和于边界、不溢出、不变负', () => {
   // 这条测试曾经叫"约 120 秒饥饿升到可观水平但不越界"，断言 hunger > 0.4 && <= 1。
   // 那个名字是假的：按真实速率，hunger 在约 108.5s 就撞到上界 clamp，
   // 之后一直停在 1，所以断言检验的是 clamp01 而不是速率 —— 把 hungerRate
@@ -80,11 +80,19 @@ test('长时间无人照料：需求饱和于边界且始终有限', () => {
   // energy 与 social 在 600s 下同样饱和于 1，这里只要求它们合法，
   // 免得把初值/速率的任何调整都变成对这条测试的破坏。
   for (const [k, v] of Object.entries(n)) {
-    assert.ok(v >= 0 && v <= 1, `${k} 越界: ${v}`);
-    // 这一条比看上去重要：clamp01 会原样放过 NaN（NaN < 0 与 NaN > 1 都是 false），
-    // 而 mostUrgent() 里 NaN > bestV 也恒为 false —— 于是一个 NaN 需求会
-    // 在行为评分里静默失去发言权，全程不报错。长时间积分正是它最可能现形的地方。
+    // 有限性检查**必须排在范围检查之前**，否则它永远不会是那条失败的断言：
+    // NaN >= 0 与 NaN <= 1 都是 false，Infinity <= 1 也是 false，
+    // 所以下面那条范围断言会先把所有非有限值拦下来，报出来的却是"越界"
+    // 而不是"非有限数"—— 诊断信息就丢了。放在前面才能让失败说对话。
+    //
+    // 说实话：这条断言在本测试的输入下抓不到东西（初值、dt、性状全是有限数，
+    // 要产生 NaN 得先有实现层面的回归，而那种回归范围断言也会拦下）。
+    // 它的价值是**报错措辞**，不是探测能力。真正的 NaN 隐患在别处：
+    // clamp01 会原样放过 NaN，而 mostUrgent() 里 NaN > bestV 恒为 false，
+    // 于是一个 NaN 需求会在行为评分里静默失去发言权且全程不报错 ——
+    // 那个必须在 Task 10 跑完模拟后统一断言，而不是在 60Hz 热路径里逐帧查。
     assert.ok(Number.isFinite(v), `${k} 非有限数: ${v}`);
+    assert.ok(v >= 0 && v <= 1, `${k} 越界: ${v}`);
   }
 });
 
@@ -371,24 +379,29 @@ test('ctx.resting 与 ctx.moving 同时为真时，休息优先', () => {
   // Task 10 理论上不该构造出这种 ctx，但规则本身值得钉住：
   // 它是"休息能恢复精力"这条玩家可感知的承诺的前提。
   // energy 速率不受任何性状调制，故这里用 PINNED_TRAITS 只为形状一致。
-  const HORIZON = 20;   // 与量级钉桩测试同一窗口，便于对照三个分支的字面量
-
+  // 窗口刻意复用 PIN_HORIZON 而不是再写一个字面量 20：下面 0.16 / 0.584 两个
+  // 期望值都是按这个窗口算出来的（0.5 - 0.017×20、0.5 + 0.0042×20）。
+  // 早先这里另声明了一个 const HORIZON = 20，注释还写着"与量级钉桩测试同一窗口"
+  // —— 那正是本轮刚为 KEYS 修掉的重复字面量漂移：一旦 PIN_HORIZON 被重新调过，
+  // 这个局部常量不会跟着变，注释变成假话，而两个字面量静悄悄地不再对应任何东西，
+  // 且没有任何测试会失败。
   const both = createNeeds(); both.energy = 0.5;
-  decay(both, HORIZON, PINNED_TRAITS, { moving: true, resting: true, companions: 0 });
+  decay(both, PIN_HORIZON, PINNED_TRAITS, { moving: true, resting: true, companions: 0 });
 
   const restingOnly = createNeeds(); restingOnly.energy = 0.5;
-  decay(restingOnly, HORIZON, PINNED_TRAITS, { moving: false, resting: true, companions: 0 });
+  decay(restingOnly, PIN_HORIZON, PINNED_TRAITS, { moving: false, resting: true, companions: 0 });
 
   const movingOnly = createNeeds(); movingOnly.energy = 0.5;
-  decay(movingOnly, HORIZON, PINNED_TRAITS, { moving: true, resting: false, companions: 0 });
+  decay(movingOnly, PIN_HORIZON, PINNED_TRAITS, { moving: true, resting: false, companions: 0 });
 
-  // 0.5 - 0.017×20 = 0.16。用容差而非 assert.equal：IEEE-754 下它算出
-  // 0.15999999999999998，exact 相等会假失败。
+  // 0.5 - 0.017×PIN_HORIZON = 0.5 - 0.34 = 0.16。用容差而非 assert.equal：
+  // IEEE-754 下它算出 0.15999999999999998，exact 相等会假失败。
   assert.ok(Math.abs(both.energy - 0.16) < 1e-9,
     `两者同真时 energy = ${both.energy}，期望走休息速率得 0.16`);
-  // 与"只休息"逐位相同 —— 这才是"优先"的确切含义
+  // 与"只休息"逐位相同 —— 这才是"优先"的确切含义。
+  // 这里用 exact 相等是刻意且更强的：两边算的是同一个表达式，应当逐位一致。
   assert.equal(both.energy, restingOnly.energy, 'resting 应当压过 moving，结果须与纯休息一致');
-  // 反面对照：若规则被调换，both 会等于这个值（0.5 + 0.0042×20 = 0.584）
+  // 反面对照：若规则被调换，both 会等于这个值（0.5 + 0.0042×PIN_HORIZON = 0.584）
   assert.ok(Math.abs(movingOnly.energy - 0.584) < 1e-9,
     `纯移动时 energy = ${movingOnly.energy}，期望 0.584`);
   assert.notEqual(both.energy, movingOnly.energy,
@@ -399,6 +412,29 @@ test('mostUrgent 返回最匮乏的一条', () => {
   assert.equal(mostUrgent({ hunger: 0.2, energy: 0.9, social: 0.4, safety: 0.1 }), 'energy');
   assert.equal(mostUrgent({ hunger: 0.2, energy: 0.1, social: 0.4, safety: 0.95 }), 'safety');
   assert.equal(mostUrgent({ hunger: 0.9, energy: 0.1, social: 0.4, safety: 0.2 }), 'hunger');
+});
+
+test('mostUrgent 平局时按 KEYS 顺序取先者（钉住 createNeeds 的键序）', () => {
+  // 上面三条断言用的都是互不相等的值，所以它们对 KEYS 顺序完全不敏感；
+  // 而"全零返回 hunger"那条也不敏感 —— mostUrgent 是从字面量 'hunger' 起手、
+  // 再用严格 > 比较的，全零时没有任何 needs[k] > 0 成立，于是无论 KEYS
+  // 是什么顺序都会返回那个起手的字面量。
+  //
+  // 所以此前**没有任何测试**钉住顺序。而顺序现在是有行为后果的：
+  // KEYS 已改为 Object.keys(createNeeds())，于是 createNeeds() 对象字面量里
+  // 键的书写顺序（一个看起来纯属美观的东西）直接决定了平局时谁胜出。
+  // 谁要是哪天为了"按初值分组"重排那个字面量，77 条测试会全绿，
+  // 而行为评分里的平局裁决已经悄悄换了人 —— 正是 KEYS 注释想防的那类静默失败，
+  // 只是下沉了一层。这两条断言让那条注释里"被测试钉住"的说法变成真的。
+  //
+  // 当前顺序 hunger > energy > social > safety：饿死优先于累死，
+  // 累死优先于孤独，孤独优先于不安。
+  assert.equal(mostUrgent({ hunger: 0.2, energy: 0.5, social: 0.5, safety: 0 }), 'energy',
+    'energy 与 social 平局时应取 KEYS 中靠前的 energy');
+  assert.equal(mostUrgent({ hunger: 0.2, energy: 0.3, social: 0.3, safety: 0.3 }), 'energy',
+    '三条平局时仍应取最靠前的 energy');
+  assert.equal(mostUrgent({ hunger: 0.2, energy: 0.1, social: 0.6, safety: 0.6 }), 'social',
+    'social 与 safety 平局时应取 social');
 });
 
 test('mostUrgent 全零时返回 hunger（稳定的默认值，不给 undefined）', () => {
