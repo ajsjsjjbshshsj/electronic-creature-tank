@@ -1,0 +1,9 @@
+{
+  "name": "electronic-creature-tank",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/",
+    "simulate": "node tests/simulate.mjs"
+  }
+}
