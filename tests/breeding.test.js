@@ -168,6 +168,34 @@ test('registerKinship 不受调用顺序影响：已存在 kinship 0 的条目�
   assert.equal(kinshipBetween(baby.memory, 'M'), KINSHIP.mother);
 });
 
+test('registerKinship 不用 null 覆盖已确立的 role（0.25 档不得抹掉 offspring）', () => {
+  // 强制写入 kinship 时，role 只在算出**非 null** 时才覆盖 ——
+  // 否则 0.25 档（祖孙/半同胞，在 ROLES 里没有对应角色，算出来就是 null）
+  // 会用一个 null 把已确立的 role 抹掉，而那正是"它是我的谁"这类一旦确立就不该变的信息。
+  // 这条守的是那半个 if：把它改成无条件 `e.role = role`，全套测试原本照样绿
+  // （因为当时唯一的 null 写入，其目标条目的 role 本来就是 null）。
+  const r = rng();
+  // 谱系：祖母 G → 母亲 M → 雏体 B，所以 G 对 B 是祖孙档（0.25）
+  const G = createCreature({ id: 'G', name: 'G', age: 900, rng: r });
+  const M = createCreature({ id: 'M', name: 'M', age: 700, rng: r, mother: 'G' });
+  const baby = createCreature({
+    id: 'B', name: 'B', age: 0, stage: 'hatchling', rng: r, mother: 'M',
+  });
+  const byId = (id) => ({ G, M, B: baby }[id] || null);
+
+  // 前置条件：G 记忆里已有一条带 role 的条目
+  ensure(G.memory, 'B', { kinship: 0.25, role: 'offspring' });
+  assert.equal(get(G.memory, 'B').role, 'offspring', '前置条件：role 已确立');
+  assert.equal(kinshipOf(baby, G, byId), KINSHIP.grandparent, '前置条件：G 对 B 是祖孙档');
+
+  registerKinship(baby, [G, M], byId);
+
+  assert.equal(get(G.memory, 'B').kinship, KINSHIP.grandparent, '祖孙档应被写入');
+  assert.equal(get(G.memory, 'B').role, 'offspring',
+    '祖孙档算出的 role 是 null，不得用它覆盖已确立的 role');
+  assert.equal(get(baby.memory, 'M').role, 'mother', '同一轮里母亲的 role 仍应正常写入');
+});
+
 test('近亲回避在真实谱系数据上生效（端到端，含对照组）', () => {
   // 这是交接要求第 5 条的端到端验收：两只**只通过 lineage 相连**的同胞，
   // 在没有任何手写 kinship 的情况下必须无法求偶。
@@ -236,7 +264,8 @@ test('好感低于 rejectionAffection 时拒绝开始求偶（阈值两侧 + 双
   // 原计划漏了这条门槛：`rejectionAffection` 被列进 Consumes，却只在 Task 10 里
   // 当"被拒后的记忆惩罚"用，于是 affection = -1 的一对也会开始完整的求偶仪式。
   const { a, b } = pair();
-  assert.equal(CONFIG.rejectionAffection, -0.15, 'spec §11 的值');
+  assert.equal(CONFIG.rejectionAffection, -0.15,
+    '该值由 tests/config.test.js 钉住（spec §11 里并没有这个常量，原注释的出处写错了）');
   const setAff = (v) => {
     get(a.memory, 'b').affection = v;
     get(b.memory, 'a').affection = v;
@@ -390,11 +419,26 @@ test('courtshipScore 对不可求偶的一对返回 0', () => {
 });
 
 test('好感越高分数越高', () => {
-  const p1 = pair();
-  const p2 = pair();
-  adjust(p2.a.memory, 'b', 0.4, 0);      // p2 好感更高
-  adjust(p2.b.memory, 'a', 0.4, 0);
-  assert.ok(courtshipScore(p2.a, p2.b, OK) > courtshipScore(p1.a, p1.b, OK));
+  // ⚠️ 原始 brief 的写法是"造两对（p1、p2），只抬高 p2 的好感再比较"，
+  // 与下面 arousal 那条是**同一个缺陷**：pair() 每次用新种子造两只生物，
+  // courtshipWillingness（由 libido 决定）是评分里的**纯随机乘数**，会盖过要测的效应。
+  // 实测把 uid 从 0 起按对穷举，约 10/60 的对会因此变红 ——
+  // 也就是说它是否通过取决于文件里前面消耗了多少次 uid，加一条用例就可能翻面。
+  // 改为**同一对生物**的受控比较。
+  const { a, b } = pair();
+  const low = courtshipScore(a, b, OK);          // pair() 默认好感 0.6
+  adjust(a.memory, 'b', 0.4, 0);
+  adjust(b.memory, 'a', 0.4, 0);
+  const high = courtshipScore(a, b, OK);         // 1.0
+  assert.ok(high > low, `提高好感后分数应上升: ${low} → ${high}`);
+
+  // 反向：降低好感应使分数下降（且仍高于拒绝阈值，以免测到的是 canCourt 的闸门）
+  adjust(a.memory, 'b', -0.7, 0);
+  adjust(b.memory, 'a', -0.7, 0);
+  const mid = courtshipScore(a, b, OK);          // 0.3
+  assert.ok(mid < high, `降低好感后分数应下降: ${high} → ${mid}`);
+  assert.ok(mid < low, '0.3 低于初始的 0.6，故也应低于 low');
+  assert.ok(mid > 0, '0.3 仍在拒绝阈值之上，不应为 0（与"低于 -0.15 被拒"区分开）');
 });
 
 test('arousal 越高分数越高', () => {
@@ -436,6 +480,34 @@ test('达种群上限时分数被显著压低但不归零（spec 4.12 第 6 条�
   const atCap = courtshipScore(a, b, { population: 24, populationCap: 24, distance: 0.05 });
   assert.ok(atCap < below * 0.25, `上限时应大幅压低: ${below} → ${atCap}`);
   assert.ok(atCap > 0, '不归零 —— 它们仍"彼此不太感兴趣"地尝试，而不是被代码禁止');
+  // 两侧夹住 0.12 这个幅度：原来只有 `< below * 0.25` 是**单侧**的，
+  // 任何 > 0.75 的乘数都能通过 —— 于是"渐变到 12%"这个量级只活在注释里。
+  assert.ok(atCap > below * 0.10, `上限时不应压到低于 10%: 比值 ${atCap / below}`);
+  assert.ok(atCap < below * 0.15, `上限时也不应高于 15%: 比值 ${atCap / below}`);
+});
+
+test('种群超过上限时分数仍不为 0（不得退化成硬阻断）', () => {
+  // ⚠️ 这是**可达状态**，不是理论情形：卵的 viable 是在"产卵那一刻"判定的
+  // （layEggs 的 opts.atPopulationCap），而孵化发生在 60 秒后，期间种群可能已超过上限
+  // （addCreature 刻意不检查上限）。所以"在 cap-1 时产下 1~3 枚卵"会让种群冲到 cap+2。
+  //
+  // 旧公式在 loadRatio > 1 时 crowding 变负（实测 25/24 → -0.002222），
+  // 再被 courtshipScore 末尾的 Math.max(0, …) 夹成**精确 0** ——
+  // 那正是 spec 4.12 第 6 条禁止的硬阻断（要的是压低评分，不是归零）。
+  const { a, b } = pair();
+  const atCap = courtshipScore(a, b, { population: 24, populationCap: 24, distance: 0.05 });
+  for (const pop of [25, 26, 30, 100]) {
+    const over = courtshipScore(a, b, { population: pop, populationCap: 24, distance: 0.05 });
+    assert.ok(over > 0, `population ${pop}/24 时分数不得为 0（硬阻断），实际 ${over}`);
+    assert.ok(Math.abs(over - atCap) < 1e-12,
+      `超过上限后应与"恰好满"同分（不再继续压低）: ${atCap} vs ${over}`);
+  }
+  // 换手机上限（16）同样成立 —— 上限是可配置的，不能只在 24 下对
+  const atCapMobile = courtshipScore(a, b, { population: 16, populationCap: 16, distance: 0.05 });
+  const overMobile = courtshipScore(a, b, { population: 17, populationCap: 16, distance: 0.05 });
+  assert.ok(atCapMobile > 0, '手机上限下也不能归零');
+  assert.ok(overMobile > 0, '手机上限超员时也不得为 0');
+  assert.ok(Math.abs(overMobile - atCapMobile) < 1e-12, '手机上限超员时应与恰好满同分');
 });
 
 test('接近上限时分数就开始下降（渐变而非断崖）', () => {
@@ -446,6 +518,19 @@ test('接近上限时分数就开始下降（渐变而非断崖）', () => {
   for (let i = 1; i < scores.length; i++) {
     assert.ok(scores[i] <= scores[i - 1] + 1e-9, `种群越密分数应越低: ${scores}`);
   }
+  // ⚠️ 只测"单调不增"是**单侧**的：把线性斜坡换成断崖
+  // （`loadRatio < 0.7 ? 1 : 0.12`）整组仍然单调不增，全套测试照样绿 ——
+  // 于是"渐变到 12%"这个**形状**只活在注释里。补一条中间的严格夹逼。
+  const pop = (p) => courtshipScore(a, b, { population: p, populationCap: 24, distance: 0.05 });
+  const below = pop(10);
+  const mid = pop(20);
+  const atCap = pop(24);
+  assert.ok(mid < below, `20/24 应严格低于 10/24（断崖实现在此处会相等）: ${mid} vs ${below}`);
+  assert.ok(mid > atCap, `20/24 应严格高于 24/24（断崖实现在此处会相等）: ${mid} vs ${atCap}`);
+  // 转折点 0.7 用**两侧夹住**。不要用"16.8 与 16.56 得分相同"来推：
+  // 任何 ≤ 0.69 的阈值都会给出同样的"相同"结果，那样推不出转折点在哪。
+  assert.ok(Math.abs(pop(16.79) - below) < 1e-9, '略低于 70% 容量（16.79/24）应与低密度同分');
+  assert.ok(pop(16.81) < below, '略高于 70% 容量（16.81/24）应已开始下降');
 });
 
 test('距离越远分数越低', () => {
@@ -637,6 +722,33 @@ test('layEggs 把双亲互记为 mate、并预留 offspring 关联', () => {
   assert.equal(a.lineage.mates.filter((x) => x === 'b').length, 1, '重复产卵不该重复记录 mate');
 });
 
+test('layEggs 把 mate 关系写进双方的关系记忆（spec 4.8 伴侣慢衰减的唯一生产者）', () => {
+  // ⚠️ 在本轮修复之前，全项目**没有任何代码**写过 role: 'mate'
+  // （grep 只在 memory.js 的 ROLES 定义里出现）。
+  // 后果是 spec 4.8 那句"长期伴侣的衰减极慢、近乎不忘"完全落空：
+  // memory.decay 判定"是否亲属"看的是 `e.role !== null || e.kinship >= 0.25`，
+  // 而伴侣的 kinship 按规定就是 0（KINSHIP.mate = 0 —— 配偶没有血缘），
+  // 于是 role 不写就两条通道都不命中，伴侣会按**普通速率**淡忘，
+  // 与 spec 明文相悖，且全链路不报错。
+  const { a, b } = pair();
+  const beforeA = get(a.memory, 'b');
+  assert.equal(beforeA.kinship, 0, '前置条件：产卵前只是普通关系');
+  assert.equal(beforeA.role, null);
+
+  layEggs(a, b, rng(), { atPopulationCap: false });
+
+  assert.equal(get(a.memory, 'b').role, 'mate', 'a 应把 b 记为 mate（role 是慢衰减的开关）');
+  assert.equal(get(b.memory, 'a').role, 'mate', 'b 侧同理');
+  assert.equal(get(a.memory, 'b').kinship, KINSHIP.mate, 'mate 的 kinship 按 spec 是 0');
+  // 反向：写 mate 不得抹掉互动累积出来的好感/熟悉度
+  assert.ok(get(a.memory, 'b').affection > 0, '写 mate 不应重置 affection');
+  assert.ok(get(a.memory, 'b').familiarity > 0, '写 mate 不应重置 familiarity');
+  // 关键交互：mate 的 kinship 是 0，所以**配偶不算近亲、仍可再求偶**
+  // （spec 4.8 明说 mate 为 0 就是"不能因为'它是我伴侣'就误判为近亲而拒绝交配"）
+  assert.ok(kinshipBetween(a.memory, 'b') <= CONFIG.kinshipMateMax,
+    '配偶不得被判成近亲，否则繁殖过的两只会从此绝育、种群静默崩溃');
+});
+
 // ---------- 孵化 ----------
 
 test('tickEgg 在卵期未满时返回 incubating', () => {
@@ -650,6 +762,22 @@ test('tickEgg 在卵期满时返回 ready', () => {
   const { a, b } = pair();
   const [egg] = layEggs(a, b, rng(), { atPopulationCap: false });
   assert.equal(tickEgg(egg, CONFIG.stage.egg + 0.1), 'ready');
+});
+
+test('tickEgg 的 ready 边界是包含的（恰好等于 stage.egg 就 ready）', () => {
+  // 上面那条用 `stage.egg + 0.1` 越过边界，所以它**测不出** `>=` 与 `>` 的区别：
+  // 把实现改成 `egg.age > CONFIG.stage.egg` 全套测试照样绿，
+  // 而那会让孵化整整晚一帧（在 60Hz 下约 16.7ms，视觉上无所谓，
+  // 但"恰好到期"这条契约就没人守了）。
+  // 注意：不可孵化的卵走的是**早退分支**（`if (!egg.viable) return 'failed'`），
+  // 根本走不到年龄比较，所以只测 failed 那条也守不住这里。
+  const { a, b } = pair();
+  const [egg] = layEggs(a, b, rng(), { atPopulationCap: false });
+  assert.equal(tickEgg(egg, CONFIG.stage.egg), 'ready', '恰好到期即应 ready（边界包含）');
+  // 反向：差一点点不能 ready，否则就是提前孵化
+  const { a: a2, b: b2 } = pair();
+  const [egg2] = layEggs(a2, b2, rng(), { atPopulationCap: false });
+  assert.equal(tickEgg(egg2, CONFIG.stage.egg - 1e-9), 'incubating', '差一点点不应 ready');
 });
 
 test('不可孵化的卵返回 failed 而不是 ready（spec 4.12 第 6 条）', () => {

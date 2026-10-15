@@ -9,8 +9,10 @@ let eggSeq = 0;
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
-// 求偶的前置门槛。全部是硬性事实（阶段、血缘、距离、状态），
-// 不含任何"意愿"判断 —— 意愿由 courtshipScore 的连续评分表达。
+// 求偶的前置门槛。前三项是硬性事实（阶段、血缘、距离）；
+// 后两项（arousal/hunger/fear 与好感）其实是**意愿**判断，但它们在这里也是门槛式的 ——
+// 连续评分那部分由下面的 courtshipScore 负责。
+// （此处原先写"不含任何意愿判断"，与下面那段 willingness 代码自相矛盾，已修正。）
 export function canCourt(a, b, opts) {
   if (a === b || a.id === b.id) return false;
   if (!canBreed(a) || !canBreed(b)) return false;
@@ -52,15 +54,21 @@ export function canCourt(a, b, opts) {
 // 归零意味着代码禁止了一件本该由世界规则解释的事 —— 那是穿帮。
 //
 // 渐变而非断崖：从 70% 容量开始线性衰减，该乘数到满容量时降到 0.12 倍
-// （实测：population 8/24 时得分 2.5182124518，24/24 时 0.3021854942，比值恰好 0.12；
-//   70%（16.8）与 69%（16.56）的得分相同，说明转折点确实在 0.7）。
+// （实测：population 8/24 时得分 2.5182124518，24/24 时 0.3021854942，比值恰好 0.12）。
+// 转折点 0.7 由测试用 0.6999 / 0.7001 夹住（不是用 16.8 与 16.56"得分相同"来推 ——
+// 任何 ≤ 0.69 的阈值都会给出同样的相同结果，那样推不出转折点在哪）。
 export function courtshipScore(a, b, opts) {
   if (!canCourt(a, b, opts)) return 0;
 
   const loadRatio = opts.populationCap > 0 ? opts.population / opts.populationCap : 0;
+  // ⚠️ loadRatio 必须**夹到 1**：卵的 viable 是在"产卵那一刻"定的，而孵化发生在 60 秒后，
+  // 期间种群可能已经超过上限（addCreature 刻意不检查上限）。未夹的 loadRatio 会让
+  // crowding 变成负数，再被下面那个 Math.max(0, …) 夹成**精确 0** ——
+  // 那就成了 spec 4.12 第 6 条明令禁止的硬阻断（要的是"评分被压低"，不是归零）。
+  // 下限 0.12 是第二道保险，保证"超上限"与"恰好满"给同样的分。
   const crowding = loadRatio < 0.7
     ? 1
-    : 1 - ((loadRatio - 0.7) / 0.3) * 0.88;      // 0.7→1.0 时从 1 降到 0.12
+    : Math.max(0.12, 1 - ((Math.min(1, loadRatio) - 0.7) / 0.3) * 0.88);   // 0.7→1.0 降到 0.12，超过则保持 0.12
 
   const affection = (affectionFor(a.memory, b.id) + affectionFor(b.memory, a.id)) / 2;
   const willingness = (a.thresholds.courtshipWillingness + b.thresholds.courtshipWillingness) / 2;
@@ -126,6 +134,24 @@ export function layEggs(mother, father, rng, opts) {
   // 双亲互记为 mate。用 includes 去重，否则反复产卵会把 mates 塞满同一个 id。
   if (!mother.lineage.mates.includes(father.id)) mother.lineage.mates.push(father.id);
   if (!father.lineage.mates.includes(mother.id)) father.lineage.mates.push(mother.id);
+
+  // 同时把 mate 关系**写进双方的关系记忆** —— 这是 spec 4.8
+  // "长期伴侣的衰减极慢、近乎不忘"那条通道的**唯一生产者**。
+  // 在此之前全项目没有任何代码写过 role: 'mate'（grep 只在 ROLES 定义里出现），
+  // 而 memory.decay 判定"是否亲属"看的是 `e.role !== null || e.kinship >= 0.25`：
+  // 伴侣的 kinship 按规定是 0（KINSHIP.mate = 0 —— 配偶没有血缘，不能因"它是我伴侣"
+  // 就被判成近亲），所以 role 不写就两条通道都不命中，伴侣会按**普通速率**淡忘，
+  // 与 spec 明文相悖，且全链路不报错、不抛异常。
+  //
+  // 必须**强制写入**而不是只靠 ensure：双方的记忆条目此时已经存在（此前互动建的），
+  // 而 ensure 是幂等的、对已存在条目不会覆盖 kinship/role。
+  const writeMate = (owner, partnerId) => {
+    const e = ensure(owner.memory, partnerId, { kinship: KINSHIP.mate, role: 'mate' });
+    if (e.kinship !== KINSHIP.mate) e.kinship = KINSHIP.mate;
+    if (e.role !== 'mate') e.role = 'mate';
+  };
+  writeMate(mother, father.id);
+  writeMate(father, mother.id);
 
   return eggs;
 }
