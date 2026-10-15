@@ -148,8 +148,20 @@ test('lineage 记录父母且默认为空数组的 mates/offspring', () => {
 test('lineage 的 mates/offspring 不共享引用', () => {
   const a = mk({ id: 'a' });
   const b = mk({ id: 'b' });
+  // 用**变更**来区分共享与独立：如果两个实例共用一个数组，
+  // 往 a 里 push 就会在 b 里看到。仅断言两个各自为 [] 是证明不了独立的
+  // （那种断言对"模块级共享数组"同样成立）。
   a.lineage.offspring.push('x');
-  assert.equal(b.lineage.offspring.length, 0);
+  assert.equal(b.lineage.offspring.length, 0, 'offspring 不得共享');
+  a.lineage.mates.push('m');
+  assert.equal(b.lineage.mates.length, 0, 'mates 不得共享');
+  // 反向也确认一次：a 自己确实收到了这两个写入（否则上面的断言可能只是"两边都没写进去"）
+  assert.equal(a.lineage.offspring.length, 1);
+  assert.equal(a.lineage.mates.length, 1);
+  // 引用不等式的直接断言，作为上面对"共享"判定的补充
+  assert.notEqual(a.lineage.mates, b.lineage.mates);
+  assert.notEqual(a.lineage.offspring, b.lineage.offspring);
+  assert.notEqual(a.lineage, b.lineage);
 });
 
 test('stageForAge 按年龄正确切换（spec 4.11）', () => {
@@ -213,12 +225,18 @@ test('死亡后 ageCreature 不再推进（spec 8.1：死亡后不再 tick）', 
   assert.equal(c.dying, dyingAtDeath);
 });
 
-test('死亡只触发一次：alive 门控挡住后续 tick（dying 不被重置）', () => {
-  // 标题如实说明**是哪一条**在起作用：真正咬人的是 `if (!c.alive) return` 这道门控。
-  // 探针证明这条测试**抓不到**"在死亡分支里重写哨兵"—— 因为死亡分支里的赋值
-  // 在 `alive=false` 之后再也不会执行（不可达），所以那种改动不会让它变红。
-  // 门控本身是承重的：去掉它，每 tick 都会重走死亡分支把 dying 写回哨兵值，
-  // Task 10 的 `c.dying += dt` 就永远追不上 dissolveDuration，尸体永不消失。
+test('死亡后 dying 不被后续 tick 重置', () => {
+  // 这条测试**只**钉住一件事：死亡之后再多推几次，`dying` 仍等于死亡瞬间的值。
+  //
+  // ⚠️ 它**抓不到**去掉 `ageCreature` 里的 `if (!c.alive) return` 门控。
+  // 原因：门控去掉后，下一次 tick 会重走死亡分支，把 `dying` 再赋成同一个 `1e-6`，
+  // 于是 `dying === first` 依然成立（这条也没断言 age，所以 age 增长也发现不了）。
+  // 真正钉住那道门控的是上面那条 '死亡后 ageCreature 不再推进' —— 它断言的是
+  // **age 不再增长**。两条例的分工不同，别把功劳记错。
+  //
+  // 也顺带说明：这里曾经写过"去掉门控会让尸体永不消失"，那是**错的**
+  // —— 尸体溶散由 Task 10 的 `reapDead` 独立累加 `c.dying += dt`，与门控无关；
+  // 而 tickWorld 又会先跳过所有非存活个体。
   const c = mk();
   for (let i = 0; i < (totalLife + 5) * 60; i++) ageCreature(c, 1 / 60);
   const first = c.dying;
@@ -317,6 +335,19 @@ test('growthFactor 始终为正（体型不会变成 0 或负）', () => {
     c.age = age;
     assert.ok(growthFactor(c) > 0, `age ${age} 时 growthFactor = ${growthFactor(c)}`);
   }
+});
+
+test('growthFactor 对负年龄有下限（脏存档不得画出负尺寸的团块）', () => {
+  // 负年龄只可能来自脏存档（opts.age 为负，而 `opts.age || 0` 对负数不会兜底，
+  // 因为 -100 是 truthy）。没有下限的话 sizeOf 会返回负数，
+  // 表现层拿到负尺寸会画出一个翻转/退化的团块，且全链路不报错。
+  // 这条同时把上限扫描（上面那条只扫 0…1140）之外的一侧补上。
+  const g = (age) => growthFactor({ age });
+  assert.ok(Math.abs(g(-1) - 0.22) < 1e-12, '负年龄应夹到出生值 0.22');
+  assert.ok(Math.abs(g(-1e6) - 0.22) < 1e-12, '极大负值同样夹到 0.22');
+  assert.equal(g(-1000), g(0), '负年龄与 0 岁应给出完全相同的生长因子');
+  assert.ok(g(-1000) > 0, '无论多负都不得为负');
+  assert.ok(sizeOf({ age: -1000, traits: { size: 26 } }) > 0, 'sizeOf 不得为负');
 });
 
 test('sizeOf = traits.size × growthFactor', () => {

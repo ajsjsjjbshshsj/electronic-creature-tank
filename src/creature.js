@@ -59,14 +59,18 @@ export function createCreature(opts) {
     sick: false,
 
     // dying 与 alive 分工不同，别合并成一条读数：
-    //   dying —— 给表现层的"溶散进行中"秒数，非零即已开始
+    //   dying —— 给表现层的"溶散进行中"秒数，非零即已开始；由 Task 10 的 reapDead 累加
     //   alive —— 给逻辑的存活门控（本文件的 ageCreature、canBreed 都看它）
-    // 出生时必须是 0，不是死亡时那个非零哨兵 1e-6：Task 10 的
-    // `!c.alive && c.dying > 0 && !c.deathHandled` 会把"dying 非零"读成
-    // "这只刚死、还没结算"，而读档进来的尸体（alive=false）其死亡早已结算过
-    // （计划中 Task 10 关于 deathHandled 不进存档的说明）。出生值若为 1e-6，
-    // 读档会重放一次 onDeath，deaths 统计与哀悼被重复触发，全程不报错。
-    // 哨兵只在 ageCreature 首次判定死亡时写入。
+    // 出生时是 0：活着的东西没有"溶散进度"可言。
+    //
+    // ⚠️ 这里原先写过一条理由 —— "出生值若非零，会让读档进来的尸体满足
+    // `!c.alive && c.dying > 0 && !c.deathHandled` 从而重放 onDeath"。
+    // 经复查**不成立**，已删除：Task 10 的 tickWorld 在调用 tickCreature 之前就有
+    // `if (!c.alive || c.sick) continue;`，已经死掉的个体根本走不到那道闸门，
+    // 所以出生值取多少都不会导致读档重放死亡。那道闸门真正处理的是
+    // **同一 tick 内**刚被 ageCreature 判定死亡的个体。
+    // 留着一条"听起来合理但不可达"的理由，比没有理由更糟 —— 它会误导
+    // Plan 3 的存档作者去防一个不存在的问题。
     dying: 0,
 
     pos: { x: opts.x, y: opts.y },
@@ -108,10 +112,15 @@ export function stageForAge(age) {
   return 'dead';
 }
 
-// 年龄推进。死亡只触发一次：靠 alive 门控，
-// 保证 dying 不会被后续 tick 重置，表现层的溶散动画才能完整播完。
-// （若去掉这个门控，每 tick 都会重新走进死亡分支、把 dying 反复写回哨兵值，
-// Task 10 的 `c.dying += dt` 就永远追不上 dissolveDuration，尸体永不消失。）
+// 年龄推进。`if (!c.alive) return` 是**单元层面**的契约
+// （spec 8.1：死亡后不再 tick），由测试 '死亡后 ageCreature 不再推进' 钉住 ——
+// 那条断言的是 **age 不再增长**，这才是门控真正挡住的东西。
+//
+// ⚠️ 这里原先写过"去掉门控会让 dying 被反复写回哨兵值、尸体永不消失"，
+// 经复查**不成立**，已删除：尸体溶散由 Task 10 的 `reapDead` 独立负责
+// （它对所有 alive=false 的个体做 `c.dying += dt`，与本门控无关），
+// 而 tickWorld 又在调用 tickCreature 之前就跳过了所有非存活个体，
+// 所以整合运行里 ageCreature 根本不会被用在尸体上。
 export function ageCreature(c, dt) {
   if (!c.alive) return;
   c.age += dt;
@@ -141,7 +150,10 @@ export function ageCreature(c, dt) {
 // 五组端点/中点值全部由该条用 1e-12 容差钉住，"相邻采样不跳变"（|Δ| < 0.08）
 // 那条是单侧的，改斜率不会让它变红。
 export function growthFactor(c) {
-  const age = c.age;
+  // Math.max(0, …) 只挡负年龄：那只可能来自脏存档（opts.age 为负），
+  // 而负的 growthFactor 会让 sizeOf 返回负数、表现层画出一个负尺寸的团块。
+  // 合法路径上 age 从 0 起单调增长，所以这个下限不改变任何既有行为。
+  const age = Math.max(0, c.age);
   const h = BOUNDARIES[0];
   const j = BOUNDARIES[1];
   const a = BOUNDARIES[2];
