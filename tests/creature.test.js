@@ -20,6 +20,30 @@ test('STAGES 不含 egg（卵是独立实体）', () => {
   assert.ok(!STAGES.includes('egg'));
 });
 
+test('createCreature 拒绝非法的显式 stage（大小写错误不得静默产出不繁殖的生物）', () => {
+  // STAGES 的成员是**按字面量**比较的（canBreed 要 'adult'、isAdultLike 要 'adult'|'elder'、
+  // sim 的 motion 按名字查表），所以 'Adult' 这种大小写错误如果不拦，
+  // 会静默产出一只**永远不能繁殖、也不算成年**的生物 —— 不抛错、不报警，
+  // 症状只是"这只怎么一直不生"。读档路径（计划 3）尤其容易带进脏值。
+  // 与 memory.remember 校验 role ∈ ROLES 是同一条纪律。
+  for (const bad of ['Adult', 'ADULT', 'adult ', ' egg', 'egg', 'hatchlings', 1, {}, []]) {
+    assert.throws(() => mk({ stage: bad }), TypeError,
+      `stage = ${JSON.stringify(bad)} 必须抛错，不能静默接受`);
+  }
+  // 反面：五个合法成员（含 dead）都必须被接受，别把校验写得太严
+  for (const s of STAGES) {
+    assert.doesNotThrow(() => mk({ stage: s }), `${s} 是 STAGES 成员，应被接受`);
+  }
+  // 不传 / 传 undefined / 传 null 时都走 age 派生，不得抛错
+  assert.doesNotThrow(() => mk(), '不传 stage 应从 age 派生');
+  assert.doesNotThrow(() => mk({ stage: undefined }));
+  assert.doesNotThrow(() => mk({ stage: null }));
+  assert.equal(mk({ age: 600 }).stage, 'adult', 'age=600 应派生 adult');
+  // 校验成立的前提：'adult' 在表内、'Adult' 不在
+  assert.ok(STAGES.includes('adult'));
+  assert.ok(!STAGES.includes('Adult'));
+});
+
 test('STAGES 被冻结，且冻结这件事本身被钉住', () => {
   // 只断言内容是不够的：deepEqual 比的是内容与原型，**不是可变性**，
   // 所以摘掉 Object.freeze 不会让上面那条变红，之后一次就地改写也无人察觉。
@@ -189,12 +213,21 @@ test('死亡后 ageCreature 不再推进（spec 8.1：死亡后不再 tick）', 
   assert.equal(c.dying, dyingAtDeath);
 });
 
-test('死亡只触发一次（dying 不会被重置）', () => {
+test('死亡只触发一次：alive 门控挡住后续 tick（dying 不被重置）', () => {
+  // 标题如实说明**是哪一条**在起作用：真正咬人的是 `if (!c.alive) return` 这道门控。
+  // 探针证明这条测试**抓不到**"在死亡分支里重写哨兵"—— 因为死亡分支里的赋值
+  // 在 `alive=false` 之后再也不会执行（不可达），所以那种改动不会让它变红。
+  // 门控本身是承重的：去掉它，每 tick 都会重走死亡分支把 dying 写回哨兵值，
+  // Task 10 的 `c.dying += dt` 就永远追不上 dissolveDuration，尸体永不消失。
   const c = mk();
   for (let i = 0; i < (totalLife + 5) * 60; i++) ageCreature(c, 1 / 60);
   const first = c.dying;
   ageCreature(c, 1 / 60);
   assert.equal(c.dying, first);
+  assert.equal(c.alive, false, '前置条件：已死亡');
+  // 再多推几次，确认 dying 仍未被重置（而不是只多推一次恰好没变）
+  for (let i = 0; i < 100; i++) ageCreature(c, 1 / 60);
+  assert.equal(c.dying, first, '多次 tick 后 dying 仍不得被重置');
 });
 
 test('dying 的哨兵值受字面量约束（远小于溶散时长）', () => {

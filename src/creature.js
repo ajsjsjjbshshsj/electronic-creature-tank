@@ -31,6 +31,16 @@ export function createCreature(opts) {
   if (!opts.rng && !opts.genes) {
     throw new Error('createCreature 需要 rng 参数（或既有 genes）；禁止使用 Math.random');
   }
+  // 显式 stage 必须在 STAGES 里。理由：STAGES 的成员是**按字面量**比较的
+  // （canBreed 要 'adult'、isAdultLike 要 'adult'|'elder'、sim 的 motion 按名字查表），
+  // 所以 'Adult' 这种大小写错误会静默产出一只**永远不能繁殖、也不算成年**的生物 ——
+  // 不抛错、不报警，症状只是"这只怎么一直不生"。读档路径（计划 3）尤其容易带进脏值。
+  // 与 memory.remember 校验 role ∈ ROLES 是同一条纪律：非法输入要抛错，不要静默降级。
+  if (opts.stage !== undefined && opts.stage !== null && !STAGES.includes(opts.stage)) {
+    throw new TypeError(
+      `createCreature: 未知的 stage "${opts.stage}"，必须是 STAGES 之一：${STAGES.join(' / ')}`,
+    );
+  }
   const genes = opts.genes || randomGenome(opts.rng);
   const traits = decode(genes);
   return {
