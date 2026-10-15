@@ -23,6 +23,73 @@ test('输出包含全部约定字段且都是有限数', () => {
   }
 });
 
+test('阈值字段集恰好是 FIELDS —— 不多不少', () => {
+  // 上面那条只检查"FIELDS 里的都在"，对**多出来的字段**完全不敏感：
+  // 把被刻意删除的 arousalRate 加回去，那条依旧全绿（实测 17/17 通过）。
+  // 而"多一个字段"恰恰是本任务要防的事 —— arousalRate 是个没人读的死旋钮，
+  // 谁把它接上去，libido 对 arousal 的影响就会被重复计算一次。
+  const t = thresholds(P());
+  assert.deepEqual(Object.keys(t).sort(), [...FIELDS].sort(),
+    '输出键集必须与 FIELDS 完全一致（多一个或少一个都要变红）');
+  assert.equal(FIELDS.length, 9, '阈值恰好 9 个 —— 删除 arousalRate 后不得变回 10 个');
+  assert.equal(Object.keys(t).length, 9);
+  assert.ok(!('arousalRate' in t),
+    'arousalRate 已被刻意删除（死字段：无消费者，spec 4.9 那行由 Task 4 的 arousal 目标值实现）');
+});
+
+test('九个阈值的系数与两端取值都被字面量钉住', () => {
+  // 与 playerApproach 同理：只测方向的断言是空洞的。
+  // 实测把 angerDuration / hungerTrigger / turnRate 的斜率缩小 10 倍，
+  // 17 条既有测试仍然全绿 —— 而这三个值直接决定"气多久""多饿才觅食""转身多果断"。
+  // 这与 Task 3 复查发现的"速率表整体错 13 倍也能过 CI"是同一类缺陷。
+  // 每条都取基因的两个极端（0 与 1），把斜率与截距一起钉死。
+  //
+  // 为什么用 1e-12 容差而不是 assert.equal：**不是**因为值模糊，而是因为十进制字面量
+  // 在二进制下本就不可精确表示。实测这几个值确实带浮点尾巴：
+  //   hungerTrigger gluttonous=1 → 0.25000000000000006（写 0.25 会不等）
+  //   socialTrigger clingy=1     → 0.21999999999999997（写 0.22 会不等）
+  //   angerThreshold 中性        → 0.42500000000000004（写 0.425 会不等）
+  // 容差 1e-12 相对这些量的量级（≈0.2~16）仍能抓住任何 0.1% 以上的系数错误，
+  // 例如斜率缩小 10 倍会差 2 个数量级，远超容差。
+  // （Task 4 的教训：一条 1e-6 容差曾让一个错到第 7 位的字面量蒙混过关 ——
+  //   容差必须与"要抓的错误量级"一起说明，否则就是藏错的地方。）
+  const t = (o) => thresholds(P(o));
+  // fearThreshold = 0.3 + bold*0.5
+  assert.ok(Math.abs(t({ bold: 0 }).fearThreshold - 0.3) < 1e-12);
+  assert.ok(Math.abs(t({ bold: 1 }).fearThreshold - 0.8) < 1e-12);
+  // angerThreshold = 0.65 - irritable*0.45
+  assert.ok(Math.abs(t({ irritable: 0 }).angerThreshold - 0.65) < 1e-12);
+  assert.ok(Math.abs(t({ irritable: 1 }).angerThreshold - 0.2) < 1e-12);
+  // angerDuration = 4 + irritable*12（秒）
+  assert.ok(Math.abs(t({ irritable: 0 }).angerDuration - 4) < 1e-12);
+  assert.ok(Math.abs(t({ irritable: 1 }).angerDuration - 16) < 1e-12);
+  // hungerTrigger = 0.55 - gluttonous*0.3
+  assert.ok(Math.abs(t({ gluttonous: 0 }).hungerTrigger - 0.55) < 1e-12);
+  assert.ok(Math.abs(t({ gluttonous: 1 }).hungerTrigger - 0.25) < 1e-12);
+  // socialTrigger = 0.5 - clingy*0.28
+  assert.ok(Math.abs(t({ clingy: 0 }).socialTrigger - 0.5) < 1e-12);
+  assert.ok(Math.abs(t({ clingy: 1 }).socialTrigger - 0.22) < 1e-12);
+  // exploreRadius = 0.25 + curious*0.6
+  assert.ok(Math.abs(t({ curious: 0 }).exploreRadius - 0.25) < 1e-12);
+  assert.ok(Math.abs(t({ curious: 1 }).exploreRadius - 0.85) < 1e-12);
+  // turnRate = 2 + bold*4（rad/s）
+  assert.ok(Math.abs(t({ bold: 0 }).turnRate - 2) < 1e-12);
+  assert.ok(Math.abs(t({ bold: 1 }).turnRate - 6) < 1e-12);
+  // courtshipWillingness = 0.6 + libido*0.8
+  assert.ok(Math.abs(t({ libido: 0 }).courtshipWillingness - 0.6) < 1e-12);
+  assert.ok(Math.abs(t({ libido: 1 }).courtshipWillingness - 1.4) < 1e-12);
+  // 中性性格（全 0.5）的整组取值，作为整体快照
+  const n = thresholds(P());
+  assert.ok(Math.abs(n.fearThreshold - 0.55) < 1e-12);
+  assert.ok(Math.abs(n.angerThreshold - 0.425) < 1e-12);
+  assert.ok(Math.abs(n.angerDuration - 10) < 1e-12);
+  assert.ok(Math.abs(n.hungerTrigger - 0.4) < 1e-12);
+  assert.ok(Math.abs(n.socialTrigger - 0.36) < 1e-12);
+  assert.ok(Math.abs(n.exploreRadius - 0.55) < 1e-12);
+  assert.ok(Math.abs(n.turnRate - 4) < 1e-12);
+  assert.ok(Math.abs(n.courtshipWillingness - 1) < 1e-12);
+});
+
 test('bold 高 → fearThreshold 高（要更大威胁才害怕）', () => {
   assert.ok(thresholds(P({ bold: 1 })).fearThreshold > thresholds(P({ bold: 0 })).fearThreshold);
 });
