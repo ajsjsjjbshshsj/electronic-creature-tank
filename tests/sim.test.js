@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CONFIG } from '../src/config.js';
 import { createRng } from '../src/rng.js';
-import { PLAYER_ID, affectionFor, familiarityFor } from '../src/memory.js';
+import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '../src/memory.js';
 import { createCreature } from '../src/creature.js';
 import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION } from '../src/behavior.js';
@@ -885,4 +885,40 @@ test('粗暴的手不累积熟悉度，反而会让它怕你', () => {
   step(w, 20);
   assert.equal(familiarityFor(c.memory, PLAYER_ID), 0, '戳它不该让它认识你');
   assert.ok(c.emotions.fear > 0, '被戳应产生害怕（threat 情境）');
+});
+
+test('父母条目被容量淘汰后会被重新缓存回来（spec 4.11「认妈妈」活得过淘汰）', () => {
+  // 这条钉住的是实现方自行加的一处**偏离 brief** 的机制（refreshKinMemory）——
+  // 复查指出它当时**完全没有测试**：删掉整个函数，381 条全绿，
+  // 而"雏体忘了妈妈"这个后果会静默回来。
+  //
+  // 场景是**确定可复现**的（不是"试过，150 秒后母亲还是没了"那种无法复核的说法）：
+  // 亲属条目由 hatch / registerKinship 用 ensure 建立，familiarity 恒为 0；
+  // memory.prune 在超过容量时按"familiarity 最低"淘汰，且只保护**本次**新建的那一条 ——
+  // 于是一旦记忆超出容量，familiarity 为 0 且最早写入的父母条目就是第一个牺牲品。
+  const w = createWorld({ seed: 7 });
+  const c = aliveCreatures(w)[0];
+  c.lineage.mother = 'MOM';
+  c.lineage.father = 'DAD';
+  ensure(c.memory, 'MOM', { kinship: KINSHIP.mother, role: 'mother' });
+  ensure(c.memory, 'DAD', { kinship: KINSHIP.father, role: 'father' });
+  // 把记忆塞过容量上限，强制发生淘汰
+  for (let i = 0; i < CONFIG.memoryCapacity + 2; i++) ensure(c.memory, `x${i}`);
+
+  // 前置条件：父母条目确实已被挤掉（否则这条测试是在测空气）
+  assert.equal(get(c.memory, 'MOM'), null, '前置条件：母亲条目应已被容量淘汰');
+  assert.ok(c.memory.entries.length <= CONFIG.memoryCapacity, '前置条件：容量上限仍被遵守');
+
+  tickWorld(w, CONFIG.fixedDt);
+
+  const mom = get(c.memory, 'MOM');
+  const dad = get(c.memory, 'DAD');
+  assert.ok(mom, 'tickWorld 之后母亲条目应被重新缓存回来（否则"认妈妈"会永久失效）');
+  assert.equal(mom.kinship, KINSHIP.mother, '补回来的条目必须带正确的亲缘系数');
+  assert.equal(mom.role, 'mother', '补回来的条目必须带正确的角色');
+  assert.ok(dad, '父亲条目同样应被补回');
+  assert.equal(dad.role, 'father');
+  // 反向：补回来不能突破容量上限（否则就成了"永不忘"，与 spec 4.8 的遗忘设计相悖）
+  assert.ok(c.memory.entries.length <= CONFIG.memoryCapacity,
+    `补缓存不得突破容量上限：${c.memory.entries.length} > ${CONFIG.memoryCapacity}`);
 });
