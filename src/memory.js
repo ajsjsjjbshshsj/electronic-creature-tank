@@ -75,6 +75,15 @@ export const KINSHIP = Object.freeze({
 // 兜住整体不变量；跨模块累积仍由 Task 10 的收尾断言负责。
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
+// 记忆条目里必须是有限数的三个键（另两个是 id 字符串与 role 枚举/ null）。
+// 刻意**不导出**：导出就要连带 Object.freeze 与冻结测试，而它只在 remember 内部用，
+// 没有跨模块共享的需要 —— 不导出的常量不可能被别的任务就地改掉。
+// 键集漂移由测试 '长跑之后每个条目仍是恰好五个键' 兜住：新增/删改键会先让那条变红。
+const NUMERIC_ENTRY_KEYS = ['familiarity', 'affection', 'kinship'];
+
+// ensure 的 opts 只接受这两个键，理由见 ensure 上方。同样刻意不导出。
+const ENSURE_OPT_KEYS = ['kinship', 'role'];
+
 export function createMemory() {
   return { entries: [] };
 }
@@ -89,9 +98,26 @@ export function get(memory, id) {
 
 // 幂等：已存在则返回原记录，且不用 opts 覆盖已有的 kinship / role。
 // 覆盖会毁掉"它是它妈妈"这类一旦确立就不该再变的关系。
+//
+// opts 只接受 kinship 与 role 两个键，**未知键抛错而不是静默丢弃**。
+// 这不是洁癖：Task 8 会在这里写入亲缘关系，而拼错的键（'kinShip'、'Kinship'、
+// 'relationship'）如果被静默忽略，kinship 就停在默认 0 ——
+// 于是 `kinship > 0.25` 的近亲回避**静默失效**，兄妹可以互相求偶，
+// 而整条链路上没有任何一处报错。症状只是"后代越来越奇怪"。
 export function ensure(memory, id, opts) {
   const existing = get(memory, id);
   if (existing) return existing;
+  if (opts !== undefined && opts !== null) {
+    // Object.keys 只取自有键，所以原型键不会被误当成未知键报出来。
+    for (const key of Object.keys(opts)) {
+      if (!ENSURE_OPT_KEYS.includes(key)) {
+        throw new TypeError(
+          `ensure: 未知的 opts 键 "${key}"（只接受 ${ENSURE_OPT_KEYS.join(' / ')}）。` +
+          '静默丢弃会让 kinship 停在 0，进而让近亲回避失效。',
+        );
+      }
+    }
+  }
   const entry = {
     id,
     familiarity: 0,
@@ -111,6 +137,9 @@ export function ensure(memory, id, opts) {
 // dFamiliarity 默认 0.05：绝大多数互动（喂食、抚摸、撞击）都会同时加深熟悉度，
 // 所以给个默认值省得每个调用点都写；只有"纯好感变化、不该更熟悉"的场合
 // （例如读档后的修正）才显式传 0。
+// 这个 0.05 由测试 'adjust 的默认 familiarity 增量是 0.05（字面量钉住，不是 > 0）'
+// 用硬编码字面量钉住 —— 任何正数都能通过 `> 0`，包括 0.9（那会把熟悉度一步推到
+// 饱和，抹掉"要互动多次才熟络"的节奏），所以必须钉精确值。
 export function adjust(memory, id, dAffection, dFamiliarity = 0.05) {
   const e = ensure(memory, id);
   e.affection = clamp(e.affection + dAffection, -1, 1);
@@ -212,8 +241,50 @@ export function prune(memory, protectId) {
 // 覆盖已存在的条目时是**原地改字段**而不是替换对象，这样调用方局部变量里
 // 持有的旧引用仍然有效 —— 由测试 'remember 覆盖同 id 时原地更新（持有旧引用
 // 的调用方不会失效）' 钉住。
-// 入参五个键必须齐全，见模块头第 4 条。
+//
+// 入参五个键必须齐全且数值有限 —— 这一条由下面的校验**强制执行**，
+// 不只是注释里的期望（模块头第 4 条）。
+//
+// 为什么校验必须在这里，而不是留给调用方小心：
+// 这是整个模拟核里唯一一个输入可能来自磁盘上任意字节的入口 ——
+// Plan 3 会把 JSON.parse 的结果直接灌进来。而缺字段的后果是**静默**的：
+//   存档少写 familiarity → undefined
+//   → undefined *= exp(...) 得 NaN
+//   → decay 之后 affection/familiarity 都是 NaN
+//   → JSON.stringify 把 NaN 写成 null，读回来变成 0
+// 于是"存档里少一个字段"最终表现为"这条关系的好感是 0"，
+// 全程没有一处报错，玩家看到的只是"它好像不认识我了"。
+// NaN 还会让 prune 的排序比较器 b.familiarity - a.familiarity 返回 NaN，
+// 使淘汰顺序变得不可预测。
+// 与本模块其余部分、以及本项目已确立的契约一致：非法输入要抛错，
+// 不要静默降级（对照 rng.pick([]) 抛错、emotions.applyEvent 对原型键抛错）。
 export function remember(memory, entry) {
+  if (entry === null || typeof entry !== 'object') {
+    throw new TypeError(
+      `remember: 记忆条目必须是对象，收到 ${entry === null ? 'null' : typeof entry}`,
+    );
+  }
+  if (typeof entry.id !== 'string' || entry.id === '') {
+    throw new TypeError(`remember: 记忆条目的 id 必须是非空字符串，收到 ${JSON.stringify(entry.id)}`);
+  }
+  // 三个数值键。写成常量而不是内联字面量，是为了让"哪三个键该是有限数"
+  // 只有一处定义；键集若增删，测试 '长跑之后每个条目仍是恰好五个键' 会先变红。
+  for (const key of NUMERIC_ENTRY_KEYS) {
+    if (!Number.isFinite(entry[key])) {
+      throw new TypeError(
+        `remember: 条目 "${entry.id}" 的 ${key} 必须是有限数，收到 ${String(entry[key])}` +
+        '（存档缺这个字段会得到 undefined，运算后变 NaN，静默污染这条关系）',
+      );
+    }
+  }
+  // role 只允许 null 或 ROLES 之一。这里顺带给了 ROLES 一个**生产代码里的消费者**
+  // （此前它只被测试引用）：Task 8 写 role、Plan 3 校验存档，都走这一道门。
+  // 用 ROLES.includes 而不是 KINSHIP[role] 查真值 —— 后者挡不住原型键。
+  if (entry.role !== null && !ROLES.includes(entry.role)) {
+    throw new TypeError(
+      `remember: 条目 "${entry.id}" 的 role 必须是 null 或 ROLES 之一，收到 ${String(entry.role)}`,
+    );
+  }
   const existing = get(memory, entry.id);
   if (existing) {
     existing.familiarity = entry.familiarity;

@@ -79,6 +79,77 @@ test('adjust 默认也提升 familiarity', () => {
   assert.ok(familiarityFor(m, 'c2') > 0);
 });
 
+test('adjust 的默认 familiarity 增量是 0.05（字面量钉住，不是 > 0）', () => {
+  // 上一条只断言 `> 0`，那是**空洞**的：任何正数都能通过，包括 0.9 ——
+  // 而 0.9 会把熟悉度一步推到饱和，抹掉"要互动多次才熟络"的节奏，
+  // 并且让容量淘汰失去区分度（大家的 familiarity 都是 1）。
+  // 这与 Task 3 复查发现的"没有任何测试约束速率量级，速率表整体错 13 倍也能过 CI"
+  // 是同一类缺陷，只是发生在默认参数上。
+  //
+  // 浮点已核实：0 + 0.05 === 0.05、0.05 + 0.05 === 0.1 在 IEEE-754 下都精确成立，
+  // 所以可以用 assert.equal 而不是容差 —— 精确断言比容差更能钉住量级。
+  const m = createMemory();
+  adjust(m, 'c2', 0.1);
+  assert.equal(familiarityFor(m, 'c2'), 0.05, '一次默认增量应恰好是 0.05');
+  adjust(m, 'c2', 0.1);
+  assert.equal(familiarityFor(m, 'c2'), 0.1, '两次默认增量应累加为 0.1');
+
+  // 再钉一个不从 0 起算的路径，排除"恰好因为初值是 0 才看起来对"的巧合：
+  const m2 = createMemory();
+  ensure(m2, 'c3', {});
+  m2.entries[0].familiarity = 0.5;
+  adjust(m2, 'c3', 0.1);
+  assert.equal(familiarityFor(m2, 'c3'), 0.55, '0.5 + 默认 0.05 应为 0.55');
+
+  // 反向：显式传 0 时默认值不得生效（否则"只改好感不改熟悉度"就无法表达）
+  const m3 = createMemory();
+  adjust(m3, 'c4', 0.1, 0);
+  assert.equal(familiarityFor(m3, 'c4'), 0, '显式传 0 时不应套用默认增量');
+});
+
+test('familiarity 会在 1 处饱和，不会因为反复互动而溢出', () => {
+  // clamp 的上界此前只在 affection 一侧被钉住（adjust 累积好感并 clamp 到 [-1,1]）。
+  // familiarity 侧如果 clamp 写错上界，熟悉度会 > 1，
+  // 后果是它在与其它条目比较时永远胜出、永不被淘汰 —— 记忆容量形同虚设。
+  const m = createMemory();
+  adjust(m, 'c2', 0, 0.6);
+  adjust(m, 'c2', 0, 0.6);
+  assert.equal(familiarityFor(m, 'c2'), 1, '0.6 + 0.6 应被夹到上界 1');
+  for (let i = 0; i < 40; i++) adjust(m, 'c2', 0, 0.1);
+  assert.equal(familiarityFor(m, 'c2'), 1, '继续累积仍应停在 1，不得溢出');
+  // 下界同样钉住：负增量不得把熟悉度压到 0 以下
+  for (let i = 0; i < 40; i++) adjust(m, 'c2', 0, -0.1);
+  assert.equal(familiarityFor(m, 'c2'), 0, '负增量应被夹到下界 0');
+});
+
+test('ensure 拒绝未知的 opts 键（拼错 kinship 不得静默变成 0）', () => {
+  // 守的是一个 Task 8 很可能踩的坑：ensure(m, id, { kinShip: 0.5 }) 若被静默接受，
+  // kinship 就停在默认 0，于是 `kinship > 0.25` 的近亲回避**静默失效**，
+  // 兄妹可以互相求偶，全链路无一处报错，症状只是"后代越来越奇怪"。
+  const m = createMemory();
+  assert.throws(() => ensure(m, 'c2', { kinShip: 0.5 }), TypeError,
+    '大小写拼错的键必须抛错，不能静默丢弃');
+  assert.throws(() => ensure(m, 'c2', { relationship: 'mother' }), TypeError,
+    '语义相近但错误的键名同样必须抛错');
+  assert.throws(() => ensure(m, 'c2', { kinship: 0.5, role: 'mother', extra: 1 }), TypeError,
+    '合法键之外多带一个键也必须抛错');
+
+  // 反向确认：两个合法键、以及不传 opts，都照常工作（别把校验写得太严）
+  assert.doesNotThrow(() => ensure(m, 'ok1', { kinship: 0.5, role: 'mother' }));
+  assert.doesNotThrow(() => ensure(m, 'ok2', {}));
+  assert.doesNotThrow(() => ensure(m, 'ok3'));
+  assert.doesNotThrow(() => ensure(m, 'ok4', undefined));
+  assert.doesNotThrow(() => ensure(m, 'ok5', null));
+  assert.equal(kinshipBetween(m, 'ok1'), 0.5, '合法键的值必须真的被写入');
+
+  // 失败时不得留下半成品条目：抛错发生在 push 之前
+  assert.equal(get(m, 'c2'), null, '抛错后不应存在 c2 的条目');
+
+  // 空对象字面量没有自有键，所以不该误报；原型键也不算自有键
+  assert.doesNotThrow(() => ensure(m, 'ok6', Object.create({ toString: 1 })),
+    'Object.keys 只取自有键，继承来的键不应被当成未知键');
+});
+
 test('adjust 可以只改好感不改熟悉度', () => {
   const m = createMemory();
   adjust(m, 'c2', 0.1, 0);
@@ -215,6 +286,87 @@ test('remember 也遵守容量上限', () => {
     remember(m, { id: `c${i}`, familiarity: i / 100, affection: 0, kinship: 0, role: null });
   }
   assert.equal(m.entries.length, CONFIG.memoryCapacity);
+});
+
+test('remember 拒绝缺字段/非法数值的条目（读档边界不得静默污染）', () => {
+  // remember 是整个模拟核里唯一一个输入可能来自磁盘上任意字节的入口 ——
+  // Plan 3 会把 JSON.parse 的结果直接灌进来。而缺字段的后果是**静默**的：
+  //   缺 familiarity → undefined → *= exp(...) 得 NaN
+  //   → JSON.stringify 把 NaN 写成 null → 读回来变成 0
+  // 最终表现是"这条关系的好感是 0"，全程无一处报错。
+  // 所以这里逐个字段验证它真的会抛错，而不是默默变成 NaN。
+
+  // 三个数值键各自缺失时都要抛
+  for (const missing of ['familiarity', 'affection', 'kinship']) {
+    const bad = { id: 'c1', familiarity: 0.5, affection: 0.2, kinship: 0, role: null };
+    delete bad[missing];
+    const m = createMemory();
+    assert.throws(() => remember(m, bad), TypeError, `缺 ${missing} 必须抛错`);
+    assert.equal(m.entries.length, 0, `缺 ${missing} 抛错后不应写入任何条目`);
+  }
+
+  // 显式 undefined / NaN / Infinity / null / 字符串 都不是有限数，一律拒绝
+  for (const bogus of [undefined, NaN, Infinity, -Infinity, null, '0.5', {}, []]) {
+    const m = createMemory();
+    assert.throws(
+      () => remember(m, { id: 'c1', familiarity: bogus, affection: 0, kinship: 0, role: null }),
+      TypeError,
+      `familiarity = ${JSON.stringify(bogus)} 必须抛错`,
+    );
+  }
+
+  // id 必须是合法字符串
+  for (const badId of [undefined, null, '', 42, {}]) {
+    const m = createMemory();
+    assert.throws(
+      () => remember(m, { id: badId, familiarity: 0.5, affection: 0, kinship: 0, role: null }),
+      TypeError,
+      `id = ${JSON.stringify(badId)} 必须抛错`,
+    );
+  }
+
+  // role 只允许 null 或 ROLES 之一
+  for (const badRole of ['mothers', 'MOTHER', 'toString', 'constructor', 42, undefined]) {
+    const m = createMemory();
+    assert.throws(
+      () => remember(m, { id: 'c1', familiarity: 0.5, affection: 0, kinship: 0, role: badRole }),
+      TypeError,
+      `role = ${JSON.stringify(badRole)} 必须抛错`,
+    );
+  }
+
+  // entry 本身必须是对象
+  for (const badEntry of [null, undefined, 42, 'x']) {
+    const m = createMemory();
+    assert.throws(() => remember(m, badEntry), TypeError, `entry = ${JSON.stringify(badEntry)} 必须抛错`);
+  }
+
+  // 反向：合法条目（含全部五个 role 取值与 null）都应被接受，别把校验写得太严
+  for (const role of [null, ...ROLES]) {
+    const m = createMemory();
+    assert.doesNotThrow(
+      () => remember(m, { id: `ok-${role}`, familiarity: 0.5, affection: -0.3, kinship: 0.5, role }),
+      `role = ${role} 是合法的，不应抛错`,
+    );
+    assert.equal(m.entries.length, 1);
+  }
+  // 边界数值 0、1、-1 都是有限数，必须接受
+  const m = createMemory();
+  assert.doesNotThrow(() => remember(m, { id: 'edge', familiarity: 1, affection: -1, kinship: 0, role: null }));
+  assert.doesNotThrow(() => remember(m, { id: 'edge0', familiarity: 0, affection: 0, kinship: 0, role: null }));
+});
+
+test('remember 的校验顺带让 ROLES 成为生产代码的消费者', () => {
+  // 记录一个事实，避免以后有人以为 ROLES 是死代码而删掉它：
+  // 在本次修复之前 ROLES 只被测试引用（无生产消费者），
+  // 现在 remember 用 ROLES.includes 校验 role，Plan 3 的读档走这一道门。
+  // 这条断言从行为侧证明该消费者真实存在 —— 把 ROLES 换成空数组会让它变红。
+  assert.ok(ROLES.length > 0, 'ROLES 不得为空，否则下面的校验形同虚设');
+  const m = createMemory();
+  assert.doesNotThrow(() => remember(m, { id: 'p', familiarity: 1, affection: 1, kinship: 0, role: 'mate' }),
+    'ROLES 里的取值必须被 remember 接受');
+  assert.throws(() => remember(createMemory(), { id: 'q', familiarity: 1, affection: 1, kinship: 0, role: 'nope' }),
+    TypeError, 'ROLES 之外的取值必须被 remember 拒绝');
 });
 
 test('对 PLAYER 的记忆与对个体的记忆结构完全一致（spec 4.8）', () => {
