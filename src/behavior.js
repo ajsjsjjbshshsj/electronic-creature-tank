@@ -184,31 +184,21 @@ export function scoreAll(c, senses) {
     // 争斗：只有打得过才打。体型差是硬门槛，
     // 否则会出现"幼体去撞成体"这种既不可信也不可爱的画面。
     //
-    // 两个分支共用同一条体型门槛 `provoker.size <= c.traits.size * 1.25`：
-    //   主分支 —— 气得够狠、不太怕。
-    //   贴身分支 —— 愤怒只比阈值高一点点，但肇事者就贴在身边（dist < 0.06）、
-    //               恐惧不高。加它的原因是一条**实测**出来的死路：
-    //               protest 与 fight 共用同一个 anger 系数，于是
-    //                 fight/protest = 1.1×(1-0.2×playerApproach) / (1.2×(1-fear))
-    //               在**主分支自己的门槛内**（fear < 0.35、playerApproach 的基因
-    //               值域 [-0.35, 0.8]）这个比值的上界是 0.9808（p=-0.35、fear→0）、
-    //               整体落在 [0.77, 0.981] 这一段（下界在 p=0.8、fear→0）——
-    //               也就是说主分支与 protest 同时开门时，fight **总是**输给 protest。
-    //               而 `decide` 的扰动最大只能把 1.0 的比值拉到 1.12/0.88 = 1.2727，
-    //               所以主分支里 fight 只能靠随机扰动偶尔翻盘 ——
-    //               `case 'fight'` 于是实质上由噪声驱动，而不是由"打得过"驱动。
-    //               贴身分支恰好补上这一段：它只多要求 `provoker.dist < 0.06`
-    //               与 `fear < 0.5`，而在这个分支里
-    //                 anger ∈ (angerThreshold+0.05, angerThreshold+0.15] 时
-    //               protest **不同时开门**（protest 要 anger > angerThreshold+0.15），
-    //               所以 fight 是唯一非零候选，对**全部种子**成立。
-    //               取 +0.05 而不是复用 +0.15：这样贴身分支与主分支的开门区间
-    //               只在 [0.15, 0.25] 那段重叠，重叠区里 protest 仍然更大，
-    //               "对方明显更大时选 protest 而非 fight"那条用例不受影响。
-    fight: (e.anger > t.angerThreshold + 0.15 && provoker && e.fear < 0.35
-        && provoker.size <= c.traits.size * 1.25)
-      || (e.anger > t.angerThreshold + 0.05 && e.fear < 0.5
-        && provoker && provoker.dist < 0.06 && provoker.size <= c.traits.size * 1.25)
+    // 与 protest 的关系（**已复核，纠正过一处错误论证**）：
+    // 两者共用同一个 anger 系数，所以比值是
+    //   fight/protest = 1.1×(1−0.2×playerApproach) / (1.2×(1−fear))
+    // ⚠️ 这里原先写着"该比值在 fear < 0.35 内上界是 0.9808，所以 fight 总是输给 protest"，
+    // 并据此加了一个额外的"贴身分支"。**那个论证是错的**：
+    // 0.9808 是 fear→0 时的取值，而 fear 在 protest 的**分母**上，
+    // 所以比值随 fear 上升而上升 —— 中性性格（playerApproach = 0.225）下
+    // 只需 fear > 0.1246 就 crossover，而本分支的门槛允许 fear 到 0.35。
+    // 于是 fight 在主分支里**本来就可达**（fear ∈ (0.1246, 0.35)），
+    // 实测移除那个额外分支后 40 条测试全绿，故已删除它 ——
+    // 它是一次不必要的、改动游戏行为的偏离：会让"贴得很近 + 愤怒只略高于阈值"
+    // 也开打（门槛 anger > thr+0.05、dist < 0.06），而没有任何测试要求这一点。
+    // 保留下来的语义是干净的："气得够狠 + 不太怕 + 打得过"。
+    fight: e.anger > t.angerThreshold + 0.15 && provoker && e.fear < 0.35
+      && provoker.size <= c.traits.size * 1.25
       ? e.anger * CONFIG.behavior.fightUrgency * (1 + t.playerApproach * -0.2)
       : 0,
 
