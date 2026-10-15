@@ -99,6 +99,27 @@ const CONFIG = {
   gridCell: 0.1,               // 空间网格边长（归一化）
   mournRadius: 0.18,           // 目击死亡并进入哀悼的距离
 
+  // ---- 哀悼与死亡动画 ----
+  mournDuration: 6,        // 目击死亡后停顿变暗的秒数（spec 4.11）
+  dissolveDuration: 4,     // 尸体溶散为微粒的秒数
+
+  // ---- 运动 ----
+  motion: {
+    baseSpeed: 0.055,      // 归一化世界单位/秒
+    stageFactor: { hatchling: 0.45, juvenile: 0.85, adult: 1, elder: 0.55 },
+    fleeFactor: 2.2,
+    courtshipFactor: 0.55,
+    facingLerp: 6,         // 朝向插值速率；实际还会乘 thresholds.turnRate / 4
+    wallMargin: 0.03,      // 边界内缩，避免身体一半贴在缸壁上
+  },
+
+  // ---- 食物（spec 6.2）----
+  food: {
+    algae:   { energy: 0.45, respawn: true  },   // 光藻：基础食物，会自然再生
+    nectar:  { energy: 0.85, respawn: false },   // 蜜珠：高能量，只能由玩家投喂
+    crystal: { energy: 0.15, respawn: false, calms: 0.5 },  // 冰晶：安抚，降 anger/fear
+  },
+
   // ---- 颜色（spec 4.2 / 4.3）----
   colors: {
     bgTop: '#0B0620',
