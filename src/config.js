@@ -26,7 +26,12 @@ const CONFIG = {
   kinshipMateMax: 0.25,             // 超过则绝不求偶
   courtshipRange: 0.22,             // 归一化距离，超过则无法开始仪式
   rejectionAffection: -0.15,        // 好感低于此值会拒绝对方
-  eggFailChanceAtCap: 1,            // 达上限时卵孵化失败的概率（spec 4.12 第 6 条）
+  // 达上限时卵孵化失败的概率（spec 4.12 第 6 条）。
+  // ⚠️ 当前实现**不采样**这个值：`layEggs` 用 `viable: !atPopulationCap`，是确定性的。
+  // 值为 1 时两者行为完全等价（达上限必失败），所以不是 bug —— 但它目前**没有消费者**。
+  // 留着它是给 Plan 2/3 一个调参入口（若将来想让"达上限时偶尔仍能孵化"）。
+  // 若最终决定不要，就删掉它并同步删 Task 1 的 config 测试 —— 别让它一直挂着像个生效的旋钮。
+  eggFailChanceAtCap: 1,
 
   // ---- 需求（每秒变化率）----
   needs: {

@@ -181,6 +181,18 @@ export function kinshipOf(a, b, byId) {
 //   这正是测试里 seedKin 必须用 remember 而不能用 ensure 的原因。）
 export function registerKinship(baby, others, byId) {
   const parents = [baby.lineage.mother, baby.lineage.father].filter(Boolean);
+  // 亲缘是**客观事实**，所以这里不能只靠 ensure 的幂等写入 —— 那会让结果依赖调用顺序。
+  // 具体危险：若对方的记忆里**已经**有一条针对这只雏体的条目（例如它们在社交中先打过照面，
+  // sim 的 adjust 建出了 kinship 默认 0 的条目），那么 ensure 会静默失效，
+  // 亲缘停在 0 → 近亲回避静默失效。所以 ensure 之后显式把缓存值写正。
+  //
+  // role 只在算出非 null 时才覆盖：0.25 那两档（祖孙/半同胞）在 ROLES 里没有对应角色，
+  // 若用 null 去覆盖，会把已确立的 role（如父母的 'offspring'）抹掉。
+  const writeFact = (memory, id, kinship, role) => {
+    const e = ensure(memory, id, { kinship, role });
+    if (e.kinship !== kinship) e.kinship = kinship;
+    if (role !== null && e.role !== role) e.role = role;
+  };
   for (const o of others) {
     if (o.id === baby.id) continue;
     const k = kinshipOf(baby, o, byId);
@@ -193,8 +205,8 @@ export function registerKinship(baby, others, byId) {
         : k === KINSHIP.sibling ? 'sibling' : null;
     const roleInOther = parents.includes(o.id) ? 'offspring'
       : k === KINSHIP.sibling ? 'sibling' : null;
-    ensure(baby.memory, o.id, { kinship: k, role: roleInBaby });
-    ensure(o.memory, baby.id, { kinship: k, role: roleInOther });
+    writeFact(baby.memory, o.id, k, roleInBaby);
+    writeFact(o.memory, baby.id, k, roleInOther);
   }
 }
 

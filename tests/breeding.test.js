@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { CONFIG } from '../src/config.js';
 import { createRng } from '../src/rng.js';
 import { createCreature, growthFactor, sizeOf } from '../src/creature.js';
-import { ensure, adjust, remember, get, KINSHIP } from '../src/memory.js';
+import { ensure, adjust, remember, get, KINSHIP, kinshipBetween } from '../src/memory.js';
 import { inherit, phenotype, ALL_GENES } from '../src/genes.js';
 import {
   courtshipScore, canCourt, startCourtship, tickCourtship, interruptCourtship,
@@ -135,6 +135,37 @@ test('registerKinship 把亲缘写进双方记忆，角色按各自视角填', (
   assert.equal(get(mother.memory, 'B').kinship, KINSHIP.mother, '母亲侧系数相同');
   assert.equal(get(mother.memory, 'B').role, 'offspring', '母亲侧角色是 offspring，不是 mother');
   assert.equal(get(father.memory, 'B').role, 'offspring');
+});
+
+test('registerKinship 不受调用顺序影响：已存在 kinship 0 的条目也会被写正', () => {
+  // 危险场景：双方先在社交里打过照面，adjust 已经为对方建出了 kinship 默认 0 的条目，
+  // 之后 registerKinship 才跑。ensure 是**幂等**的，只靠它就**不会**改正 kinship ——
+  // 于是亲缘永远停在 0，近亲回避静默失效，症状只是"兄妹怎么生了孩子"。
+  // 本实现因此在 ensure 之后显式把缓存值写正（亲缘是客观事实，不该依赖调用顺序）。
+  const r = rng();
+  const mother = createCreature({ id: 'M', name: 'M', age: 700, rng: r });
+  const baby = createCreature({
+    id: 'B', name: 'B', age: 0, stage: 'hatchling', rng: r, mother: 'M',
+  });
+  const byId = (id) => ({ M: mother, B: baby }[id] || null);
+
+  // 模拟"先照面"：两侧都被 adjust 建出条目（kinship 默认 0）
+  adjust(baby.memory, 'M', 0.1);
+  adjust(mother.memory, 'B', 0.1);
+  assert.equal(get(baby.memory, 'M').kinship, 0, '前置条件：条目已存在且 kinship 为 0');
+  assert.equal(get(mother.memory, 'B').kinship, 0, '前置条件：同上');
+
+  registerKinship(baby, [mother], byId);
+
+  assert.equal(get(baby.memory, 'M').kinship, KINSHIP.mother, '已存在的条目也必须被写正');
+  assert.equal(get(mother.memory, 'B').kinship, KINSHIP.mother, '母亲侧同理');
+  assert.equal(get(baby.memory, 'M').role, 'mother');
+  assert.equal(get(mother.memory, 'B').role, 'offspring');
+  // 反向：写亲缘不得顺手把好感/熟悉度抹掉（那些是互动累积出来的）
+  assert.ok(get(baby.memory, 'M').affection > 0, '写亲缘不应重置 affection');
+  assert.ok(get(baby.memory, 'M').familiarity > 0, '写亲缘不应重置 familiarity');
+  // 而且写正之后，求偶闸门必须真的关上（端到端确认写对了地方）
+  assert.equal(kinshipBetween(baby.memory, 'M'), KINSHIP.mother);
 });
 
 test('近亲回避在真实谱系数据上生效（端到端，含对照组）', () => {
@@ -291,6 +322,38 @@ test('极度饥饿时不求偶（饿着肚子不想恋爱）', () => {
   const { a, b } = pair();
   a.needs.hunger = 0.95;
   assert.equal(canCourt(a, b, OK), false);
+});
+
+test('canCourt 的三个内部意愿阈值在边界两侧都被钉住', () => {
+  // 这三个阈值（arousal ≥ 0.35、hunger ≤ 0.75、fear ≤ 0.5）是写死在 canCourt 里的字面量。
+  // 原来的测试只测"远不足 / 远超"（arousal 0.05、hunger 0.95），
+  // 所以把 0.35 改成 0.5、或把 0.75 改成 0.5，那些测试照样全绿 ——
+  // 而这三个值直接决定"多想要才求偶""多饿就不谈""多怕就退"。
+  // 这里用**恰好等于阈值**与**刚好越界**两侧夹住（与本项目对 0.25/0.15 阈值的处理一致）。
+  const at = (mut) => {
+    const { a, b } = pair();
+    mut(a, b);
+    return canCourt(a, b, OK);
+  };
+  // arousal：< 0.35 即拒绝，恰好 0.35 允许
+  assert.equal(at((a, b) => { a.emotions.arousal = 0.35; b.emotions.arousal = 0.35; }), true,
+    '恰好 0.35 应允许（条件是严格小于）');
+  assert.equal(at((a, b) => { a.emotions.arousal = 0.349; b.emotions.arousal = 0.35; }), false,
+    'a 方 0.349 应拒绝');
+  assert.equal(at((a, b) => { a.emotions.arousal = 0.35; b.emotions.arousal = 0.349; }), false,
+    'b 方 0.349 同样拒绝（双向检查）');
+  // hunger：> 0.75 即拒绝，恰好 0.75 允许
+  assert.equal(at((a) => { a.needs.hunger = 0.75; }), true, '恰好 0.75 应允许');
+  assert.equal(at((a) => { a.needs.hunger = 0.7501; }), false, 'a 方 0.7501 应拒绝');
+  assert.equal(at((a, b) => { b.needs.hunger = 0.7501; }), false, 'b 方过饿同样拒绝');
+  // fear：> 0.5 即拒绝，恰好 0.5 允许
+  assert.equal(at((a) => { a.emotions.fear = 0.5; }), true, '恰好 0.5 应允许');
+  assert.equal(at((a) => { a.emotions.fear = 0.5001; }), false, 'a 方 0.5001 应拒绝');
+  assert.equal(at((a, b) => { b.emotions.fear = 0.5001; }), false, 'b 方过怕同样拒绝');
+  // 防空洞：确认这三个阈值确实在 0.35 / 0.75 / 0.5 附近生效，而不是随便一个数都行
+  assert.equal(at((a, b) => { a.emotions.arousal = 0.9; b.emotions.arousal = 0.9; }), true);
+  assert.equal(at((a) => { a.needs.hunger = 0; }), true);
+  assert.equal(at((a) => { a.emotions.fear = 0; }), true);
 });
 
 test('距离超过 courtshipRange 时不求偶', () => {
