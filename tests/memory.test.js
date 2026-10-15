@@ -807,3 +807,128 @@ test('长跑（5 分钟 @60Hz，固定种子驱动）后所有条目有限、在
       ['affection', 'familiarity', 'id', 'kinship', 'role'], `${e.id} 的键集被改动`);
   }
 });
+
+// ============================================================================
+// 第 3 部分：玩家那条记忆的豁免 —— **经人类裁定的 spec 修正**，不是实现方的即兴发挥。
+//
+// spec §4.8 有内部冲突：它说对玩家的记忆是"回到电脑上它还认得你"的实现基础，
+// 又说"容量上限 12 条，超出时淘汰 familiarity 最低的"，且未豁免玩家。
+// 叠加 familiarityDecay 0.004（半衰期 173.287 秒）后，在热闹的缸里玩家十几分钟
+// 不互动，玩家那条就会成为淘汰候选 → 这只生物把玩家整个忘掉，
+// 之后 memory[PLAYER] 被当作全新关系重建，「卖萌」（依赖该条 affection 高）
+// 也随之失去依据。离线期间不受影响：验收标准 #5 规定离开时世界冻结、不推进。
+//
+// 裁定：**豁免 familiarity 的衰减与淘汰，但好感照常淡化。**
+// 语义上正好用上这个结构已有的两个字段：
+//   familiarity = 熟悉度（认得你是谁）→ 持久
+//   affection   = 好感（此刻对你什么感觉）→ 按 spec「恩怨会淡忘」
+// ============================================================================
+
+test('玩家那条的 familiarity 不衰减，但好感照常衰减', () => {
+  const m = createMemory();
+  ensure(m, PLAYER_ID);
+  ensure(m, 'c2');
+  for (const id of [PLAYER_ID, 'c2']) {
+    get(m, id).familiarity = 0.5;
+    get(m, id).affection = 0.5;
+  }
+  decay(m, 10);
+
+  // 玩家：熟悉度**不动**，好感照常按普通速率衰减
+  assert.equal(familiarityFor(m, PLAYER_ID), 0.5, '玩家的熟悉度不应衰减');
+  assert.ok(Math.abs(affectionFor(m, PLAYER_ID) - 0.4093653765389909) < 1e-12,
+    `玩家的好感应照常衰减到 0.5*exp(-0.2)，实际 ${affectionFor(m, PLAYER_ID)}`);
+
+  // 普通个体：两个都照常衰减（确认豁免没有被写成"谁都不衰减"）
+  assert.ok(Math.abs(familiarityFor(m, 'c2') - 0.4803947195761616) < 1e-12,
+    `普通个体的熟悉度应衰减到 0.5*exp(-0.04)，实际 ${familiarityFor(m, 'c2')}`);
+  assert.ok(Math.abs(affectionFor(m, 'c2') - 0.4093653765389909) < 1e-12,
+    `普通个体的好感应衰减到 0.5*exp(-0.2)，实际 ${affectionFor(m, 'c2')}`);
+});
+
+test('玩家的 familiarity 豁免是窄的：只认 PLAYER_ID，不认角色或血缘', () => {
+  // 担心的是有人把豁免写成 `role === null && kinship === 0`（"玩家就是那个没有
+  // 身份的条目"）或干脆写错成"所有条目都不衰减"。这两种写法都会让上一条的
+  // 普通个体断言变红，但下面这些边界更尖锐：一个**结构与玩家完全相同**的条目
+  // （role null、kinship 0、familiarity 一样）必须照常衰减。
+  const m = createMemory();
+  ensure(m, 'no-role');       // 与玩家同结构：role null、kinship 0
+  ensure(m, PLAYER_ID);
+  ensure(m, 'kin', { kinship: 0.5, role: 'mother' });
+  for (const id of ['no-role', PLAYER_ID, 'kin']) {
+    get(m, id).familiarity = 0.5;
+  }
+  decay(m, 10);
+
+  assert.equal(familiarityFor(m, PLAYER_ID), 0.5, '玩家不衰减');
+  assert.ok(Math.abs(familiarityFor(m, 'no-role') - 0.4803947195761616) < 1e-12,
+    '与玩家同结构但 id 不同的条目必须照常衰减');
+  assert.ok(Math.abs(familiarityFor(m, 'kin') - 0.4803947195761616) < 1e-12,
+    '亲属的 familiarity 也没有豁免（只有好感有亲属速率）');
+});
+
+test('玩家那条永不被淘汰：ensure 路径（protectId 分支）', () => {
+  const m = createMemory();
+  ensure(m, PLAYER_ID);
+  get(m, PLAYER_ID).familiarity = 0.01; // 全场最低，正常必然被淘汰
+  for (let i = 0; i < CONFIG.memoryCapacity - 1; i++) {
+    ensure(m, `c${i}`);
+    get(m, `c${i}`).familiarity = 0.9;
+  }
+  assert.equal(m.entries.length, CONFIG.memoryCapacity, '起始应恰好满容量');
+
+  ensure(m, 'newcomer');
+  get(m, 'newcomer').familiarity = 0.5;
+  assert.equal(m.entries.length, CONFIG.memoryCapacity, '容量上限不得松动');
+  assert.ok(get(m, PLAYER_ID), '玩家那条必须留下（哪怕 familiarity 全场最低）');
+  assert.ok(get(m, 'newcomer'), '本次的 protectId 也必须留下');
+  // 被牺牲的应是某个 0.9 的普通条目，而不是玩家
+  const removed = [...Array(CONFIG.memoryCapacity - 1).keys()].filter((i) => !get(m, `c${i}`));
+  assert.equal(removed.length, 1, `应恰好移除一个普通条目，实际移除 ${removed.length} 个`);
+});
+
+test('玩家那条永不被淘汰：remember 路径（排序截断分支）', () => {
+  // 这条路径用于读档与批量写入，**不传 protectId**，因此走的是排序后截断。
+  // 玩家 familiarity 最低时会被排到末尾、落在保留区之外 —— 必须被换回来，
+  // 且被牺牲的应是**非玩家条目里** familiarity 最低的那个。
+  const m = createMemory();
+  ensure(m, PLAYER_ID);
+  get(m, PLAYER_ID).familiarity = 0.01;
+  for (let i = 0; i < CONFIG.memoryCapacity - 2; i++) {
+    ensure(m, `c${i}`);
+    get(m, `c${i}`).familiarity = 0.9;
+  }
+  ensure(m, 'lowest');
+  get(m, 'lowest').familiarity = 0.2; // 非玩家条目里最低
+  assert.equal(m.entries.length, CONFIG.memoryCapacity);
+
+  const playerRef = get(m, PLAYER_ID);
+  remember(m, { id: 'bulk', familiarity: 0.8, affection: 0, kinship: 0, role: null });
+
+  assert.equal(m.entries.length, CONFIG.memoryCapacity, '容量上限不得松动');
+  assert.equal(get(m, PLAYER_ID), playerRef, '玩家那条的**对象引用**也必须仍然有效');
+  assert.ok(get(m, 'bulk'), '新写入的条目应在保留区内留下');
+  assert.equal(get(m, 'lowest'), null, '被牺牲的应是 non-玩家 里 familiarity 最低的 lowest');
+});
+
+test('玩家豁免不改变满容量时的条目总数（不多留一条）', () => {
+  // 保护玩家最容易写错的方式是"跳过淘汰"，那会让长度变成 13 ——
+  // 容量上限是内存上界，也是"遗忘"这件事的真实性所在，不得松动。
+  const m = createMemory();
+  ensure(m, PLAYER_ID);
+  get(m, PLAYER_ID).familiarity = 0;
+  for (let i = 0; i < 40; i++) {
+    ensure(m, `c${i}`);
+    get(m, `c${i}`).familiarity = 0.01 + i * 0.001;
+    assert.ok(m.entries.length <= CONFIG.memoryCapacity,
+      `第 ${i} 轮容量越界: ${m.entries.length} > ${CONFIG.memoryCapacity}`);
+    assert.ok(get(m, PLAYER_ID), `第 ${i} 轮玩家被淘汰了`);
+  }
+  // 另一条路径同样不得越界
+  for (let i = 0; i < 40; i++) {
+    remember(m, { id: `r${i}`, familiarity: 0.01 + i * 0.001, affection: 0, kinship: 0, role: null });
+    assert.ok(m.entries.length <= CONFIG.memoryCapacity,
+      `remember 第 ${i} 轮容量越界: ${m.entries.length} > ${CONFIG.memoryCapacity}`);
+    assert.ok(get(m, PLAYER_ID), `remember 第 ${i} 轮玩家被淘汰了`);
+  }
+});

@@ -188,18 +188,41 @@ export function kinshipBetween(memory, id) {
 //   affectionDecay    0.02  → 普通好感   34.657 秒减半
 //   affectionDecayKin 0.002 → 亲属好感  346.574 秒减半（慢 10 倍）
 //   familiarityDecay  0.004 → 熟悉度    173.287 秒减半（没有亲属变体）
+//
+// **玩家那条的 familiarity 不衰减**（好感仍照常衰减）—— 这是 spec §4.8 内部
+// 一处冲突经人类裁定后的结果，不是实现方的即兴发挥：
+//   §4.8 既说对玩家的记忆是"回到电脑上它还认得你"的实现基础，
+//   又说"容量上限 12 条，超出时淘汰 familiarity 最低的"，且未豁免玩家。
+//   两者在长会话里冲突：熟悉度半衰期 173 秒，在热闹的缸里玩家十几分钟不互动，
+//   玩家那条就会成为淘汰候选 → 这只生物把玩家整个忘掉，
+//   之后 memory[PLAYER] 被当作全新关系重建（affection 从 0 开始），
+//   于是"卖萌"（依赖 memory[PLAYER].affection 高）也失去依据。
+//   离线期间不受影响 —— 验收标准 #5 规定离开时世界冻结、不推进。
+// 裁定（人类选定）：**豁免 familiarity 的衰减与淘汰，但好感照常淡化。**
+// 语义上这样最自洽，正好用上这个结构已有的两个字段：
+//   familiarity = 熟悉度（认得你是谁）→ 应当持久
+//   affection   = 好感（此刻对你什么感觉）→ 按 spec「恩怨会淡忘」
+// 所以玩家那条的 affection 仍走普通速率（role 为 null、kinship 为 0 ⇒ 非亲属）。
+// 由测试 '玩家那条的 familiarity 不衰减，但好感照常衰减' 钉住。
 export function decay(memory, dt) {
   for (const e of memory.entries) {
     const isKin = e.role !== null || e.kinship >= 0.25;
     const affRate = isKin ? CONFIG.affectionDecayKin : CONFIG.affectionDecay;
     e.affection *= Math.exp(-affRate * dt);
-    e.familiarity *= Math.exp(-CONFIG.familiarityDecay * dt);
+    // 只有玩家被豁免 familiarity 衰减；其余（含亲属）一律照常。
+    if (e.id !== PLAYER_ID) {
+      e.familiarity *= Math.exp(-CONFIG.familiarityDecay * dt);
+    }
   }
 }
 
 // 超出容量时淘汰 familiarity 最低的。
 // "遗忘"本身就是真实的：多代之后不可能记住每一只先祖。
 // 这同时也是内存上界 —— 种群再大，每只的记忆开销恒定（12 条）。
+//
+// **玩家那条（PLAYER_ID）永不淘汰**，两条路径都豁免。理由见 decay 上方的裁定说明：
+// 玩家被整个忘掉会让"它还认得你"与"卖萌"一起失去依据。
+// 容量上限**不因此松动** —— 永不少留，只是换一个人被忘掉。
 //
 // protectId：本次淘汰中豁免的条目。ensure() 传入新建条目的 id，
 // 否则新记录（familiarity 0）会在被记住之前就立刻被淘汰掉。
@@ -215,13 +238,17 @@ export function decay(memory, dt) {
 export function prune(memory, protectId) {
   if (memory.entries.length <= CONFIG.memoryCapacity) return;
   const protectedEntry = protectId === undefined ? null : get(memory, protectId);
+  // 玩家那条与本次的 protectId 一样，都不是淘汰候选。两条路径共用这一个判定，
+  // 避免"只改了其中一条路径"这种很容易漏的缺陷（测试对两条路径分别钉住）。
+  const playerEntry = get(memory, PLAYER_ID);
+  const isExempt = (e) => e === protectedEntry || (playerEntry !== null && e === playerEntry);
   if (protectedEntry) {
     // 精确移除"未被豁免的条目里 familiarity 最低的那条"。
     // 不做整体排序截断 —— 那会把刚建立的记录一起排到末尾再切掉。
     // 并列时取先遇到的那条；并列的取舍不是 spec 规定的行为，故不钉住。
     let victim = null;
     for (const e of memory.entries) {
-      if (e === protectedEntry) continue;
+      if (isExempt(e)) continue;
       if (victim === null || e.familiarity < victim.familiarity) victim = e;
     }
     if (victim) {
@@ -232,6 +259,16 @@ export function prune(memory, protectId) {
   // 无豁免（或全部都是被豁免的）时，按 familiarity 降序保留前 N 条。
   // entries 的顺序不承载语义 —— get() 是线性扫描，这里排序只为截断。
   memory.entries.sort((a, b) => b.familiarity - a.familiarity);
+  // 玩家那条若本该被截掉，就把它换进保留区的最后一格，替掉那里原本的一条。
+  // 用交换而不是"先删玩家再截断再插回"，是为了不改变数组长度语义、
+  // 也不让玩家那条的**对象引用**失效（adjust 等调用方可能正持有它）。
+  if (playerEntry && !memory.entries.slice(0, CONFIG.memoryCapacity).includes(playerEntry)) {
+    const lastKept = CONFIG.memoryCapacity - 1;
+    const playerIndex = memory.entries.indexOf(playerEntry);
+    const displaced = memory.entries[lastKept];
+    memory.entries[lastKept] = playerEntry;
+    memory.entries[playerIndex] = displaced;
+  }
   memory.entries.length = CONFIG.memoryCapacity;
 }
 
