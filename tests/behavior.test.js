@@ -1,0 +1,692 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { CONFIG } from '../src/config.js';
+import { createRng } from '../src/rng.js';
+import { createCreature } from '../src/creature.js';
+import { PLAYER_ID, adjust } from '../src/memory.js';
+import { INTENTS, MIN_DURATION, decide, scoreAll } from '../src/behavior.js';
+
+let uid = 0;
+const mk = (over = {}) => {
+  const c = createCreature({
+    id: `c${uid++}`, name: 'X', x: 0.5, y: 0.5, age: 600, rng: createRng(500 + uid),
+  });
+  return Object.assign(c, over);
+};
+
+// 一个"什么都没发生"的空场景：没有食物、没有邻居、没有玩家
+const emptySenses = (over = {}) => ({
+  foods: [], neighbors: [], threats: [], playerHand: null,
+  courtshipOptions: [], population: 4, populationCap: 24, ...over,
+});
+
+const food = (id = 'f1', x = 0.6, y = 0.6, kind = 'algae') => ({
+  id, kind, pos: { x, y }, dist: Math.hypot(x - 0.5, y - 0.5),
+});
+
+const neighbor = (id, x, y, size, anger = 0) => ({
+  id, pos: { x, y }, dist: Math.hypot(x - 0.5, y - 0.5),
+  size, stage: 'adult', alive: true, anger,
+});
+
+test('INTENTS 覆盖 spec 4.10 的候选集', () => {
+  for (const kind of ['forage', 'eat', 'rest', 'socialize', 'court', 'explore', 'flee', 'beg', 'protest', 'fight', 'mourn', 'idle']) {
+    assert.ok(INTENTS.includes(kind), `缺少候选行为 ${kind}`);
+  }
+});
+
+test('decide 总是返回一个合法 Intent', () => {
+  const c = mk();
+  const intent = decide(c, emptySenses(), createRng(1));
+  assert.ok(intent && typeof intent === 'object');
+  assert.ok(INTENTS.includes(intent.kind), `非法 kind: ${intent.kind}`);
+  assert.ok(typeof intent.minDuration === 'number' && intent.minDuration > 0);
+});
+
+test('Intent 只在需要时携带 targetId / targetPos', () => {
+  const c = mk();
+  c.needs.hunger = 0.95;
+  const intent = decide(c, emptySenses({ foods: [food()] }), createRng(2));
+  assert.equal(intent.kind, 'forage');
+  assert.equal(intent.targetId, 'f1');
+  assert.deepEqual(intent.targetPos, { x: 0.6, y: 0.6 });
+});
+
+test('极度饥饿且场上有食物时必选 forage（spec 8.1）', () => {
+  for (let i = 0; i < 100; i++) {
+    const c = mk();
+    c.needs.hunger = 0.98;
+    c.emotions.fear = 0;
+    const intent = decide(c, emptySenses({ foods: [food('f', 0.5 + i / 1000, 0.6)] }), createRng(i));
+    assert.equal(intent.kind, 'forage', `第 ${i} 次种子下未选觅食: ${intent.kind}`);
+  }
+});
+
+test('极度饥饿但场上没有食物时退化为 explore（找吃的）', () => {
+  const c = mk();
+  c.needs.hunger = 0.98;
+  const intent = decide(c, emptySenses(), createRng(3));
+  assert.ok(['explore', 'idle'].includes(intent.kind), `应去探索找食物，实际 ${intent.kind}`);
+});
+
+test('forage 选的是最近的食物', () => {
+  const c = mk();
+  c.needs.hunger = 0.98;
+  const senses = emptySenses({
+    foods: [food('far', 0.95, 0.95), food('near', 0.52, 0.52), food('mid', 0.7, 0.7)],
+  });
+  // 重新按 dist 排序（sim 会排好，这里模拟）
+  senses.foods.sort((a, b) => a.dist - b.dist);
+  assert.equal(decide(c, senses, createRng(4)).targetId, 'near');
+});
+
+test('fear 极高且有威胁时选 flee（逃避优先于觅食）', () => {
+  const c = mk();
+  c.needs.hunger = 0.98;
+  c.emotions.fear = 0.95;
+  const senses = emptySenses({
+    foods: [food()],
+    threats: [{ id: 'bully', pos: { x: 0.55, y: 0.5 }, dist: 0.05 }],
+  });
+  assert.equal(decide(c, senses, createRng(5)).kind, 'flee');
+});
+
+test('flee 携带逃离目标位置，且方向远离威胁', () => {
+  const c = mk();
+  c.emotions.fear = 0.95;
+  const threatPos = { x: 0.7, y: 0.5 };
+  const senses = emptySenses({ threats: [{ id: 'bully', pos: threatPos, dist: 0.2 }] });
+  const intent = decide(c, senses, createRng(6));
+  assert.equal(intent.kind, 'flee');
+  assert.ok(intent.targetPos, 'flee 必须有目标位置');
+  // 逃离方向应使得到威胁的距离变大
+  const dBefore = Math.hypot(c.pos.x - threatPos.x, c.pos.y - threatPos.y);
+  const dAfter = Math.hypot(intent.targetPos.x - threatPos.x, intent.targetPos.y - threatPos.y);
+  assert.ok(dAfter > dBefore, `${dBefore} → ${dAfter} 应在远离`);
+});
+
+test('逃离目标不会跑出缸外（clamp 到 [0,1]²）', () => {
+  const c = mk();
+  c.pos = { x: 0.98, y: 0.98 };
+  c.emotions.fear = 0.95;
+  const senses = emptySenses({ threats: [{ id: 'b', pos: { x: 0.9, y: 0.9 }, dist: 0.11 }] });
+  const intent = decide(c, senses, createRng(7));
+  assert.ok(intent.targetPos.x >= 0 && intent.targetPos.x <= 1);
+  assert.ok(intent.targetPos.y >= 0 && intent.targetPos.y <= 1);
+});
+
+test('精力耗尽时选 rest', () => {
+  const c = mk();
+  c.needs.energy = 0.98;
+  c.needs.hunger = 0.1;
+  c.emotions.fear = 0;
+  assert.equal(decide(c, emptySenses(), createRng(8)).kind, 'rest');
+});
+
+test('困倦压过觅食：又累又饿但更累时选 rest', () => {
+  const c = mk();
+  c.needs.energy = 0.99;
+  c.needs.hunger = 0.6;
+  assert.equal(decide(c, emptySenses({ foods: [food()] }), createRng(9)).kind, 'rest');
+});
+
+test('社交匮乏且有邻居时选 socialize', () => {
+  const c = mk();
+  c.needs.social = 0.9;
+  c.needs.hunger = 0.1;
+  c.needs.energy = 0.1;
+  const senses = emptySenses({
+    neighbors: [{ id: 'n1', pos: { x: 0.6, y: 0.5 }, dist: 0.1, size: 26, stage: 'adult', alive: true, anger: 0 }],
+  });
+  const intent = decide(c, senses, createRng(10));
+  assert.equal(intent.kind, 'socialize');
+  assert.equal(intent.targetId, 'n1');
+});
+
+test('社交匮乏但没有邻居时不选 socialize（无对象）', () => {
+  const c = mk();
+  c.needs.social = 0.95;
+  const intent = decide(c, emptySenses(), createRng(11));
+  assert.notEqual(intent.kind, 'socialize');
+});
+
+test('有求偶候选且 arousal 高时选 court', () => {
+  const c = mk();
+  c.emotions.arousal = 0.9;
+  c.needs.hunger = 0.1;
+  c.needs.energy = 0.1;
+  c.needs.social = 0.1;
+  const senses = emptySenses({
+    courtshipOptions: [{ id: 'mate1', dist: 0.1, score: 1.5 }],
+  });
+  const intent = decide(c, senses, createRng(12));
+  assert.equal(intent.kind, 'court');
+  assert.equal(intent.targetId, 'mate1');
+});
+
+test('所有求偶候选分数为 0 时不选 court（近亲/上限的后果传导到行为）', () => {
+  for (let i = 0; i < 50; i++) {
+    const c = mk();
+    c.emotions.arousal = 0.95;
+    c.needs.hunger = 0.1;
+    c.needs.energy = 0.1;
+    const senses = emptySenses({
+      courtshipOptions: [{ id: 'sibling', dist: 0.1, score: 0 }],
+    });
+    assert.notEqual(decide(c, senses, createRng(i)).kind, 'court');
+  }
+});
+
+test('courtshipOption 分数越高越可能被选中', () => {
+  // arousal 取 0.05（而不是 0.6）是**必需的**，不是调参：court 的分差是
+  // `score × arousal × 1.6`，而它必须与 idle 的 0.12 竞争。
+  // arousal 0.6 时两个抽样的 court 分分别是 1.92 与 0.192，**两者都压倒性胜出**
+  // （实测 200 次 × 两组全部落在 court），`200 > 200` 为假、断言反而变红 ——
+  // 而且即使把低分改成 0.1 也还是全胜，这条用例会变成只测量饱和区的空断言。
+  // arousal 0.05 时两个分数是 0.16 与 0.016，恰好跨在 idle(0.12) 的两侧：
+  // 高分那组 200/200 选 court，低分那组 0/200 —— 断言真的在测量"分高更常被选中"。
+  const countWith = (score, seedBase) => {
+    let n = 0;
+    for (let i = 0; i < 200; i++) {
+      const c = mk();
+      c.emotions.arousal = 0.05;
+      c.needs.social = 0.4;
+      const senses = emptySenses({ courtshipOptions: [{ id: 'm', dist: 0.1, score }] });
+      if (decide(c, senses, createRng(seedBase + i)).kind === 'court') n++;
+    }
+    return n;
+  };
+  assert.ok(countWith(2.0, 1000) > countWith(0.2, 1000), '高分候选应更常被选中');
+});
+
+test('对玩家好感高且手在附近时选 beg（卖萌）', () => {
+  const c = mk();
+  adjust(c.memory, PLAYER_ID, 0.8, 0.9);
+  c.thresholds.playerApproach = 0.7;
+  c.emotions.joy = 0.5;
+  c.needs.hunger = 0.2;
+  const senses = emptySenses({
+    playerHand: { pos: { x: 0.55, y: 0.5 }, dist: 0.05, speed: 0.01 },
+  });
+  const intent = decide(c, senses, createRng(13));
+  assert.equal(intent.kind, 'beg');
+});
+
+test('对玩家好感为负时不会选 beg（它躲你，不讨好你）', () => {
+  for (let i = 0; i < 50; i++) {
+    const c = mk();
+    adjust(c.memory, PLAYER_ID, -0.9, 0.9);
+    c.thresholds.playerApproach = -0.3;
+    const senses = emptySenses({
+      playerHand: { pos: { x: 0.55, y: 0.5 }, dist: 0.05, speed: 0.01 },
+    });
+    assert.notEqual(decide(c, senses, createRng(i)).kind, 'beg');
+  }
+});
+
+test('只认识你、还没喜欢上你时也可能卖萌（familiarity 单独开门）', () => {
+  // 这条守的是 beg 的可达性：内核里 affection 只有 beg 自己会累积，
+  // 若 beg 只认 affection，它就永远不可能第一次发生。
+  const c = mk();
+  adjust(c.memory, PLAYER_ID, 0, 0.6);      // 好感 0，但已经认识你了
+  c.thresholds.playerApproach = 0.8;
+  c.emotions.joy = 0.4;
+  c.needs.hunger = 0.2;
+  const senses = emptySenses({
+    playerHand: { pos: { x: 0.55, y: 0.5 }, dist: 0.05, speed: 0.01 },
+  });
+  assert.equal(decide(c, senses, createRng(20)).kind, 'beg');
+});
+
+test('既不认识也不喜欢时不会卖萌（门槛没有被无条件打开）', () => {
+  for (let i = 0; i < 50; i++) {
+    const c = mk();
+    c.thresholds.playerApproach = 0.9;      // 性格再黏人也不行
+    c.emotions.joy = 0.6;
+    c.needs.hunger = 0.2;
+    const senses = emptySenses({
+      playerHand: { pos: { x: 0.55, y: 0.5 }, dist: 0.05, speed: 0.01 },
+    });
+    assert.notEqual(decide(c, senses, createRng(i)).kind, 'beg');
+  }
+});
+
+test('playerApproach 为负且手靠近时选 flee（怕你的手）', () => {
+  const c = mk();
+  c.thresholds.playerApproach = -0.3;
+  c.emotions.fear = 0.6;
+  adjust(c.memory, PLAYER_ID, -0.9, 0.9);
+  const senses = emptySenses({
+    playerHand: { pos: { x: 0.52, y: 0.5 }, dist: 0.02, speed: 0.4 },
+  });
+  assert.equal(decide(c, senses, createRng(14)).kind, 'flee');
+});
+
+test('被招惹（anger 高）且肇事者在附近时选 protest 或 fight', () => {
+  const c = mk();
+  c.traits.size = 26;                 // 显式钉住：体型门槛是 traits.size（基因 14~38）
+  c.emotions.anger = 0.9;
+  c.thresholds.angerThreshold = 0.2;
+  c.emotions.fear = 0;
+  const senses = emptySenses({
+    neighbors: [{ id: 'rival', pos: { x: 0.55, y: 0.5 }, dist: 0.05, size: 26, stage: 'adult', alive: true, anger: 0.5 }],
+    provokerId: 'rival',
+  });
+  const intent = decide(c, senses, createRng(15));
+  assert.ok(['protest', 'fight'].includes(intent.kind), `应抗议或争斗，实际 ${intent.kind}`);
+});
+
+test('对方明显更大时选 protest 而非 fight（打得过才打）', () => {
+  const c = mk();
+  c.traits.size = 20;
+  c.emotions.anger = 0.9;
+  c.emotions.fear = 0.3;      // 刻意留在主分支的 fear < 0.35 内：他要打，只是打不过
+  const senses = emptySenses({
+    neighbors: [{ id: 'big', pos: { x: 0.55, y: 0.5 }, dist: 0.05, size: 38, stage: 'adult', alive: true, anger: 0.5 }],
+    provokerId: 'big',
+  });
+  const intent = decide(c, senses, createRng(16));
+  assert.notEqual(intent.kind, 'fight', '面对两倍体型的对手不该硬拼');
+  // 并且真的退到 protest（而不是退到"什么都不做"）——
+  // 否则这条用例只证明了"没打"，没证明体型门槛把它导流到了 protest。
+  assert.equal(intent.kind, 'protest', `打不过时应收敛到 protest，实际 ${intent.kind}`);
+});
+
+test('mourn > 0 时选 mourn（哀悼压过其他日常行为）', () => {
+  const c = mk();
+  c.mourn = 4;
+  c.needs.hunger = 0.6;
+  const intent = decide(c, emptySenses({ foods: [food()] }), createRng(17));
+  assert.equal(intent.kind, 'mourn');
+});
+
+test('mourn 不压过 flee（哀悼时也会逃命）', () => {
+  const c = mk();
+  c.mourn = 4;
+  c.emotions.fear = 0.95;
+  const senses = emptySenses({ threats: [{ id: 'b', pos: { x: 0.55, y: 0.5 }, dist: 0.05 }] });
+  assert.equal(decide(c, senses, createRng(18)).kind, 'flee');
+});
+
+test('一切平静时选 idle 或 explore，不会卡住', () => {
+  const c = mk();
+  c.needs.hunger = 0.1;
+  c.needs.energy = 0.1;
+  c.needs.social = 0.1;
+  c.emotions.fear = 0;
+  const kinds = new Set();
+  for (let i = 0; i < 100; i++) kinds.add(decide(c, emptySenses(), createRng(i)).kind);
+  assert.ok(kinds.size > 0);
+  for (const k of kinds) assert.ok(['idle', 'explore', 'socialize'].includes(k), `平静时不该 ${k}`);
+});
+
+test('curiosity 高时更常选 explore', () => {
+  // `0.2 + curious*0.6` 里的 0.2 是**基线**，必须小于 idle 的 0.12 才能让
+  // "不探索"这一侧真的存在。0.2 那点好奇心配上 exploreRadius 的下限 0.4，
+  // explore = 0.2 × (0.4 + r) 对**所有** r ≥ 0.2 都 ≥ 0.12（r 最低时 0.2×0.6=0.12，
+  // 恰好在 idle 之上）—— 于是非好奇组 300 次全部选 explore，`300 > 300` 为假，
+  // 断言在测量一个饱和区，两个方向都没有鉴别力。
+  // 基线取 0.05 时：好奇组 explore = 0.65 × (0.4 + r) 远高于 0.12（实测 300/300），
+  // 非好奇组 explore = 0.05 × (0.4 + r) 低于 0.12（实测 0/300）—— 两侧都真的有鉴别力。
+  // 另外一个佐证：真实 tick 流程里平静场景的 curiosity 目标值是 0.06（novelty 0.1
+  // ⇒ clamp01(0.1×0.6 + curious×0.4)，curious=0 时），远小于 0.2。
+  const count = (curious, seedBase) => {
+    let n = 0;
+    for (let i = 0; i < 300; i++) {
+      const c = mk();
+      c.needs.hunger = 0.2; c.needs.energy = 0.2; c.needs.social = 0.2;
+      c.traits.personality.curious = curious;
+      c.emotions.curiosity = 0.05 + curious * 0.6;
+      if (decide(c, emptySenses(), createRng(seedBase + i)).kind === 'explore') n++;
+    }
+    return n;
+  };
+  const high = count(1, 2000);
+  const low = count(0, 2000);
+  assert.ok(high > low, `好奇者应更常探索，实际 ${high} vs ${low}`);
+  // 两侧都要真的有鉴别力：只断言 `high > low` 会被"两组都探索"或"两组都不探索"蒙混
+  assert.equal(low, 0, `不好奇就不该探索，实际探索了 ${low}/300 次`);
+  assert.equal(high, 300, `好奇者应几乎总在探索，实际只有 ${high}/300`);
+});
+
+test('固定种子下决策完全可复现（spec 8.1）', () => {
+  const build = () => {
+    const c = mk();
+    c.needs.hunger = 0.6;
+    c.needs.social = 0.4;
+    c.emotions.curiosity = 0.5;
+    return c;
+  };
+  const senses = emptySenses({
+    foods: [food()],
+    neighbors: [{ id: 'n', pos: { x: 0.6, y: 0.5 }, dist: 0.1, size: 26, stage: 'adult', alive: true, anger: 0 }],
+  });
+  // 第二个场景：需求都很低，只剩下 idle(0.12) 与 explore 竞争。
+  // 它存在的唯一理由是让 explore **真的赢下一些种子** —— 见下面那条复合断言。
+  const calm = mk();
+  calm.needs.hunger = 0.1;
+  calm.needs.energy = 0.1;
+  calm.needs.social = 0.1;
+  calm.emotions.curiosity = 0.5;
+  const seen = new Set();
+  for (let i = 0; i < 50; i++) {
+    // 第一个场景每次都用 build() 新建（原样的复制），再把 calm 也复核一遍
+    const a = decide(build(), senses, createRng(777 + i));
+    const b = decide(build(), senses, createRng(777 + i));
+    assert.deepEqual(a, b, `种子 ${777 + i} 下决策不可复现`);
+    const c1 = decide(calm, emptySenses(), createRng(777 + i));
+    const c2 = decide(calm, emptySenses(), createRng(777 + i));
+    assert.deepEqual(c1, c2, `平静场景在种子 ${777 + i} 下决策不可复现`);
+    seen.add(a.kind);
+    seen.add(c1.kind);
+  }
+  // 复合断言：deepEqual 只有在**目标位置也被比较**时才真的能抓到
+  // "同种子不同结果"。若这批状态里全是 decision 不依赖 rng 的意图
+  // （forage / eat / court / protest…），那么 a 与 b 的 kind 必然相同，
+  // 连一个把噪声换成模块级计数器的实现都能通过 —— 实测过。
+  // 所以要求这套场景里必须出现**至少一个带随机目标位置**的意图
+  // （explore 用 rng.range 挑目标点），否则这条用例是在空转。
+  assert.ok(seen.has('explore'),
+    `这套场景必须能让 explore 胜出（它才真正消费 rng），实际只出现 ${[...seen]}`);
+});
+
+test('随机扰动确实存在（同状态不同种子会给出不同选择，避免机械感）', () => {
+  const kinds = new Set();
+  for (let i = 0; i < 200; i++) {
+    const c = mk();
+    c.needs.hunger = 0.45;      // 中等：几个候选势均力敌
+    c.needs.social = 0.4;
+    c.needs.energy = 0.35;
+    c.emotions.curiosity = 0.4;
+    kinds.add(decide(c, emptySenses({ foods: [food()] }), createRng(i)).kind);
+  }
+  assert.ok(kinds.size >= 2, `势均力敌时应有分歧，实际只出现 ${[...kinds]}`);
+});
+
+test('扰动幅度有限：压倒性需求不会被随机翻盘', () => {
+  for (let i = 0; i < 300; i++) {
+    const c = mk();
+    c.needs.hunger = 0.99;
+    c.emotions.fear = 0;
+    assert.equal(
+      decide(c, emptySenses({ foods: [food()] }), createRng(i)).kind,
+      'forage',
+      `种子 ${i} 下极度饥饿竟没去觅食`,
+    );
+  }
+});
+
+test('scoreAll 返回所有候选的分数且非负', () => {
+  const c = mk();
+  c.needs.hunger = 0.5;
+  const scores = scoreAll(c, emptySenses({ foods: [food()] }));
+  assert.deepEqual(Object.keys(scores).sort(), [...INTENTS].sort());
+  for (const [k, v] of Object.entries(scores)) {
+    assert.ok(typeof v === 'number' && Number.isFinite(v), `${k} 非法分数: ${v}`);
+    assert.ok(v >= 0, `${k} 分数为负: ${v}`);
+  }
+});
+
+test('scoreAll 是纯函数（不修改 creature，也不修改 senses）', () => {
+  const c = mk();
+  c.needs.hunger = 0.5;
+  const senses = emptySenses({
+    foods: [food()],
+    neighbors: [neighbor('n', 0.6, 0.5, 26)],
+    courtshipOptions: [{ id: 'n', dist: 0.1, score: 1.2 }],
+  });
+  const beforeC = JSON.stringify({
+    needs: c.needs, emotions: c.emotions, intent: c.intent,
+    pos: c.pos, thresholds: c.thresholds,
+  });
+  // 整只生物的完整快照。只比对 needs/emotions/intent/pos 会漏掉
+  // mourn / age / resting / memory / lineage 这些字段 —— 一个"顺手把
+  // c.mourn 减了 1"或"往 c.memory 里塞了一条"的实现照样能通过。
+  const beforeWhole = JSON.stringify(c);
+  const beforeS = JSON.stringify(senses);
+  scoreAll(c, senses);
+  decide(c, senses, createRng(1));
+  assert.equal(JSON.stringify({
+    needs: c.needs, emotions: c.emotions, intent: c.intent,
+    pos: c.pos, thresholds: c.thresholds,
+  }), beforeC, 'decide / scoreAll 不得修改 creature 状态');
+  assert.equal(JSON.stringify(c), beforeWhole, 'decide / scoreAll 不得修改 creature 的**任何**字段');
+  assert.equal(JSON.stringify(senses), beforeS, 'decide / scoreAll 不得修改 senses（只读契约）');
+});
+
+test('意图都被锁定足够久，不会每帧重新决策（flee 是唯一豁免）', () => {
+  const c = mk();
+  const seen = new Set();
+  for (const senses of [
+    emptySenses(),
+    emptySenses({ foods: [food()] }),
+    emptySenses({ threats: [{ id: 'b', pos: { x: 0.55, y: 0.5 }, dist: 0.05 }] }),
+  ]) {
+    for (let i = 0; i < 30; i++) {
+      c.emotions.fear = senses.threats.length ? 0.95 : 0;
+      const intent = decide(c, senses, createRng(i));
+      seen.add(intent.kind);
+      if (intent.kind === 'flee') continue;   // 逃命的短锁定由下一条测试单独守
+      assert.ok(
+        intent.minDuration >= CONFIG.behavior.minIntentDuration * 0.8,
+        `${intent.kind} 的 minDuration 过短: ${intent.minDuration}`,
+      );
+      assert.ok(
+        intent.minDuration <= CONFIG.behavior.minIntentDuration * 4,
+        `${intent.kind} 的 minDuration 过长，会把生物锁死在一个行为上: ${intent.minDuration}`,
+      );
+    }
+  }
+  assert.ok(seen.size >= 2, `这套场景应能触发多种意图，实际只有 ${[...seen]}`);
+});
+
+test('flee 的 minDuration 较短（逃命要能随时改向）', () => {
+  const c = mk();
+  c.emotions.fear = 0.95;
+  const senses = emptySenses({ threats: [{ id: 'b', pos: { x: 0.55, y: 0.5 }, dist: 0.05 }] });
+  const intent = decide(c, senses, createRng(1));
+  assert.equal(intent.kind, 'flee');
+  assert.ok(intent.minDuration <= CONFIG.behavior.minIntentDuration,
+    `flee 不该被锁定太久: ${intent.minDuration}`);
+});
+
+test('贴着食物且饿时选 eat（eat 不是不可达的候选）', () => {
+  // ⚠️ 本 Task 原先**没有任何**一条断言 eat 会被选中：`food()` 被塞进很多用例，
+  // 但那些用例断言的是别的东西（flee / rest / beg / scoreAll 键集）。
+  // 于是 `eat` 的分数被改成恒 0、或门槛从 0.035 收紧到 0.034，
+  // 全套测试照样绿 —— 而 spec 4.10 明列「进食」为候选行为，
+  // Task 10 的 `case 'eat'` 分支（含 fed 情绪事件与冰晶的 calm 路径）会整体变成死代码。
+  // 这里直接钉住"够近 + 够饿 ⇒ 选中 eat"。
+  const c = mk();
+  c.needs.hunger = 0.9;
+  // 距离刻意取 0.01：**贴着食物**，远在 0.035 半径内，是真实觅食抵达后的情形。
+  const senses = emptySenses({ foods: [food('f', 0.5 + 0.01, 0.5)] });   // dist = 0.01 < 0.035
+  assert.equal(decide(c, senses, createRng(30)).kind, 'eat');
+  // 半径本身也要被钉住：把 EAT_DIST 收紧到 0.034 时上面那条**仍然是绿的**
+  // （0.01 远在 0.034 内）—— 实测过，这就是本 Task 原先那种"看起来有覆盖、
+  // 其实对阈值毫无鉴别力"的真空。所以再补一条贴着**门槛**的：dist 0.034 < 0.035。
+  const edge = mk();
+  edge.needs.hunger = 0.9;
+  assert.equal(decide(edge, emptySenses({ foods: [food('f', 0.5 + 0.034, 0.5)] }), createRng(33)).kind,
+    'eat', 'dist = 0.034 仍在 0.035 半径内，应选 eat');
+  // 反向：同样的距离但**不饿**时不该选 eat（门槛里的 hunger > 0.05 那半边也要生效）
+  const full = mk();
+  full.needs.hunger = 0.02;
+  assert.notEqual(decide(full, senses, createRng(31)).kind, 'eat');
+  // 再反向：很饿但**够不着**时不该选 eat
+  const far = mk();
+  far.needs.hunger = 0.9;
+  const farSenses = emptySenses({ foods: [food('f', 0.6, 0.5)] });       // dist = 0.1 > 0.035
+  assert.notEqual(decide(far, farSenses, createRng(32)).kind, 'eat');
+});
+
+test('scoreAll 的数值量级被字面量钉住（urgency 权重不是"只要 > 0"就行）', () => {
+  // 原有的 `assert.ok(v >= 0)` 是**死断言**：scoreAll 的每个分支都是
+  // clamp / Math.max(…, 0) 的乘积或非负字面量，它永远为真。
+  // 于是没有任何一条测试钉住过任何 urgency 权重 —— 把 seekFoodUrgency 从 1.6
+  // 改成 0.1、或把 idle 的 0.12 改成 0，全套测试照样绿，而生物会变成一缸只会发呆的果冻。
+  // （同类问题见 Task 3 的"没有测试钉住任何速率量级"。）
+  const c = mk();
+  // 把 curiosity 钉成字面量，这样下面的期望值可以手算出来，而不是复读 trait。
+  c.traits.personality.curious = 0;
+  c.needs.hunger = 0.5;      // 高于普遍阈值：gluttonous 0.5 ⇒ hungerTrigger = 0.55-0.15 = 0.40
+
+  // 空场景下只有 idle 有分：字面量 0.12（兜底基础分）
+  assert.equal(scoreAll(c, emptySenses()).idle, 0.12);
+
+  // 饥饿 0.5 且**高于**触发阈值：0.5 × seekFoodUrgency(1.6) × (1 + 0×0.2) = 0.8
+  assert.equal(scoreAll(c, emptySenses({ foods: [food()] })).forage, 0.8);
+  // 饥饿恰好等于触发阈值时**不**启动（条件是严格大于）—— 这半边也钉住，
+  // 否则"贪吃者更早动身"完全可以退化成"永远动身"。
+  const atTrigger = mk();
+  atTrigger.traits.personality.curious = 0;
+  atTrigger.needs.hunger = atTrigger.thresholds.hungerTrigger;
+  assert.equal(scoreAll(atTrigger, emptySenses({ foods: [food()] })).forage, 0);
+  // 刚好越过阈值一点就必须有分（浮点舍入会被这条抓住，而不是被上面那条掩盖）
+  const justOver = mk();
+  justOver.traits.personality.curious = 0;
+  justOver.needs.hunger = justOver.thresholds.hungerTrigger + 1e-9;
+  assert.ok(scoreAll(justOver, emptySenses({ foods: [food()] })).forage > 0);
+
+  // curiosity 的贡献是 **+20%**，不是"某些正数"：
+  //   0.6 × seekFoodUrgency 1.6 × (1 + 0.6 × 0.2) = 0.96 × 1.12 = 1.0752
+  // 把 0.2 改成 0.4 会得到 0.96 × 1.24 = 1.1904，当场变红。
+  //
+  // 这里用 1e-12 容差而不是严格相等：1.0752 在二进制里不可精确表示，
+  // 实测浮点结果是 1.0752000000000002（差 2.16e-16），严格相等会误报。
+  // 容差刻意取到比上一条断言（idle/forage 恰好可精确表示、用 assert.equal）
+  // 宽、但远小于"把 0.2 改成 0.4"造成的 0.1152 偏差 —— 松到能掩盖改动的容差
+  // 在本项目是要被复查抓的，所以写清这个数量级差。
+  const curious = mk();
+  curious.traits.personality.curious = 1;
+  curious.emotions.curiosity = 0.6;
+  curious.needs.hunger = 0.6;
+  const forageCurious = scoreAll(curious, emptySenses({ foods: [food()] })).forage;
+  assert.ok(Math.abs(forageCurious - 1.0752) < 1e-12,
+    `curiosity 的 +20% 贡献应给出 1.0752，实际 ${forageCurious}`);});
+
+test('中等愤怒 + 低恐惧 + 与肇事者近距离时真的会选 fight（fight 不是不可达的候选）', () => {
+  // 原有的两条 protest/fight 用例都抓不住 fight 的不可达：
+  //   一条接受 ['protest','fight'] 两个答案（protest 分支单独也能让它通过），
+  //   另一条只断言 notEqual(kind,'fight')。
+  // 于是把 fight 的分支改成恒 0、或把体型门槛收紧到 0.1，两条都仍然是绿的，
+  // 而 Task 10 的 `case 'fight'`（贴上去、stopDist 0.03）会整体变成死代码。
+  //
+  // 这里选的是 brief 公式里 fight **严格胜过** protest 的那一段：两者都取
+  //   protest = anger × 1.2 × (1 - fear)
+  //   fight   = anger × fightUrgency(1.1) × (1 - 0.2×playerApproach)
+  // 愤怒相同、系数相同，所以只比 1.1×(1-0.2p) 与 1.2×(1-f)：
+  //   p = -0.5（显著避开玩家的手）、f = 0.3 ⇒ 1.21 vs 0.84，fight 高 44.05%，
+  //   高于扰动带来的最大倍率 1.12/0.88 = 1.2727 —— **对全部 500 个种子**成立。
+  //   （p = -0.3 时比值降到 1.2 —— 低于 1.2727，实测种子 13 处 protest 会翻盘。
+  //     这个"差一点"的边界正是这条用例必须跑满 500 个种子的原因。）
+  // fight 的 12 个候选里其余全部为 0（无食物/手/威胁、arousal 0、
+  // curiosity 钉 0、energy 0.1、social 0），所以没有任何一项能靠扰动翻盘。
+  //
+  // ⚠️ `traits.size` 必须显式钉住：它是基因（CONFIG.minSize 14 ~ maxSize 38），
+  // 而体型门槛是 `provoker.size <= c.traits.size × 1.25`。对手 22 需要己方
+  // traits.size ≥ 17.6 —— 实测 500 个基因组里有 29 个低于这条线（minSize 那侧
+  // 的个体会被判成"打不过"），那条断言会在**随机体型**上偶发变红。
+  for (let seed = 0; seed < 500; seed++) {
+    const c = mk();
+    c.traits.size = 26;                   // 与对手 22 的比值 0.846 ≤ 1.25 ⇒ 打得过
+    c.traits.personality.curious = 0;
+    c.thresholds.playerApproach = -0.5;   // 显著避开玩家的手 ⇒ fight 的乘子最大
+    c.thresholds.angerThreshold = 0.2;
+    c.needs.hunger = 0.1;
+    c.needs.energy = 0.1;
+    c.needs.social = 0;
+    c.emotions.anger = 0.9;      // 超过 angerThreshold+0.15，两侧都开门
+    c.emotions.fear = 0.3;       // < 0.35 ⇒ 敢打
+    c.emotions.arousal = 0;
+    const senses = emptySenses({
+      neighbors: [neighbor('rival', 0.55, 0.5, 22)],   // 22 ≤ 26×1.25 ⇒ 打得过
+      provokerId: 'rival',
+    });
+    const intent = decide(c, senses, createRng(seed));
+    assert.equal(intent.kind, 'fight', `种子 ${seed} 下应选 fight，实际 ${intent.kind}`);
+    assert.equal(intent.targetId, 'rival', 'fight 必须带上肇事者 id');
+  }
+});
+
+test('需求只为效用评分提供紧迫度，绝不一票否决（spec 4.4）', () => {
+  // spec 4.4 与 Global Constraints 都写明：最匮乏的需求不得否决其他行为。
+  // 一个"饥饿过高就把别的候选全部归零"的实现会通过上面所有用例
+  // （那些用例看的是饥饿时**确实**选了觅食），所以这条单独守。
+  //
+  // 场景必须让"非最匮乏需求"的候选有能力胜出，否则这条用例是空转：
+  // 饿到 1.0 时 forage 是唯一有分的候选（2.58），无论 veto 与否都必然选它 ——
+  // 实测过：把 forage 在 hunger > 0.99 时归零，10 个种子里仍全部是 forage 或 idle。
+  // 所以这里放**三个**需求都拉满、且有食物 + 三个邻居的场面：
+  // forage(2.58) / rest(2.52) / socialize(1.33) 势均力敌，任何一处被"否决"
+  // 都会让结果分布立刻塌缩。
+  const senses = emptySenses({
+    foods: [food()],
+    neighbors: [
+      { id: 'n1', pos: { x: 0.6, y: 0.5 }, dist: 0.1, size: 26, stage: 'adult', alive: true, anger: 0 },
+      { id: 'n2', pos: { x: 0.4, y: 0.5 }, dist: 0.1, size: 26, stage: 'adult', alive: true, anger: 0 },
+      { id: 'n3', pos: { x: 0.5, y: 0.6 }, dist: 0.1, size: 26, stage: 'adult', alive: true, anger: 0 },
+    ],
+  });
+  const kinds = new Set();
+  for (let seed = 0; seed < 200; seed++) {
+    const c = mk();
+    c.needs.hunger = 1;
+    c.needs.energy = 1;
+    c.needs.social = 1;
+    c.needs.safety = 1;
+    kinds.add(decide(c, senses, createRng(seed)).kind);
+  }
+  // 至少两个候选能胜出，且必须包含"非最匮乏需求"对应的那一个 ——
+  // 证明其他候选没有被归零
+  assert.ok(kinds.size >= 2, `三条需求拉满时仍应有多个候选竞争，实际只有 ${[...kinds]}`);
+  assert.ok([...kinds].some((k) => k !== 'forage'),
+    `需求不该把其他候选全部否决，实际只出现 ${[...kinds]}`);
+  // 只看"有没有非 forage"是不够的：实测过，一个"饥饿 > 0.99 时把 forage 归零"
+  // 的 veto 实现仍然能通过上面两条（rest/socialize 顶上来了，kinds 依然 ≥ 2）。
+  // 真正的判据是**每个势均力敌的候选都必须能赢** —— forage 自己也一样。
+  // 三个候选的分数都在 1.3~2.6 之间，扰动 ±12% 足以让每个都拿到一些种子。
+  assert.ok(kinds.has('forage'), `最匮乏的需求对应的行为也必须能被选中，实际只有 ${[...kinds]}`);
+  assert.ok(kinds.has('rest'), `休息必须能竞争过觅食，实际只有 ${[...kinds]}`);
+});
+
+test('INTENTS 被冻结，且冻结这件事本身被钉住', () => {
+  // 只断言内容是不够的：deepEqual 比的是内容与原型、**不是可变性**，
+  // 所以摘掉 Object.freeze 不会让任何内容断言变红，之后一次就地改写也无人察觉。
+  // （Task 2 的 PATTERNS 就是这样被 .reverse() 静默重排、害得整缸花纹错位的。）
+  assert.ok(Object.isFrozen(INTENTS), 'INTENTS 应被冻结');
+  assert.throws(() => INTENTS.push('__probe__'), TypeError, 'push 应抛 TypeError');
+  assert.throws(() => INTENTS.reverse(), TypeError, 'reverse 应抛 TypeError');
+  assert.throws(() => { INTENTS[0] = '__probe__'; }, TypeError, '下标赋值应抛 TypeError');
+  // 反向确认：冻结只挡写，不挡读与展开（decide / scoreAll 靠遍历它工作）
+  assert.equal([...INTENTS].length, 12);
+  assert.deepEqual([...INTENTS], ['forage', 'eat', 'rest', 'socialize', 'court', 'explore',
+    'flee', 'beg', 'protest', 'fight', 'mourn', 'idle']);
+});
+
+test('每个意图都恰好有一个分数，且键集与 INTENTS 一致（不多不少）', () => {
+  // 原测试是 `deepEqual(Object.keys(scores).sort(), [...INTENTS].sort())` ——
+  // 它只能抓"少了一个"，抓不到"多了一个但同时也加进了 INTENTS"，
+  // 因为那句话的两边会被同一次编辑改掉。
+  // Task 6 的字段集就是按"不多不少"钉的，这里同理：把字面量**写在测试里**。
+  const c = mk();
+  const scores = scoreAll(c, emptySenses({ foods: [food()] }));
+  assert.deepEqual(Object.keys(scores).sort(),
+    ['beg', 'court', 'eat', 'explore', 'fight', 'flee',
+      'forage', 'idle', 'mourn', 'protest', 'rest', 'socialize']);
+  assert.equal(Object.keys(scores).length, 12, '恰好 12 个候选，与 INTENTS 一一对应');
+  // 每个值都必须是有限数：`Number.isFinite` 必须在范围断言**之前**，
+  // 否则 NaN 会被 `NaN >= 0` 为假而误报成"越界"，诊断信息就丢了。
+  for (const [k, v] of Object.entries(scores)) {
+    assert.ok(Number.isFinite(v), `${k} 非有限数: ${v}`);
+    assert.ok(v >= 0, `${k} 应为非负: ${v}`);
+  }
+  // 每个意图的 minDuration 都必须有限（新加候选若忘了写 MIN_DURATION 会在这里现形）
+  for (const kind of INTENTS) {
+    assert.ok(Number.isFinite(MIN_DURATION[kind]), `${kind} 缺少 minDuration`);
+  }
+  // MIN_DURATION 与 INTENTS 必须一一对应（键集相等，不多不少），且它也被冻结
+  assert.deepEqual(Object.keys(MIN_DURATION).sort(), [...INTENTS].sort());
+  assert.ok(Object.isFrozen(MIN_DURATION), 'MIN_DURATION 应被冻结');
+  assert.throws(() => { MIN_DURATION.eat = 0; }, TypeError, '改锁定时长应抛 TypeError');
+});
