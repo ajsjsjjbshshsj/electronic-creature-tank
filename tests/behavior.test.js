@@ -330,23 +330,80 @@ test('curiosity 高时更常选 explore', () => {
   // 非好奇组 explore = 0.05 × (0.4 + r) 低于 0.12（实测 0/300）—— 两侧都真的有鉴别力。
   // 另外一个佐证：真实 tick 流程里平静场景的 curiosity 目标值是 0.06（novelty 0.1
   // ⇒ clamp01(0.1×0.6 + curious×0.4)，curious=0 时），远小于 0.2。
-  const count = (curious, seedBase) => {
+  const count = (curious, seedBase, radius) => {
     let n = 0;
     for (let i = 0; i < 300; i++) {
       const c = mk();
       c.needs.hunger = 0.2; c.needs.energy = 0.2; c.needs.social = 0.2;
-      c.traits.personality.curious = curious;
+      // ⚠️ 写 `c.traits.personality.curious` 是**无效的**：thresholds 在 createCreature
+      // 时就由 personality 快照好了（src/creature.js:54），之后再改 traits 不会
+      // 影响 `c.thresholds`。所以要让探索半径这条路径真的被测到，
+      // 必须直接写 `c.thresholds.exploreRadius`。
+      // 原先只写 traits 的那版，把 behavior 里的 `c.thresholds.exploreRadius`
+      // 换成任意常量都不会让任何测试变红 —— 半径来自好奇基因这个说法当时是**没有测试支撑**的。
+      c.traits.personality.curious = curious;              // 保留：说明"基因"这一侧的意图
+      c.thresholds.exploreRadius = radius;                 // 真正生效的那一处
       c.emotions.curiosity = 0.05 + curious * 0.6;
       if (decide(c, emptySenses(), createRng(seedBase + i)).kind === 'explore') n++;
     }
     return n;
   };
-  const high = count(1, 2000);
-  const low = count(0, 2000);
+  const high = count(1, 2000, 0.85);
+  const low = count(0, 2000, 0.25);
   assert.ok(high > low, `好奇者应更常探索，实际 ${high} vs ${low}`);
   // 两侧都要真的有鉴别力：只断言 `high > low` 会被"两组都探索"或"两组都不探索"蒙混
   assert.equal(low, 0, `不好奇就不该探索，实际探索了 ${low}/300 次`);
   assert.equal(high, 300, `好奇者应几乎总在探索，实际只有 ${high}/300`);
+  // 半径路径本身必须承重：直接比较 **explore 的效用分**随半径的变化。
+  // 不能拿"决策次数"来测：好奇心拉满时 explore 无论半径多少都压倒 idle(0.12)，
+  // 两组都是 300/300 —— 那样的断言会恒假（我第一版就是这么写错的）。
+  // 分数层面才看得到依赖：若 behavior 不再读 thresholds.exploreRadius，三者会相等。
+  const scoreAt = (radius) => {
+    const c = mk();
+    c.needs.hunger = 0.2; c.needs.energy = 0.2; c.needs.social = 0.2;
+    c.thresholds.exploreRadius = radius;
+    c.emotions.curiosity = 0.65;
+    return scoreAll(c, emptySenses()).explore;
+  };
+  const sBig = scoreAt(0.85);
+  const sMid = scoreAt(0.5);
+  const sSmall = scoreAt(0.25);
+  assert.ok(sBig > sMid && sMid > sSmall,
+    `explore 的分数应随探索半径严格上升：0.85→${sBig}，0.5→${sMid}，0.25→${sSmall}`);
+  assert.ok(sBig > 0, '半径路径必须让 explore 得到正分');
+});
+
+test('explore 的目标点位移随 exploreRadius 缩放（半径也用于选点，不只用于打分）', () => {
+  // exploreRadius 有**两处**用途：一是 explore 的效用分 `(0.4 + t.exploreRadius)`，
+  // 二是挑探索目标点时的位移幅度 `rng.range(-1,1) * c.thresholds.exploreRadius`。
+  // 上面那条只覆盖了打分那一路 —— 把**选点**那一路换成常量时，40 条测试原本全绿，
+  // 于是"半径越大越敢跑远"这件事没有任何测试守着（实测：把选点处的
+  // `c.thresholds.exploreRadius` 换成 0.5，全套仍然 40/40）。
+  const targetAt = (radius, seed) => {
+    const c = mk();
+    c.needs.hunger = 0.2; c.needs.energy = 0.2; c.needs.social = 0.2;
+    c.emotions.curiosity = 0.9;                       // 确保 explore 胜出
+    c.thresholds.exploreRadius = radius;
+    const it = decide(c, emptySenses(), createRng(seed));
+    assert.equal(it.kind, 'explore', `前置条件：应选 explore，实际 ${it.kind}`);
+    return Math.hypot(it.targetPos.x - c.pos.x, it.targetPos.y - c.pos.y);
+  };
+  // 半径为 0 时目标点必须落在原点上（位移恒为 0）—— 这条对任何种子都成立
+  for (let s = 1; s <= 20; s++) {
+    assert.ok(targetAt(0, s) < 1e-12, `半径 0 时不该移动（种子 ${s}）`);
+  }
+  // 半径变大时，位移的**最大值**应随之变大（取多个种子的最大值，避开单次抽样的偶然）
+  const maxDisp = (radius) => {
+    let m = 0;
+    for (let s = 1; s <= 60; s++) m = Math.max(m, targetAt(radius, s));
+    return m;
+  };
+  const small = maxDisp(0.05);
+  const big = maxDisp(0.3);
+  assert.ok(big > small, `半径 0.3 的最大位移应大于 0.05 的：${big} vs ${small}`);
+  assert.ok(small > 0, '半径 0.05 也该真的移动一点（否则 multiply 丢了）');
+  // 位移不得超过 radius×√2（两轴各自最多 radius），否则就是没乘半径或乘错了东西
+  assert.ok(big <= 0.3 * Math.SQRT2 + 1e-9, `位移不得超过 radius×√2：${big}`);
 });
 
 test('固定种子下决策完全可复现（spec 8.1）', () => {
@@ -689,4 +746,29 @@ test('每个意图都恰好有一个分数，且键集与 INTENTS 一致（不�
   assert.deepEqual(Object.keys(MIN_DURATION).sort(), [...INTENTS].sort());
   assert.ok(Object.isFrozen(MIN_DURATION), 'MIN_DURATION 应被冻结');
   assert.throws(() => { MIN_DURATION.eat = 0; }, TypeError, '改锁定时长应抛 TypeError');
+  // ⚠️ 每个条目的**量级**必须用硬编码字面量钉住（M = CONFIG.behavior.minIntentDuration = 1.2）。
+  // 上面那些 `>= M*0.8` / `<= M*4` 是从 CONFIG 反算的**恒真式**，什么错都抓不到：
+  // 实测把 `protest: M` 改成 `M * 50`、`court: M * 3.3` 改成 `M * 1.0`、
+  // `flee: M * 0.4` 改成 `M * 0.01`，40 条测试全部照过。
+  // 那正是本 Task 在 scoreAll 上刚修掉的同一类缺陷（"没有测试约束量级，整体错 13 倍也能过"），
+  // 只是发生在第二张表上 —— 60 秒的 protest 锁会静默上线。
+  // 用容差而不是 assert.equal：`M * 3.3` 在二进制下是 3.9599999999999995，写 3.96 会不等。
+  const eq = (k, want, note) => assert.ok(Math.abs(MIN_DURATION[k] - want) < 1e-12,
+    `${k} 应为 ${want}（${note}），实际 ${MIN_DURATION[k]}`);
+  eq('forage', 1.5, 'M×1.25');
+  eq('eat', 1.2, 'M');
+  eq('rest', 3.0, 'M×2.5');
+  eq('socialize', 2.04, 'M×1.7');
+  eq('court', 3.96, 'M×3.3 —— 刻意最长，仪式不该被风吹草动打断');
+  eq('explore', 2.04, 'M×1.7');
+  eq('flee', 0.48, 'M×0.4 —— 刻意最短，逃命要能随时改向');
+  eq('beg', 1.5, 'M×1.25');
+  eq('protest', 1.2, 'M');
+  eq('fight', 1.02, 'M×0.85 —— 略短于基准，打斗是短促爆发');
+  eq('mourn', 2.04, 'M×1.7');
+  eq('idle', 1.5, 'M×1.25');
+  // 关系也要钉住（只钉绝对值会漏掉"整体缩放"这类错误被字面量抓住、但关系反了的写法）
+  assert.ok(MIN_DURATION.flee < MIN_DURATION.eat, 'flee 必须短于基准');
+  assert.ok(MIN_DURATION.court > MIN_DURATION.rest, 'court 必须最长');
+  assert.ok(MIN_DURATION.fight < MIN_DURATION.protest, 'fight 必须短于 protest');
 });
