@@ -42,17 +42,38 @@
 // 期望耗时（本机实测：Node v20.19.0 / Windows / 60Hz 固定步长，单线程；
 // 数字就是脚本末尾那行"本次耗时"的值）。
 //
-// ⚠️ 2026-10-14 起基准**整体变了**，旧数字（默认种子 89.2 / 90.8 / 97.2s，种子 999 = 156.5s，
-//   种子 31337 = 23.5s）已作废。两个原因，都是本轮改动的直接后果：
+// ⚠️ 2026-10-14 起基准**整体变了两次**，旧数字全部作废：
+//   第一代（默认种子 89.2 / 90.8 / 97.2s，种子 999 = 156.5s，种子 31337 = 23.5s）；
+//   第二代（29.5 / 17.6 / 64.9 / 63.9s）。下面是**现行**的第三代。
+//
+// 第一代 → 第二代，两个原因都是改动的直接后果：
 //   ① `tickEggs` 加了孵化时容量闸门 ⇒ 峰值由 47/52 降到**恰好 24**。每步成本随存活数增长
 //     （碰撞是 O(n²)，感知是每个体一次网格查询），所以砍掉一半峰值把最慢的种子砍了约 2.4 倍：
-//     种子 999 由 156.5s → **64.9s**。
+//     种子 999 由 156.5s → 64.9s。
 //   ② `CONFIG.initialCreatures` 4 → 8 ⇒ 血统数上升、缸更容易撑住，于是"早早灭绝、后半程空转"
 //     的种子变少了 —— 空转是最快的（每步几乎没有个体要算）。
-// 本轮四个种子各跑一次（60 模拟分钟）：**20261014 = 29.5s（3472s 断代）、1 = 17.6s（2071s 断代）、
-//   999 = 64.9s（存活到窗口结束）、31337 = 63.9s（存活到窗口结束）**。
-// ⚠️ 注意耗时与种子结果的**关系已经反转**：旧基准里种子 31337 是最快的（23.5s），因为它早早灭绝；
-//   现在它是最慢的一档（63.9s），因为它活着并把缸填满。**断代的缸跑得快，撑住的缸跑得慢** ——
+//
+// 第二代 → 第三代，原因是**玩家羁绊观察现在会等一个合格的观察对象**：
+//   主窗口跑完时整缸常常都是 875~917s 的老年个体（剩余寿命 223~265s），撑不过 920s 的观察窗口，
+//   所以选对象时会**额外推进世界**去等一窝孵化（上界 WAIT_LIMIT = 1200s）。
+//   这段等待是真算的 tick，所以撑住的种子变慢了；断代的种子几乎不受影响
+//   （缸一空，等待循环立刻 break，不空转）。
+//   ⚠️ 这笔时间是**买数据买来的**：第二代里 seed 999 的观察对象在停手第 5 分钟就老死，
+//     5 个采样点有 3 个是冻结废数据；第三代等到一只 age=1s 的幼体（实际只等了 372s），
+//     5 个采样点全部有效、每个都实测出半衰期 34.657s = 理论值 ln2/0.02。
+//
+// 现行基准（四个种子各跑一次，60 模拟分钟）：
+//   同一种子在本机重复跑的**全部**实测值（墙钟，秒）：
+//     20261014（断代）= 33.5、28.5          1（断代）= 21.3、19.3、16.4
+//     999（存活）     = 81.6、71.4          31337（存活）= 69.5、64.1
+//   ⇒ 区间断代种子 **~16–34s**、存活种子 **~64–82s**。
+//   ⚠️ 同机同种子的**离散度约 20%**（种子 1 三次跑 21.3/19.3/16.4；种子 999 两次 81.6/71.4），
+//     比一般人预期的大得多。所以这个区间只能用来区分"这台机器慢"和"它卡住了"，
+//     **绝不能**当回归阈值 —— 差 20% 以内不要追，否则会把机器噪声当成性能回归查半天。
+//     （我第一版写的是"~21–34s / ~70–82s、差约 10%"，被随后的实测当场推翻：
+//       16.4s 与 64.1s 都掉在区间外。基准必须由**重复**实测得出，单次跑不算。）
+// ⚠️ 注意耗时与种子结果的**关系已经反转**：第一代里种子 31337 是最快的（23.5s），因为它早早灭绝；
+//   现在它是最慢的一档（69.5s），因为它活着并把缸填满。**断代的缸跑得快，撑住的缸跑得慢** ——
 //   所以判断"慢"要连着结果表里的存活数与灭绝时刻一起看，不能只看墙钟，
 //   更不能拿"比旧基准快"当成性能改善的证据（那可能只是种群死光了）。
 //   脚本末尾会打印本次实际耗时供对照，好让人区分"机器慢"和"它卡住了"。
@@ -224,75 +245,182 @@ if (hueSampleCount > 0) {
 //   卖萌的门 (affection > 0.1 || familiarity > 0.3) 就永远打不开 —— 死锁。
 //   根因是 **beg 被放在了错误的量级上**：它的最高分（≈0.15）低于缸里普通活动的地板
 //   （explore 0.4~0.6、socialize 1~2、court 3~4），根本排不上号。
-//   已把 CONFIG.behavior.begUrgency 从 1.3 调到 7.0（扫值数据见 src/config.js 的注释），
-//   现在实测：合适个体抚摸 20 秒 beg 胜出约 58%、affection 升到 0.21。
+//   已把 CONFIG.behavior.begUrgency 从 1.3 调到 7.0（扫值数据见 src/config.js 的注释）。
+//   ⚠️ 这里原先写"现在实测：合适个体抚摸 20 秒 beg 胜出约 58%、affection 升到 0.21"。
+//     那两个数字出自 .superpowers/sdd 里的 begUrgency 扫值脚本（抚摸 180 秒、跨种子统计），
+//     **跑本脚本复现不出来** —— 引用不可复现的数字违反本项目"每处结论都带可复现实测"的纪律，已删。
+//     可复现的正向证据有两条，都比那句话硬：
+//       · src/config.js 的 begUrgency 注释里那张扫值表（7.0 → 三个种子 65%/66%/85% 出现）；
+//       · tests/sim.test.js 里"抚摸 20 秒必然卖萌、好感必然 > 0"的断言（seed 5、稀疏缸，套件常绿）。
 //   所以这一节下面：
-//     ① 先如实打印"抚摸 20 秒买到了多少"与 beg 胜出的 tick 数（**现在应当非 0**）；
-//        若打印出 0，说明 begUrgency 又被调回不可达的量级，或选中的个体不肯靠近玩家。
+//     ① 先如实打印"抚摸 20 秒买到了多少"、beg 胜出的 tick 数，**以及同期到底是谁胜出**；
+//        ⚠️ 打印出 0 **不等于** begUrgency 被调坏了 —— 原先那句归因是错的：满缸 24 只成体时
+//          beg 要压过的不是 explore 地板（0.4~0.6），而是 socialize（≈1.34）与 court（3~4），
+//          输在**社交竞争**上同样会是 0。实测反证就在 seed 999：playerApproach=0.182
+//          （**低于** 0.2 阈值）的个体赢过 505/1200，而 0.216（**高于**阈值）的个体赢 0/1200
+//          —— 阈值方向是反的，拿它当判据必然误报。
+//          所以现在直接把胜出意图的分布数出来，让证据说话，不再按阈值猜。
 //     ② 再**注入一个已知好感**（经公开的 memory.adjust，不是手伸进 entries）测衰减本身，
-//        这样即使 ① 因为个体差异买不到，第 8 条要观察的那个**速率**依然拿得到数据。
+//        这样即使 ① 因为个体差异或社交竞争买不到，第 8 条要观察的那个**速率**依然拿得到数据。
 //   两件事分开打印、分别标注：① 是"能不能买到"，② 是"买到之后掉多快"。
-if (alive.length) {
-  // 挑观察对象：在**卖萌够得着**的个体里挑**剩余寿命最长**的那只。
-  // 三个条件都是有理由的：
-  //   ① beg 的评分含因子 Math.max(0, thresholds.playerApproach)（值域最低 −0.35）——
-  //      抽到 ≤ 0 的个体，这一节必然是一条全 0 的平线，看起来像"羁绊一碰就碎"，
-  //      真相却是"它从来不肯靠近你"（spec 4.9：暴躁/胆小的本来就躲手）。
-  //   ② 只是 "> 0" 还不够：beg 分 = (0.2 + affection + familiarity×0.4) × playerApproach
-  //      × begUrgency × (0.5 + joy×0.5)，**整条乘积**才决定它能不能压过 explore（地板 0.4~0.6）。
-  //      实测两个例子（begUrgency 都已是 7.0）：
-  //        playerApproach 0.182 + familiarity 1.000 → beg ≈ 0.72~0.96 ⇒ 胜出 505/1200 tick（买得到）
-  //        playerApproach 0.096 + familiarity 0.800 → beg ≈ 0.26      ⇒ 胜出   0/1200 tick（买不到）
-  //      所以 0.2 是**保守裕度**而不是锐利阈值（0.182 其实也够）。这里取与
-  //      tests/sim.test.js 那条卖萌测试**完全相同**的筛选条件（playerApproach > 0.2 且 age < 900），
-  //      免得两处各挑各的、一处能复现一处不能。
-  //   ③ **剩余寿命最长**这一条是实跑补上的：主模拟跑完时整缸常常都是 973~1011 的老年个体
-  //      （寿命 1140），挑谁都会在 15 分钟的停手观察里老死，曲线被截断。
-  // ⚠️ 原先这里的注释写着"所以挑最愿意靠近的那只"，但代码是 `.sort((a,b) => a.age - b.age)`
-  //   ——**按年龄挑最年轻的**，playerApproach 只当并列时的次级键。注释描述的意图代码从没实现，
-  //   后果就是 seed 31337 实测挑中 playerApproach=0.096 的个体、beg 0/1200，
-  //   然后打印"好感买不到 ⇒ 见 begUrgency"，把一个**选错观察对象**的问题误报成常量又被调坏了。
-  const BEG_REACHABLE = 0.2;      // 保守裕度，与 tests/sim.test.js 的卖萌测试同口径
-  const reachablePool = alive.filter((c) => c.thresholds.playerApproach > BEG_REACHABLE && c.age < 900);
-  const willingPool = alive.filter((c) => c.thresholds.playerApproach > 0);
-  const pool = (reachablePool.length ? reachablePool : (willingPool.length ? willingPool : alive)).slice()
-    .sort((a, b) => (a.age - b.age) || (b.thresholds.playerApproach - a.thresholds.playerApproach));
-  const pet = pool[0];
-  // 这只到底够不够得着卖萌 —— 决定下面 beg 0/1200 该归因给谁
-  const petCanBeg = pet.thresholds.playerApproach > BEG_REACHABLE;
-  console.log('\n玩家羁绊观察（交接要求第 8 条）');
-  console.log(`  观察对象     ${pet.name}（playerApproach=${pet.thresholds.playerApproach.toFixed(3)}`
-    + `，age=${pet.age.toFixed(0)}s（剩余约 ${Math.max(0, 1140 - pet.age).toFixed(0)}s）`
-    + `，stage=${pet.stage}）`
-    + (petCanBeg ? '' : ` ← playerApproach ≤ ${BEG_REACHABLE}（实测可达裕度），这只**本来就卖不了萌**`
-      + '，下面的 beg 计数与好感必然是 0，属预期而非缺陷'));
+// 挑观察对象：在**卖萌够得着**且**能撑完整段观察**的个体里，挑剩余寿命最长的那只。
+//
+// ⚠️ 2026-10-14 修掉一处**量纲错误**（后果是实测到的，不是推测）：
+//   年龄门槛原先写的是 `c.age < 900` —— 拿**年龄**去和观察窗口比。但窗口要的是
+//   **剩余寿命**够长：
+//     窗口 = 20s 抚摸 + (1+2+5+10+15)min 停手采样 = 920s
+//     剩余寿命 = LIFESPAN − age  ⇒  要撑完整段就得 age ≤ 1140 − 920 = **220s**
+//   900 与 220 差了四倍多。实测后果（seed 999、seed 31337 都中招）：
+//   主模拟跑完时整缸都是 875~917s 的老年个体（只剩 223~265s），`age < 900` **一个都筛不掉**，
+//   于是选中 age=875 的那只，它在停手观察进行到第 5 分钟时老死 ⇒
+//   **5 个采样点里 3 个是冻结的废数据**。脚本确实打了"已死亡"的警告（不算静默失败），
+//   但这一节存在的唯一目的就是给 affectionDecay 的裁定供证（见本节开头），
+//   丢掉 3/5 的曲线等于没测到要测的东西。
+//
+// 修法：门槛按**剩余寿命**算；整缸都太老时**有限地推进世界**去等一窝孵化
+//   （缸里通常还有几十枚卵：seed 999 在 60 分钟时有 31 枚），等不到就退回
+//   "剩余寿命最长的那只"并**如实声明曲线会在哪里截断**。
+//   ⚠️ 推进世界是安全的：结果块、`s`（worldStats 的**快照** —— 它返回全新对象、字段都是
+//     复制出来的原始值）、`peak`、`extinctAt`、`survivorLines` 与幸存者名单，
+//     全部在本节**之前**就已定格；后面的断言读的也是这些定格值，不再读 world 的活状态。
+//
+// 另外两条筛选理由：
+//   ① beg 的评分含因子 Math.max(0, thresholds.playerApproach)（值域最低 −0.35）——
+//      抽到 ≤ 0 的个体，这一节必然是一条全 0 的平线，看起来像"羁绊一碰就碎"，
+//      真相却是"它从来不肯靠近你"（spec 4.9：暴躁/胆小的本来就躲手）。
+//   ② `playerApproach > 0.2` 是**保守裕度，不是充分条件**。
+//      ⚠️ 原先这里举了两个"实测例子"（0.182+1.000 → 胜出 505/1200；0.096+0.800 → 0/1200），
+//        并据此说"取与 tests/sim.test.js 完全相同的筛选条件"。那两组数字是**改选择逻辑之前**
+//        测的，现在重跑本脚本**复现不出来**（seed 999 现在是 0.216 → 0/1200）。
+//        引用不可复现的数字违反本项目"每处结论都带可复现实测"的纪律，已删。
+//      更要紧的是那两组数字**本身就说明阈值方向是反的**：0.182（低于阈值）赢了 505，
+//      0.216（高于阈值）赢了 0。真正决定胜负的是整条乘积**加上当时的竞争对手** ——
+//      稀疏缸里 beg 只需压过 explore 地板（0.4~0.6），满缸里还要压过 socialize（≈1.34）
+//      与 court（3~4）。所以下面 beg 0/1200 的归因**不再按阈值猜**，
+//      改成直接把每 tick 的胜出意图数出来（见 intentTally）。
+const LIFESPAN = CONFIG.stage.hatchling + CONFIG.stage.juvenile
+  + CONFIG.stage.adult + CONFIG.stage.elder;          // 1140（孵化后；egg 不计入寿命）
+// ⚠️ 这里差点踩中下方采样循环注释里明确警告过的坑，记下来：
+//   采样点是**绝对时刻**（推进到第 1/2/5/10/15 分钟），不是每轮再推进 min×60。
+//   所以整段停手观察一共只推进 **15 分钟 = 900s**，
+//   而**不是** 1+2+5+10+15 = 33 分钟 = 1980s。
+//   我第一版就写成了 `20 + (1+2+5+10+15)*60 = 2000`，于是
+//   MAX_AGE = 1140 − 2000 = **−860**（负数）⇒ 没有任何个体可能合格 ⇒
+//   等待循环每次都空转满 1200s 再退回截断路径，白跑一倍时间还修不到东西。
+//   实测症状：打印出"需 2000s"与"没有 age ≤ -860s 的候选"。
+//   教训：门槛常量必须由**下面那段循环真正推进的秒数**反推，不能凭采样点标签心算。
+const OBS_WINDOW = 20 + 15 * 60;                      // 920：抚摸 20s + 停手采样推进到第 15 分钟
+const MAX_AGE = LIFESPAN - OBS_WINDOW;                // 220：再老就撑不完整段观察
+const BEG_REACHABLE = 0.2;      // 保守裕度，与 tests/sim.test.js 的卖萌测试同口径
+const WAIT_LIMIT = 1200;        // 最多再推进 20 分钟去等一窝孵化
 
-  // 抚摸阶段。手速取 HAND_SPEED_POKE 的一个零头（0.01），稳稳落在"抚摸"一侧。
+// 年龄越小 = 剩余寿命越长（寿命是定值），所以按 age 升序取第一个就是"最耐观察"的那只
+const pickSubject = (maxAge) => {
+  const pool = aliveCreatures(world)
+    .filter((c) => c.thresholds.playerApproach > BEG_REACHABLE && c.age <= maxAge)
+    .sort((a, b) => (a.age - b.age) || (b.thresholds.playerApproach - a.thresholds.playerApproach));
+  return pool.length ? pool[0] : null;
+};
+
+let pet = pickSubject(MAX_AGE);
+let waited = 0;
+// 每秒查一次候选就够（别每 tick 都 filter+sort），但每 tick 都要清空 events（内核只写不读）
+const CHECK_EVERY = Math.round(1 / dt);
+for (let i = 0; !pet && waited < WAIT_LIMIT; i++) {
+  if (!aliveCreatures(world).length) break;      // 等待期间断代了，别空转
+  tickWorld(world, dt);
+  world.events.length = 0;
+  waited += dt;
+  if (i % CHECK_EVERY === 0) pet = pickSubject(MAX_AGE);
+}
+// 等不到合格的：退回"剩余寿命最长的那只"，曲线会被截断，下面如实声明在哪截断
+const truncated = !pet;
+if (truncated) pet = pickSubject(Infinity);
+
+console.log('\n玩家羁绊观察（交接要求第 8 条）');
+if (pet) {
+  // 这只到底够不够得着卖萌 —— 决定下面 beg 0/1200 该怎么归因
+  const petCanBeg = pet.thresholds.playerApproach > BEG_REACHABLE;
+  const remaining = Math.max(0, LIFESPAN - pet.age);
+  console.log(`  观察对象     ${pet.name}（playerApproach=${pet.thresholds.playerApproach.toFixed(3)}`
+    + `，age=${pet.age.toFixed(0)}s（剩余约 ${remaining.toFixed(0)}s）`
+    + `，stage=${pet.stage}）`);
+  if (waited > 0) {
+    console.log(`  为等到能撑完整段观察（需 ${OBS_WINDOW}s）的对象，额外推进了 ${waited.toFixed(0)}s`
+      + `（主窗口结束时整缸都太老，没有 age ≤ ${MAX_AGE}s 的候选）`);
+  }
+  if (truncated) {
+    console.log(`  ⚠ 又推进了 ${WAIT_LIMIT}s 仍没有 age ≤ ${MAX_AGE}s 的合格对象，退而选剩余寿命最长的这只：`
+      + `它只剩 ${remaining.toFixed(0)}s，**衰减曲线会在约 ${Math.max(0, remaining - 20).toFixed(0)}s 处被截断**，`
+      + '之后的采样点是冻结值、不可用（对应行会标注）。');
+  }
+  if (!petCanBeg) {
+    console.log(`  ⚠ 这只 playerApproach=${pet.thresholds.playerApproach.toFixed(3)} ≤ ${BEG_REACHABLE}，`
+      + '**本来就卖不了萌**，下面的 beg 计数与好感必然是 0，属预期而非缺陷。');
+  }
+
+  // 抚摸阶段。手速取 HAND_SPEED_POKE 的一个零头，稳稳落在"抚摸"一侧。
   const petSteps = Math.round(20 / dt);
   let begTicks = 0;
+  // ⚠️ 顺手把"到底是谁赢了"数出来 —— 这是把下面那句归因从**猜**改成**实测**的关键。
+  //   原先 beg 0/1200 时脚本只看 `playerApproach > 0.2` 就断言"先怀疑 begUrgency 又被调回
+  //   不可达量级"。那个阈值是保守裕度、**不是充分条件**：满缸里 beg 要赢的不是 explore 地板
+  //   （0.4~0.6），而是 socialize（≈1.34）与 court（3~4）。而且阈值方向实测是**反**的：
+  //   seed 999 改选择逻辑前挑中 playerApproach=0.182（低于阈值）赢 505/1200，
+  //   改后挑中 0.216（高于阈值）赢 0/1200。
+  //   ⚠️ 更要紧的是：`tests/sim.test.js` 那条"抚摸 20 秒必然卖萌（begTicks > 0）"的断言
+  //   **是绿的**（seed 5、t=60s、8 只个体的稀疏缸）—— 这本身就证明 begUrgency=7.0 没被调坏。
+  //   所以本脚本里出现 0/1200 只能是**社交竞争**，不是常量。数出来就不用再猜了。
+  const intentTally = new Map();
+  // beg 的无噪声效用分要用的输入，在抚摸**开始前**读一次（手由本脚本控制，其余取自个体状态）
+  const begInputs = {
+    affection: affectionFor(pet.memory, PLAYER_ID),
+    familiarity: familiarityFor(pet.memory, PLAYER_ID),
+    joy: pet.emotions.joy,
+    playerApproach: pet.thresholds.playerApproach,
+  };
   world.playerHand = { pos: { x: pet.pos.x, y: pet.pos.y }, speed: HAND_SPEED_POKE * 0.04 };
   for (let i = 0; i < petSteps; i++) {
     world.playerHand.pos.x = pet.pos.x;
     world.playerHand.pos.y = pet.pos.y;
     tickWorld(world, dt);
     world.events.length = 0;
-    if (pet.intent && pet.intent.kind === 'beg') begTicks += 1;
+    // 死了之后 pet.intent 不再更新，会把最后一个意图一直重复计数 —— 单独标出来，别污染分布
+    const kind = !pet.alive ? '(已死亡)' : (pet.intent ? pet.intent.kind : '(无)');
+    intentTally.set(kind, (intentTally.get(kind) || 0) + 1);
+    if (kind === 'beg') begTicks += 1;
   }
   world.playerHand = null;
 
   const a0 = affectionFor(pet.memory, PLAYER_ID);
   const f0 = familiarityFor(pet.memory, PLAYER_ID);
-  console.log(`  抚摸 20s      beg 胜出 ${begTicks}/${petSteps} tick`
-    // ⚠️ 这里原先无条件写"beg 一次都没胜出 ⇒ 好感买不到；见 begUrgency"。
-    // 那句归因在"选中的个体本来就卖不了萌"时是**错的**，会把一个观察对象选择问题
-    // 误报成常量又被调坏（seed 31337 实测就是这么被误报的：playerApproach=0.096）。
-    // 所以按 petCanBeg 分两种说法，各自指向真正该查的地方。
-    + (begTicks === 0
-      ? (petCanBeg
-        ? '（beg 一次都没胜出，而这只 playerApproach 已过实测可达裕度 ⇒ 先怀疑 begUrgency 又被调回不可达量级）'
-        : `（beg 一次都没胜出，但**不是** begUrgency 的问题：这只 playerApproach=${pet.thresholds.playerApproach.toFixed(3)}`
-          + ` ≤ ${BEG_REACHABLE}，beg 分被这个因子压到 explore 地板（0.4~0.6）之下 ⇒ 是观察对象选得不对，见上方标注）`)
-      : ''));
+  // beg 的无噪声效用分，按 src/behavior.js 里那条公式就地算。
+  // ⚠️ 刻意不 import scoreAll —— 它要 senses，而 perceive 在 tickWorld 之外调用会因
+  //   world.grid 里的旧下标抛 TypeError（已知债务，见台账），不值得为一句诊断去踩。
+  // ⚠️ 这是**抚摸开始时**的量级估计，不是逐 tick 真值：joy/familiarity 在 20 秒里会变，
+  //   decide 还叠了 ±noiseScale（0.12）的噪声。用途只是让人看出 beg 与对手差了哪个量级。
+  const begScoreEst = (0.2 + begInputs.affection + begInputs.familiarity * 0.4)
+    * Math.max(0, begInputs.playerApproach) * CONFIG.behavior.begUrgency
+    * (0.5 + begInputs.joy * 0.5);
+  const ranked = [...intentTally.entries()].sort((a, b) => b[1] - a[1]);
+  console.log(`  抚摸 20s      beg 胜出 ${begTicks}/${petSteps} tick`);
+  console.log(`  同期胜出分布  ${ranked.map(([k, n]) => `${k}×${n}`).join('、')}`);
+  console.log(`  beg 无噪声分 ≈ ${begScoreEst.toFixed(3)}`
+    + `（(0.2 + aff ${begInputs.affection.toFixed(3)} + fam ${begInputs.familiarity.toFixed(3)}×0.4)`
+    + ` × pApproach ${begInputs.playerApproach.toFixed(3)} × begUrgency ${CONFIG.behavior.begUrgency}`
+    + ` × (0.5 + joy ${begInputs.joy.toFixed(3)}×0.5)）`);
+  if (begTicks === 0 && petCanBeg) {
+    const [topKind, topN] = ranked[0] || ['?', 0];
+    console.log(`  ⇒ beg 一次都没胜出。**实测**归因（不再按阈值猜）：这 ${petSteps} tick 里`
+      + `压住它的是 ${topKind}（${topN} tick）。`);
+    console.log(`    beg 分 ${begScoreEst.toFixed(3)} 要赢的不只是 explore 地板（0.4~0.6）：`
+      + 'socialize = n.social×1.3×(1+pApproach×0.15)（最高 ≈1.34）、'
+      + 'court = suitorScore×arousal×1.6（可到 3~4）。');
+    console.log('    ⚠️ 所以这**不是** begUrgency 被调回不可达量级：tests/sim.test.js 里'
+      + '"抚摸 20 秒必然卖萌"那条断言是绿的（稀疏缸）。这里差的是**社交竞争** —— '
+      + '满缸成体时求偶/社交总有更高优先的事。要让满缸里也稳定买到好感，得抬 begUrgency'
+      + '或让 beg 随手的**移动**加分（后者已记在 src/config.js，待计划 2/3 有真实输入再做）。');
+  }
   console.log(`  抚摸 20s 后   affection=${a0.toFixed(4)}  familiarity=${f0.toFixed(4)}`);
 
   if (!pet.alive) {
@@ -348,8 +476,13 @@ if (alive.length) {
     }
   }
 } else {
-  console.log('\n玩家羁绊观察（交接要求第 8 条）');
-  console.log('  （模拟窗口结束时缸里没有任何幸存者 —— 没有对象可观察。）');
+  // 走到这里有**两种**情况，要分开说，否则会把"等对象时断代"误报成"窗口结束时就空缸"：
+  //   (a) 主窗口结束时缸里就没有幸存者；
+  //   (b) 为了等一个能撑完整段观察的对象额外推进世界，期间种群断代了。
+  // ⚠️ 标题行已移到 if/else **之前**统一打印，这里别再打一遍（会重复两行）。
+  console.log(alive.length === 0
+    ? '  （模拟窗口结束时缸里没有任何幸存者 —— 没有对象可观察。）'
+    : `  （为等一个能撑完整段观察的对象又推进了 ${waited.toFixed(0)}s，期间种群断代 —— 没有对象可观察。）`);
   // ⚠️ 这里原先写"种群先爆缸、再成批老死"。爆缸已由 src/sim.js 的孵化时容量闸门修好
   // （实测峰值由 52/47/30/29 降到一律恰好 24），所以那个归因已经不成立、会教错人。
   // 现在空缸的原因是**血统坍缩**：单一亲缘组 + 严格近亲回避 ⇒ 出生冻结 ⇒ 整批老死。
@@ -463,9 +596,11 @@ if (failures.length) {
 }
 
 // 本次实际耗时（墙钟）。手动门需要一个可对照的数字：
-// 文件头的"期望耗时"是基准（2026-10-14 起：断代种子 ~18–30s、撑住的种子 ~64s），
+// 文件头的"期望耗时"是基准（2026-10-14 第三代：断代种子 ~16–34s、撑住的种子 ~64–82s，
+// 同机同种子重复跑的离散度约 20%，所以只是粗粒度对照、不是回归阈值），
 // 这里打印实际值，好让人区分"这台机器慢"和"它卡住了"。
-// ⚠️ 但别把"比基准快"读成好事 —— 断代的缸跑得**快**（后半程空转），撑住的缸跑得慢。
+// ⚠️ 但别把"比基准快"读成好事 —— 断代的缸跑得**快**（后半程空转，而且等待循环一发现缸空就 break），
+//   撑住的缸跑得慢（要填满缸，还要额外推进世界去等一个够年轻、能撑完整段观察的对象）。
 const wallSeconds = Number(process.hrtime.bigint() - wallStart) / 1e9;
-console.log(`\n本次耗时 ${wallSeconds.toFixed(1)}s（墙钟；2026-10-14 起的实测基准：断代种子 ~18–30s、`
-  + '存活种子 ~64s。跑得比基准**快**可能只是种群死光了，见文件头）');
+console.log(`\n本次耗时 ${wallSeconds.toFixed(1)}s（墙钟；2026-10-14 起的现行实测基准：断代种子 ~16–34s、`
+  + '存活种子 ~64–82s，同机同种子离散度约 20%。跑得比基准**快**可能只是种群死光了，见文件头）');
