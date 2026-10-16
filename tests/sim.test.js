@@ -612,7 +612,11 @@ test('新缸在没有玩家干预时会自行求偶产卵（arousal 不得被循
   // 所以这里跑一个**没有任何手动赋值**的新缸，要求它自己走到产卵。
   const w = createWorld({ seed: 46 });
   const startArousal = aliveCreatures(w).map((c) => c.emotions.arousal);
-  assert.deepEqual(startArousal, [0, 0, 0, 0], '前置条件：出生时 arousal 为 0');
+  // ⚠️ 不要写死成 [0,0,0,0]：初始个体数由 CONFIG.initialCreatures 决定（2026-10-14 已由 4 调到 8）。
+  // 写死数组会让"改创始个体数"这个纯配置动作变成一次莫名其妙的测试失败。
+  // 这里要钉的是**语义**（每只出生时 arousal 都是 0，没有任何手动赋值），不是个数。
+  assert.equal(startArousal.length, CONFIG.initialCreatures, '前置条件：初始个体数与配置一致');
+  assert.deepEqual(startArousal, new Array(CONFIG.initialCreatures).fill(0), '前置条件：出生时 arousal 为 0');
 
   step(w, 400);
   const maxArousal = Math.max(...aliveCreatures(w).map((c) => c.emotions.arousal));
