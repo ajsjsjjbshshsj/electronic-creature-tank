@@ -1,0 +1,21 @@
+# 行尾策略：一律 LF，入库与检出都不受开发者本机 core.autocrlf 影响。
+#
+# 为什么需要这个文件：本仓库在 Windows 上开发，而 core.autocrlf=true 是
+# system 与 global 两级都开着的。索引里全是 LF，但每条 git 命令都会打印
+# "LF will be replaced by CRLF" —— 噪声之外还有真实风险：任何一次
+# checkout / re-add 循环都可能把工作区文件改成 CRLF，于是 diff 里出现
+# 整文件重写的假变更，审查时看不清真正改了什么。
+#
+# 这个项目的产物要在浏览器（手机与桌面）和 Node 里运行，并由 PowerShell
+# 静态服务器直接吐字节，LF 是唯一合理选择。
+* text=auto eol=lf
+
+# 二进制文件不做任何行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
