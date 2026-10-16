@@ -687,6 +687,41 @@ function tickEggs(world, dt) {
     }
 
     if (result === 'ready') {
+      // ⚠️ 到期的卵在孵化前必须**再判一次**容量。
+      //
+      // 为什么：`addCreature` 是强制加入、不查上限（Task 10 的测试
+      // 'addCreature 是强制加入，上限由 layEggs 的 viable 标记把关' 钉住了这一点），
+      // 而 layEggs 的 viable 是在**产卵那一刻**判的 —— 卵要 60 秒才孵化，
+      // 这 60 秒里种群完全可能从"未满"变成"已满"。缺了这道闸门，
+      // 到期卵就会一路孵进一个已经满员的缸。
+      // 实测后果（诊断脚本，4 个种子 × 45 分钟，上限 24）：峰值 **52 / 47 / 30 / 29**，
+      // 即种群冲到上限的两倍以上；加上这道闸门后同口径实测 **0/12 个种子超上限**，
+      // 峰值一律恰好等于 24。这是这道闸门存在的全部理由 —— 它修的是**超上限**，不是灭绝。
+      //
+      // 为什么是"等"而不是"当场判死"：这枚卵是在**未满**时合法产下的，
+      // 只是孵化时赶上了满员；立刻判死等于让一次时序竞态去惩罚一次合法繁殖。
+      // 所以给它一段宽限：位置一空就孵。等待**有界** —— 超过 3×egg 这根既有的
+      // 时间轴（与不可孵化卵共用同一条"光慢慢熄灭"的曲线）就散去，
+      // 免得满员期间卵无界堆积。失败只在散去那一刻记一次（splice 之后不会再见到这枚卵，
+      // 所以这里不需要 failCounted 去重；等待期间反复计数会让"孵化失败"变成 tick 数的函数）。
+      //
+      // 📌 控制方裁定（实测否决，记录以免重推）：spec 4.12 第 6 条的字面语义是
+      // "达上限时卵**孵化失败**"，据此曾把容量判定整个移到孵化时 ——
+      // layEggs 一律产出 viable 卵，由这里排队等位置。实测**更差**：
+      // 同 8 个种子 × 60 分钟，灭绝 4/8 → **5/8**；seed 20261014 从
+      // "存活满 60 分钟、出生 72、母亲 12、世代 6" 退化成 "2102s 灭绝、出生 24、母亲 3"。
+      // 机制：排队让腾出的位置被立刻补上 ⇒ 种群长期钉死在上限 ⇒ 血统停止更新；
+      // 而产卵时判死反而靠"卵全灭 → 种群跌破上限 → crowding 松绑 → 重新繁殖"的
+      // 振荡维持了多条血统。所以这里**只**保留"防超上限"的有界等待，
+      // 容量的主判定仍留在 layEggs（viable=false，走 failed 路径）。
+      if (aliveCreatures(world).length >= world.populationCap) {
+        if (egg.age >= CONFIG.stage.egg * 3) {
+          world.eggs.splice(i, 1);
+          world.stats.hatchFailures += 1;
+          world.events.push({ kind: 'eggFailed', id: egg.id, pos: { ...egg.pos } });
+        }
+        continue;                     // 位置不够：这枚卵保持 ready，下一 tick 再试
+      }
       const mother = world.creatures.find((x) => x.id === egg.motherId);
       const father = world.creatures.find((x) => x.id === egg.fatherId);
       // 世代取双亲里更高的那一代 +1，而不是只看母亲：
@@ -742,8 +777,15 @@ function resolve(world, dt) {
       paired.add(partner.id);
       // 上限在这里体现为"卵不可孵化"（layEggs 的 viable=false），
       // 而不是"不许产卵"。用 >= 判断，且**没有**任何 `> cap` 的拒绝分支：
-      // addCreature 不查上限，所以 cap-1 时产下的卵可能孵化进一个已经超上限的缸，
-      // 那是预期的 —— 上限是叙事化的，不是硬闸门（spec 4.12 第 6 条）。
+      // 满员时照样求偶、照样产卵，只是那些卵的光会慢慢熄灭 ——
+      // 于是"缸满了"是一件**能被看见的事**（卵在缸底暗下去），而不是一条静默的禁令。
+      // ⚠️ 控制方曾把这道判定从"产卵时"移到"孵化时"（卵改为一律 viable，
+      // 由 tickEggs 排队等位置），理由是 spec 4.12 第 6 条的字面语义是"达上限时卵**孵化失败**"。
+      // 实测**否决**了这个改动（diag-hatchgate.mjs / diag-crowding.mjs，同 8 个种子 × 60 分钟）：
+      // 灭绝 4/8 → **5/8**，且 seed 20261014 从"存活 60 分钟、出生 72、母亲 12、世代 6"
+      // 退化成"2102s 灭绝、出生 24、母亲 3"。机制是：排队让腾出的位置被**立刻**补上 ⇒
+      // 种群长期钉死在上限 ⇒ 血统停止更新；而旧行为靠"卵全灭 → 种群跌破上限 →
+      // crowding 松绑 → 重新繁殖"的振荡，反而维持了多条血统。已撤销，保留这条记录免得重推一遍。
       const atCap = alive.length >= world.populationCap;
       const eggs = layEggs(a, partner, world.rng, { atPopulationCap: atCap });
       for (const egg of eggs) world.eggs.push(egg);

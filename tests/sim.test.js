@@ -762,6 +762,68 @@ test('孵化失败的卵会先变暗再散去，不会无限堆积', () => {
   assert.equal(w.stats.hatchFailures, laid, '散去时不得重复计数');
 });
 
+// 上面两条测的都是**产卵时就已满员**的卵（layEggs 写 viable=false，走 failed 路径）。
+// 下面两条测的是另一条路径：卵是在**未满时合法产下**的（viable=true），
+// 但 60 秒后孵化时缸刚好满了。缺了 tickEggs 里那道孵化时闸门，
+// 这枚卵会被 addCreature 强制塞进一个已满的缸 —— 实测后果是种群冲到上限的两倍以上
+// （4 个种子 × 45 分钟：峰值 52 / 47 / 30 / 29，上限 24）。
+// 这两条是那道闸门唯一的自动化覆盖：tests/simulate.mjs 虽然也断言峰值，
+// 但它的文件名不匹配 Node 测试 runner 的模式，`node --test tests/` 根本不会跑它。
+function fullTankWithReadyEgg(seed, eggSeed, eggAge) {
+  const w = createWorld({ seed, initialCreatures: 0, populationCap: 2 });
+  const a = createCreature({ id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, rng: createRng(1) });
+  const b = createCreature({ id: 'b', name: 'B', x: 0.55, y: 0.5, age: 600, rng: createRng(2) });
+  // 推成老年（年龄与阶段都改，保持状态自洽）：老年 canBreed=false、arousal 恒 0，
+  // 于是这两只绝不会自己再产卵，下面的 births / hatchFailures 计数只反映被测的那一枚卵。
+  // age 1000 距离死亡（1140）还有 140 秒，远大于本组测试的总时长。
+  for (const c of [a, b]) { c.age = 1000; c.stage = 'elder'; }
+  addCreature(w, a);
+  addCreature(w, b);
+
+  // viable=true ⇒ "产卵那一刻缸还没满"；再把 age 推到到期，模拟"60 秒后孵化时缸满了"
+  const [egg] = layEggs(a, b, createRng(eggSeed), { atPopulationCap: false });
+  egg.age = eggAge;
+  w.eggs.push(egg);
+  return { w, a, b, egg };
+}
+
+test('满员时到期的卵会**等位置**，位置一空就补上（既不爆缸也不判死）', () => {
+  const { w, a, egg } = fullTankWithReadyEgg(60, 7, CONFIG.stage.egg);
+  assert.equal(aliveCreatures(w).length, 2, '前置条件：缸已满（上限 2）');
+  assert.equal(w.eggs.length, 1, '前置条件：世界里有且只有被测的那一枚卵');
+
+  step(w, 30);
+  assert.equal(aliveCreatures(w).length, 2, '满员期间不得孵化 —— 种群绝不能越过上限');
+  assert.ok(w.eggs.includes(egg), '到期的卵应该**留着等**，而不是被当场判死');
+  assert.equal(w.stats.births, 0, '没有位置就没有出生');
+  assert.equal(w.stats.hatchFailures, 0, '等待期间不得计入孵化失败（它还没失败）');
+
+  // 腾出一个位置。不必等尸体溶散：闸门读的是 aliveCreatures 的数量。
+  a.alive = false;
+  step(w, 1);
+  assert.equal(w.stats.births, 1, '位置一空，排队中的卵就该立刻补上');
+  assert.equal(aliveCreatures(w).length, 2, '补位后重新满员，但**不超过**上限');
+  assert.ok(!w.eggs.includes(egg), '孵出去的卵应从世界移除');
+});
+
+test('一直等不到位置的卵会在 3×egg 后熄灭，且只计入一次孵化失败', () => {
+  // age 设在"熄灭时刻"前 1 秒：先证明它这一段仍在**等**（不计数），
+  // 再越过时刻证明它散去且**只**计一次 —— 与不可孵化卵共用同一条 3×egg 时间轴。
+  const { w, egg } = fullTankWithReadyEgg(61, 8, CONFIG.stage.egg * 3 - 1);
+
+  step(w, 0.5);
+  assert.ok(w.eggs.includes(egg), '还没越过熄灭时刻：应该仍在等');
+  assert.equal(w.stats.hatchFailures, 0, '等待期间不计数');
+
+  step(w, 1);
+  assert.ok(!w.eggs.includes(egg), '等不到位置就该让光熄灭、从世界散去');
+  assert.equal(w.stats.hatchFailures, 1, '只在散去那一刻计入一次');
+  assert.equal(aliveCreatures(w).length, 2, '种群始终不超过上限');
+
+  step(w, 10);
+  assert.equal(w.stats.hatchFailures, 1, '卵已移除，不得重复计数');
+});
+
 // ---------- 鲁棒性 ----------
 
 test('单只生物抛异常时被隔离为 sick，其余照常运行（spec 7.7）', () => {
@@ -826,8 +888,10 @@ test('worldStats 汇总关键指标', () => {
 test('addCreature 是强制加入，上限由 layEggs 的 viable 标记把关', () => {
   // addCreature 故意不检查上限：它有两个调用方 ——
   // createWorld（初始投放）与 tickEggs（孵化）。
-  // 孵化那条路径的上限已经在 layEggs 里通过 viable=false 把过关了，
-  // 这里再查一次会有两个地方各自维护同一条规则，迟早打架。
+  // 孵化那条路径的上限由**两处**共同把关，各自负责一种时序：
+  //   · layEggs 的 viable=false —— 产卵**那一刻**缸就满了（卵从一开始就要熄灭）；
+  //   · tickEggs 的孵化时闸门 —— 产卵时未满、但 60 秒后**孵化时**满了（见上面两条测试）。
+  // 在 addCreature 里再查一次会有第三个地方维护同一条规则，迟早打架。
   const w = createWorld({ seed: 41, initialCreatures: 0, populationCap: 2 });
   for (let i = 0; i < 5; i++) {
     addCreature(w, createCreature({ id: `x${i}`, name: `X${i}`, x: 0.5, y: 0.5, age: 600, rng: createRng(i) }));
@@ -921,6 +985,51 @@ test('父母条目被容量淘汰后会被重新缓存回来（spec 4.11「认�
   // 反向：补回来不能突破容量上限（否则就成了"永不忘"，与 spec 4.8 的遗忘设计相悖）
   assert.ok(c.memory.entries.length <= CONFIG.memoryCapacity,
     `补缓存不得突破容量上限：${c.memory.entries.length} > ${CONFIG.memoryCapacity}`);
+});
+
+test('抚摸能买到好感，卖萌在真实缸里真的会出现（用户明确要求的行为）', () => {
+  // ⚠️ 这条守的是一个**曾经真实存在**的失败：验收模拟器实测"卖萌在真实缸里一次都不出现"。
+  // 机制（量出来的，不是猜的）：好感在内核里只有 beg 分支会累积
+  // （温柔的手只给 familiarity，不给 affection），而 beg 的最高效用分（≈0.15）
+  // 低于缸里普通活动的地板（explore 0.4~0.6、socialize 1~2、court 3~4），
+  // 于是 beg 永远排不上号 ⇒ affection 恒为 0 ⇒ 卖萌的门永远打不开 —— 死锁。
+  // 修法是把 CONFIG.behavior.begUrgency 从 1.3 调到 7.0（扫值数据见 src/config.js 的注释）。
+  // 这条测试把"抚摸 → 卖萌 → 好感上升"整条链钉住，防止有人把权重调回去而无人察觉。
+  const w = createWorld({ seed: 5 });
+  for (let i = 0; i < Math.round(60 / CONFIG.fixedDt); i++) {
+    tickWorld(w, CONFIG.fixedDt); w.events.length = 0;
+  }
+  // 挑一只**愿意靠近玩家**（playerApproach > 0.2）且年轻的个体：
+  // playerApproach ≤ 0 的按设计永远不会卖萌（spec 4.9：暴躁/胆小的一见手就躲），
+  // 拿它来测只会得到一条恒 0 的曲线；太老的会在观察期间死掉、白白截断数据。
+  const cand = aliveCreatures(w)
+    .filter((c) => c.thresholds.playerApproach > 0.2 && c.age < 900)
+    .sort((a, b) => a.age - b.age)[0];
+  assert.ok(cand, '前置条件：缸里应当有 playerApproach > 0.2 且年轻的个体可观察');
+  assert.equal(affectionFor(cand.memory, PLAYER_ID), 0, '前置条件：还没互动过，好感应为 0');
+
+  // 温柔地抚摸 20 秒（手速远低于 HAND_SPEED_POKE = 0.25）
+  const steps = Math.round(20 / CONFIG.fixedDt);
+  w.playerHand = { pos: { x: cand.pos.x, y: cand.pos.y }, speed: 0.01 };
+  let begTicks = 0;
+  for (let i = 0; i < steps; i++) {
+    w.playerHand.pos.x = cand.pos.x;
+    w.playerHand.pos.y = cand.pos.y;
+    tickWorld(w, CONFIG.fixedDt);
+    w.events.length = 0;
+    if (cand.intent && cand.intent.kind === 'beg') begTicks += 1;
+  }
+  w.playerHand = null;
+
+  // 1) 卖萌真的被选中过 —— 这正是用户要的"会卖萌的"
+  assert.ok(begTicks > 0,
+    `抚摸 20 秒期间一次都没卖萌（beg 胜出 0/${steps}）—— 说明 begUrgency 又落回了不可达的量级`);
+  // 2) 于是好感真的买到了（"抚摸有意义"的前提）
+  assert.ok(affectionFor(cand.memory, PLAYER_ID) > 0,
+    '抚摸买不到好感（affection 仍为 0）—— 卖萌的门 (affection>0.1 || familiarity>0.3) 会因此永远打不开');
+  // 3) 熟悉度也应当上升（温柔的手本来就该让它认识你）
+  assert.ok(familiarityFor(cand.memory, PLAYER_ID) > 0.3,
+    '抚摸应当让它认识你（familiarity 上升）');
 });
 
 test('种群循环的廉价门：新缸 420 秒内必须真的孵出个体（长模拟的守门人）', () => {

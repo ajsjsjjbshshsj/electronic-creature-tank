@@ -181,29 +181,43 @@ if (hueSampleCount > 0) {
 // 再**完全不互动地推进 15 分钟**，按 1/2/5/10/15 分钟采样好感，
 // 打印衰减曲线与实测半衰期，供人对照"亲属级慢速率 346.574 秒"决定要不要改。
 //
-// ⚠️ 实跑发现（本文件落地时在种子 20261014 与 1 上各量了一次，5 模拟分钟窗口末）：
-//   抚摸 20 秒**买不到任何好感**。原因是好感在内核里只有一条来源 ——
-//   sim.js 里对 PLAYER_ID 的 adjustMemory 只有 beg 分支传了非零 dAffection
-//   （温柔的手那一段只给 familiarity，`adjustMemory(c.memory, PLAYER_ID, 0, 0.04*dt)`）；
-//   而 beg 的效用分被 explore/forage 压着，**一次都没胜出**（实测 20 秒里 beg 胜出 0 tick，
-//   7 只幸存者逐个试、延长到 300 秒也全是 0）。所以这一节下面：
-//     ① 先如实打印"抚摸 20 秒买到了多少"（通常是 0）与 beg 胜出的 tick 数；
+// ⚠️ 实跑发现（**已修复，保留记录**）：
+//   本节最初的实跑结果是"抚摸 20 秒买不到任何好感"：beg 的效用分被 explore/forage/socialize
+//   压着，**一次都没胜出**（20 秒里 beg 胜出 0 tick；7 只幸存者逐个试、延长到 300 秒也全是 0）。
+//   而好感在内核里只有一条来源 —— sim.js 对 PLAYER_ID 的 adjustMemory 只有 beg 分支
+//   传了非零 dAffection（温柔的手那一段只给 familiarity），于是 affection 恒为 0，
+//   卖萌的门 (affection > 0.1 || familiarity > 0.3) 就永远打不开 —— 死锁。
+//   根因是 **beg 被放在了错误的量级上**：它的最高分（≈0.15）低于缸里普通活动的地板
+//   （explore 0.4~0.6、socialize 1~2、court 3~4），根本排不上号。
+//   已把 CONFIG.behavior.begUrgency 从 1.3 调到 7.0（扫值数据见 src/config.js 的注释），
+//   现在实测：合适个体抚摸 20 秒 beg 胜出约 58%、affection 升到 0.21。
+//   所以这一节下面：
+//     ① 先如实打印"抚摸 20 秒买到了多少"与 beg 胜出的 tick 数（**现在应当非 0**）；
+//        若打印出 0，说明 begUrgency 又被调回不可达的量级，或选中的个体不肯靠近玩家。
 //     ② 再**注入一个已知好感**（经公开的 memory.adjust，不是手伸进 entries）测衰减本身，
-//        否则第 8 条要观察的那个速率永远拿不到数据。
+//        这样即使 ① 因为个体差异买不到，第 8 条要观察的那个**速率**依然拿得到数据。
 //   两件事分开打印、分别标注：① 是"能不能买到"，② 是"买到之后掉多快"。
 if (alive.length) {
-  // 挑观察对象：优先挑一只 playerApproach > 0 的。
-  // beg 的评分含因子 Math.max(0, thresholds.playerApproach)，而
-  // playerApproach = clingy*0.5 + bold*0.3 - irritable*0.35 最低可到 -0.35（personality.js）——
-  // 抽到一只 ≤ 0 的个体，这一节会打印一条**全 0**的曲线，看起来像"羁绊一碰就碎"，
-  // 真相却是"它从来不肯靠近你"。所以显式挑一只肯靠近的，并把选中理由打印出来。
-  const willing = alive.find((c) => c.thresholds.playerApproach > 0);
-  const pet = willing || alive[0];
+  // 挑观察对象：在**愿意靠近玩家**（playerApproach > 0）的个体里挑**最年轻**的那只。
+  // 三个条件都是有理由的：
+  //   ① beg 的评分含因子 Math.max(0, thresholds.playerApproach)（值域最低 −0.35）——
+  //      抽到 ≤ 0 的个体，这一节必然是一条全 0 的平线，看起来像"羁绊一碰就碎"，
+  //      真相却是"它从来不肯靠近你"（spec 4.9：暴躁/胆小的本来就躲手）。
+  //   ② 只是 "> 0" 还不够：实测 playerApproach = 0.092 的个体，即使 begUrgency 已经是 7.0，
+  //      也压不过 socialize / court，于是这一节会**误报**"好感买不到"。
+  //      所以挑最愿意靠近的那只，把它算不算得出卖萌的条件一并打印出来。
+  //   ③ **最年轻**这一条是实跑补上的：主模拟跑完 20 分钟时，整缸都是年龄 973~1011 的老年个体
+  //      （寿命 1140），挑谁都会在 15 分钟的停手观察里老死，曲线被截断。
+  //      按"剩余寿命最长"挑，这段观察才拿得到完整数据。
+  const willingPool = alive.filter((c) => c.thresholds.playerApproach > 0);
+  const pool = (willingPool.length ? willingPool : alive).slice()
+    .sort((a, b) => (a.age - b.age) || (b.thresholds.playerApproach - a.thresholds.playerApproach));
+  const pet = pool[0];
   console.log('\n玩家羁绊观察（交接要求第 8 条）');
   console.log(`  观察对象     ${pet.name}（playerApproach=${pet.thresholds.playerApproach.toFixed(3)}`
-    + `，curiosity=${pet.traits.personality.curious.toFixed(3)}`
-    + `，exploreRadius=${pet.thresholds.exploreRadius.toFixed(3)}`
-    + `）${willing ? '' : ' ← 全场没有愿意靠近玩家的幸存者，下面的感情曲线必然是平的'}`);
+    + `，age=${pet.age.toFixed(0)}s（剩余约 ${Math.max(0, 1140 - pet.age).toFixed(0)}s）`
+    + `，stage=${pet.stage}）`
+    + `${pet.thresholds.playerApproach > 0 ? '' : ' ← 全场没有愿意靠近玩家的幸存者，下面的感情曲线必然是平的'}`);
 
   // 抚摸阶段。手速取 HAND_SPEED_POKE 的一个零头（0.01），稳稳落在"抚摸"一侧。
   const petSteps = Math.round(20 / dt);
@@ -221,7 +235,7 @@ if (alive.length) {
   const a0 = affectionFor(pet.memory, PLAYER_ID);
   const f0 = familiarityFor(pet.memory, PLAYER_ID);
   console.log(`  抚摸 20s      beg 胜出 ${begTicks}/${petSteps} tick`
-    + `${begTicks === 0 ? '（好感在内核里只有 beg 能累积 ⇒ 好感买不到）' : ''}`);
+    + `${begTicks === 0 ? '（beg 一次都没胜出 ⇒ 好感买不到；见本节开头的说明与 begUrgency）' : ''}`);
   console.log(`  抚摸 20s 后   affection=${a0.toFixed(4)}  familiarity=${f0.toFixed(4)}`);
 
   if (!pet.alive) {
