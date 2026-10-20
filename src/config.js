@@ -45,6 +45,11 @@ const CONFIG = {
   maxSize: 38,
 
   // ---- 繁殖 ----
+  // ⚠️ 2026-10-20 孤雌改造进行中：courtship* 与 kinshipMateMax 这几项目前**仍有消费者**
+  // （breeding.js / behavior.js 的求偶路径），它们随 Task A2 一起删。
+  // 本 Task 只加新键、不删旧键，是为了让 A1 结束时测试套件仍然全绿 ——
+  // 如果现在就删，thresholds().courtshipWillingness 会变 undefined，
+  // 求偶评分静默变 NaN，那是一笔"看起来绿、其实坏了"的提交。
   courtship: { min: 8, max: 12 },   // 求偶仪式时长区间（秒）
   eggsPerClutch: [1, 3],
   kinshipMateMax: 0.25,             // 超过则绝不求偶
@@ -57,6 +62,45 @@ const CONFIG = {
   // 所以将来若决定删掉这个旋钮，不需要同步改任何测试 —— 删掉它即可。
   // 留着它的唯一理由是给 Plan 2/3 一个调参入口（若想让"达上限时偶尔仍能孵化"）。
   eggFailChanceAtCap: 1,
+
+  // ---- 孤雌产卵与蛋（2026-10-20 新增，spec §4.11 / §4.12 / §11）----
+  broody: { intervalMin: 120, intervalMax: 260 },   // 秒；两次自产卵的间隔区间
+  eggSize: {
+    min: 0.6, max: 1.4,      // 相对值，由母方 size × broody × 营养决定
+    hatchGain: 1.0,          // hatchSize 直接读蛋大小的归一量
+    bias: 0,                 // ⚠️ 控制方裁定（10-20 不追认）：蛋大小**不影响**成年体型。
+                             //    结构留着，改这一个数即可恢复；不许在别处再乘一次。
+    durationFactor: [0.8, 0.5],   // 孵化时长 = stage.egg × (f0 + f1 × 归一) ⇒ 大蛋孵得久
+    hatchlingFactor: [1.25, 0.5], // 幼体期时长 = stage.hatchling × (f0 − f1 × 归一)
+  },
+  // 蛋色用**累积边界**分段，不用宽度数组（宽度要额外断言浮点和为 1，会漂）。
+  // 末项必须恰为 1.0，由 tests/genes.test.js 钉住。黑蛋 0.025 是稀有度的唯一来源。
+  eggTint: {
+    colors: Object.freeze(['macaron-pink', 'macaron-blue', 'macaron-mint', 'macaron-lilac',
+                           'macaron-cream', 'macaron-peach', 'white', 'black']),
+    edges: Object.freeze([0.145, 0.29, 0.435, 0.58, 0.725, 0.87, 0.975, 1.0]),
+  },
+  // 外来血统漂入：孤雌下杂合度按 (1/2)^t 衰减，这是多样性的**唯一**补给阀门。
+  // 判据在 tests/simulate.mjs 与 Task A3（正反两向），不要凭感觉调频率。
+  drift: { interval: 240, form: 'egg' },
+
+  // ---- 蹦跳与语言（2026-10-20 新增，spec §4.7.2 / §4.13）----
+  hop: {
+    weightBase: 0.4, weightGain: 1.2,   // hopWeight = base + activity × gain
+    energyCost: 0.02,                   // 每次落地从 energy 扣
+    drainBase: 0.7, drainGain: 1.0,     // energyDrainFactor：好动的把精力掉得更快
+    impulseBase: 1.0,                   // 跳起冲量 = base × (0.5 + activity)，表现层用
+    minDurationBase: 0.6,               // 秒；实际 = base / (0.3 + activity)，表现层用
+  },
+  speech: {
+    enabled: true,                      // 关掉它，spec §9.2 第 7 条必须仍然全部成立
+    cooldownMin: 6, cooldownMax: 18,    // talk 高 → 取靠近 min 的一侧
+    heardBase: 4, heardGain: 8,         // heardCap = base + round(intellect × gain) = 4..12
+    misspeakMax: 0.25,                  // intellect=0 的说错词概率，线性递减到 0
+    maxTokens: 5,
+    onscreenMax: 2,                     // 同屏气泡上限（性能 + 审美，spec §5.3）
+    bubbleTtl: 3,
+  },
 
   // ---- 需求（每秒变化率）----
   needs: {

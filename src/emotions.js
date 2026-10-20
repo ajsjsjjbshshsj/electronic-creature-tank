@@ -61,8 +61,12 @@ export function computeTargets(needs, ctx, traits) {
     fear: clamp01(needs.safety * 0.7 + ctx.threat * (0.5 - p.bold * 0.25)),
     curiosity: clamp01(ctx.novelty * 0.6 + p.curious * 0.4),
     sleepy: clamp01(needs.energy),
+    // ⚠️ 2026-10-20：`p.libido` 已随基因位点改名换成 `p.broody`，**数值与系数一个没动**。
+    // 语义变了但公式没变：spec §4.5 现在把 arousal 定义成一般性的生理唤醒（蹦跳、社交高峰、
+    // 临近产卵都推高它），"临近产卵"正是 broody 在做的事，所以这一项的含义反而更贴切了。
+    // canBreed 这道门控留给 Task A2 复核（孤雌下它应当只剩"成年 + 未达上限"两个条件）。
     arousal: ctx.canBreed
-      ? clamp01(satisfied * 0.45 + (1 - needs.energy) * 0.3 + p.libido * 0.25)
+      ? clamp01(satisfied * 0.45 + (1 - needs.energy) * 0.3 + p.broody * 0.25)
       : 0,
   };
 }

@@ -119,25 +119,25 @@ test('canBreed 为 false 时 arousal 恒为 0（幼体与老年不求偶）', ()
   const n = createNeeds();
   n.hunger = 0;
   n.energy = 0;
-  assert.equal(computeTargets(n, calmCtx, traits({ libido: 1 })).arousal, 0);
+  assert.equal(computeTargets(n, calmCtx, traits({ broody: 1 })).arousal, 0);
 });
 
 test('canBreed 且状态良好时 arousal > 0', () => {
   const n = createNeeds();
   n.hunger = 0.05;
   n.energy = 0.05;
-  const e = computeTargets(n, { ...calmCtx, canBreed: true }, traits({ libido: 0.8 }));
+  const e = computeTargets(n, { ...calmCtx, canBreed: true }, traits({ broody: 0.8 }));
   assert.ok(e.arousal > 0.3, `arousal = ${e.arousal}`);
 });
 
-test('libido 基因推高 arousal', () => {
+test('broody 基因推高 arousal（2026-10-20 由 libido 改名，公式与系数未变）', () => {
   const n = createNeeds();
   n.hunger = 0.05;
   n.energy = 0.05;
   const ctx = { ...calmCtx, canBreed: true };
   assert.ok(
-    computeTargets(n, ctx, traits({ libido: 1 })).arousal
-    > computeTargets(n, ctx, traits({ libido: 0 })).arousal,
+    computeTargets(n, ctx, traits({ broody: 1 })).arousal
+    > computeTargets(n, ctx, traits({ broody: 0 })).arousal,
   );
 });
 
@@ -145,7 +145,7 @@ test('饥饿会压制 arousal（饿着肚子不想求偶）', () => {
   const ctx = { ...calmCtx, canBreed: true };
   const fed = createNeeds(); fed.hunger = 0.05; fed.energy = 0.05;
   const starved = createNeeds(); starved.hunger = 0.95; starved.energy = 0.05;
-  const t = traits({ libido: 0.8 });
+  const t = traits({ broody: 0.8 });
   assert.ok(
     computeTargets(fed, ctx, t).arousal > computeTargets(starved, ctx, t).arousal,
   );
@@ -570,7 +570,7 @@ test('computeTargets 的黄金向量：六个分量的全部内联系数被一�
   // 这里给的是 computeTargets 会读的字段，**外加三个刻意不被读取的字段**：
   // needs.social 与 personality.clingy / gluttonous。
   // computeTargets 只读 needs.hunger / energy / safety、ctx 五项、
-  // 以及 personality 的 irritable / bold / curious / libido。
+  // 以及 personality 的 irritable / bold / curious / broody。
   //
   // 那三个多余字段不是疏忽，而是哨兵：clingy 只调制社交需求的上升速率
   // （spec 4.8 / needs.js），gluttonous 只调制饥饿速率，social 只喂 needs 层 ——
@@ -583,33 +583,33 @@ test('computeTargets 的黄金向量：六个分量的全部内联系数被一�
       name: '六路输入全开',
       needs: { hunger: 0.3, energy: 0.4, social: 0.5, safety: 0.6 },
       ctx: { pleasure: 0.2, provocation: 0.8, threat: 0.5, novelty: 0.7, canBreed: true },
-      personality: { bold: 0.9, clingy: 0.1, irritable: 0.2, gluttonous: 0.3, curious: 0.4, libido: 0.6 },
+      personality: { bold: 0.9, clingy: 0.1, irritable: 0.2, gluttonous: 0.3, curious: 0.4, broody: 0.6 },
       expect: {
         joy: 0.375,        // satisfied 0.7 × 0.35 + pleasure 0.2 × 0.65 = 0.245 + 0.13
         anger: 0.512,      // provocation 0.8 × (0.55 + irritable 0.2 × 0.45) = 0.8 × 0.64
         fear: 0.5575,      // safety 0.6 × 0.7 + threat 0.5 × (0.5 − bold 0.9 × 0.25) = 0.42 + 0.1375
         curiosity: 0.58,   // novelty 0.7 × 0.6 + curious 0.4 × 0.4 = 0.42 + 0.16
         sleepy: 0.4,       // 直接就是 energy 匮乏度
-        arousal: 0.645,    // 0.7 × 0.45 + (1 − 0.4) × 0.3 + libido 0.6 × 0.25 = 0.315 + 0.18 + 0.15
+        arousal: 0.645,    // 0.7 × 0.45 + (1 − 0.4) × 0.3 + broody 0.6 × 0.25 = 0.315 + 0.18 + 0.15
       },
     },
     {
       name: '极饿触发 anger 附加项；canBreed = false 一票门控 arousal',
       needs: { hunger: 0.8, energy: 0, social: 0, safety: 0 },
       ctx: { pleasure: 0, provocation: 0, threat: 0, novelty: 0, canBreed: false },
-      personality: { bold: 0.5, clingy: 0.5, irritable: 1, gluttonous: 0.5, curious: 0, libido: 1 },
+      personality: { bold: 0.5, clingy: 0.5, irritable: 1, gluttonous: 0.5, curious: 0, broody: 1 },
       expect: {
         joy: 0.07,         // satisfied 0.2 × 0.35
         anger: 0.2,        // provocation 0 使整项归零，只剩「饿到发脾气」的固定 0.2
         fear: 0, curiosity: 0, sleepy: 0,
-        arousal: 0,        // libido 拉满也必须是 0：门控优先于基因
+        arousal: 0,        // broody 拉满也必须是 0：门控优先于基因
       },
     },
     {
       name: 'hunger 恰为 0.7 时不触发附加项（阈值是严格 >）',
       needs: { hunger: 0.7, energy: 0, social: 0, safety: 0 },
       ctx: { pleasure: 0, provocation: 0, threat: 0, novelty: 0, canBreed: false },
-      personality: { bold: 0.5, clingy: 0.5, irritable: 0, gluttonous: 0.5, curious: 0, libido: 0 },
+      personality: { bold: 0.5, clingy: 0.5, irritable: 0, gluttonous: 0.5, curious: 0, broody: 0 },
       expect: {
         joy: 0.105,        // satisfied 0.3 × 0.35
         anger: 0,          // 0.7 > 0.7 为假 ⇒ 无附加项

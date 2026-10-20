@@ -4,7 +4,11 @@ import { thresholds } from '../src/personality.js';
 
 const P = (over = {}) => ({
   bold: 0.5, clingy: 0.5, irritable: 0.5,
-  gluttonous: 0.5, curious: 0.5, libido: 0.5,
+  gluttonous: 0.5, curious: 0.5,
+  // 2026-10-20：libido 改名 broody，另加 activity / talk / intellect 三个新位点。
+  // 这里必须凑齐九项 —— 少一项不会让"字段齐全"那条变红，只会让对应的阈值
+  // 静默变成 NaN，而 NaN 在下游的效用评分里是"这一项永远赢"那种难查的行为。
+  broody: 0.5, activity: 0.5, talk: 0.5, intellect: 0.5,
   ...over,
 });
 
@@ -12,6 +16,9 @@ const FIELDS = [
   'fearThreshold', 'angerThreshold', 'angerDuration', 'hungerTrigger',
   'socialTrigger', 'exploreRadius', 'playerApproach',
   'turnRate', 'courtshipWillingness',
+  // 2026-10-20 新增六项
+  'hopWeight', 'energyDrainFactor', 'speechCooldown',
+  'heardCapacity', 'misspeakChance', 'broodInterval',
 ];
 
 test('输出包含全部约定字段且都是有限数', () => {
@@ -27,17 +34,17 @@ test('阈值字段集恰好是 FIELDS —— 不多不少', () => {
   // 上面那条只检查"FIELDS 里的都在"，对**多出来的字段**完全不敏感：
   // 把被刻意删除的 arousalRate 加回去，那条依旧全绿（实测 17/17 通过）。
   // 而"多一个字段"恰恰是本任务要防的事 —— arousalRate 是个没人读的死旋钮，
-  // 谁把它接上去，libido 对 arousal 的影响就会被重复计算一次。
+  // 谁把它接上去，broody 对 arousal 的影响就会被重复计算一次。
   const t = thresholds(P());
   assert.deepEqual(Object.keys(t).sort(), [...FIELDS].sort(),
     '输出键集必须与 FIELDS 完全一致（多一个或少一个都要变红）');
-  assert.equal(FIELDS.length, 9, '阈值恰好 9 个 —— 删除 arousalRate 后不得变回 10 个');
-  assert.equal(Object.keys(t).length, 9);
+  assert.equal(FIELDS.length, 15, '阈值恰好 15 个（原 9 个 + 2026-10-20 新增 6 个）');
+  assert.equal(Object.keys(t).length, 15);
   assert.ok(!('arousalRate' in t),
     'arousalRate 已被刻意删除（死字段：无消费者，spec 4.9 那行由 Task 4 的 arousal 目标值实现）');
 });
 
-test('九个阈值的系数与两端取值都被字面量钉住', () => {
+test('十五个阈值的系数与两端取值都被字面量钉住', () => {
   // 与 playerApproach 同理：只测方向的断言是空洞的。
   // 实测把 angerDuration / hungerTrigger / turnRate 的斜率缩小 10 倍，
   // 17 条既有测试仍然全绿 —— 而这三个值直接决定"气多久""多饿才觅食""转身多果断"。
@@ -82,9 +89,30 @@ test('九个阈值的系数与两端取值都被字面量钉住', () => {
   // turnRate = 2 + bold*4（rad/s）
   assert.ok(Math.abs(t({ bold: 0 }).turnRate - 2) < 1e-12);
   assert.ok(Math.abs(t({ bold: 1 }).turnRate - 6) < 1e-12);
-  // courtshipWillingness = 0.6 + libido*0.8
-  assert.ok(Math.abs(t({ libido: 0 }).courtshipWillingness - 0.6) < 1e-12);
-  assert.ok(Math.abs(t({ libido: 1 }).courtshipWillingness - 1.4) < 1e-12);
+  // courtshipWillingness = 0.6 + broody*0.8
+  // ⚠️ 孤雌改造的中间态：驱动基因已由 libido 改名为 broody，公式与取值不变。
+  // 这一项连同它的断言都会在 Task A2 随求偶路径一起删掉。
+  assert.ok(Math.abs(t({ broody: 0 }).courtshipWillingness - 0.6) < 1e-12);
+  assert.ok(Math.abs(t({ broody: 1 }).courtshipWillingness - 1.4) < 1e-12);
+  // ---- 2026-10-20 新增六项：同样取两个极端，把斜率与截距一起钉死 ----
+  // hopWeight = 0.4 + activity*1.2
+  assert.ok(Math.abs(t({ activity: 0 }).hopWeight - 0.4) < 1e-12);
+  assert.ok(Math.abs(t({ activity: 1 }).hopWeight - 1.6) < 1e-12);
+  // energyDrainFactor = 0.7 + activity*1.0
+  assert.ok(Math.abs(t({ activity: 0 }).energyDrainFactor - 0.7) < 1e-12);
+  assert.ok(Math.abs(t({ activity: 1 }).energyDrainFactor - 1.7) < 1e-12);
+  // speechCooldown = 18 − talk*12（秒）
+  assert.ok(Math.abs(t({ talk: 0 }).speechCooldown - 18) < 1e-12);
+  assert.ok(Math.abs(t({ talk: 1 }).speechCooldown - 6) < 1e-12);
+  // heardCapacity = 4 + intellect*8（条）
+  assert.ok(Math.abs(t({ intellect: 0 }).heardCapacity - 4) < 1e-12);
+  assert.ok(Math.abs(t({ intellect: 1 }).heardCapacity - 12) < 1e-12);
+  // misspeakChance = 0.25 × (1 − intellect)
+  assert.ok(Math.abs(t({ intellect: 0 }).misspeakChance - 0.25) < 1e-12);
+  assert.ok(Math.abs(t({ intellect: 1 }).misspeakChance - 0) < 1e-12);
+  // broodInterval = 260 − broody*140（秒）
+  assert.ok(Math.abs(t({ broody: 0 }).broodInterval - 260) < 1e-12);
+  assert.ok(Math.abs(t({ broody: 1 }).broodInterval - 120) < 1e-12);
   // 中性性格（全 0.5）的整组取值，作为整体快照
   const n = thresholds(P());
   assert.ok(Math.abs(n.fearThreshold - 0.55) < 1e-12);
@@ -95,6 +123,12 @@ test('九个阈值的系数与两端取值都被字面量钉住', () => {
   assert.ok(Math.abs(n.exploreRadius - 0.55) < 1e-12);
   assert.ok(Math.abs(n.turnRate - 4) < 1e-12);
   assert.ok(Math.abs(n.courtshipWillingness - 1) < 1e-12);
+  assert.ok(Math.abs(n.hopWeight - 1) < 1e-12);
+  assert.ok(Math.abs(n.energyDrainFactor - 1.2) < 1e-12);
+  assert.ok(Math.abs(n.speechCooldown - 12) < 1e-12);
+  assert.ok(Math.abs(n.heardCapacity - 8) < 1e-12);
+  assert.ok(Math.abs(n.misspeakChance - 0.125) < 1e-12);
+  assert.ok(Math.abs(n.broodInterval - 190) < 1e-12);
 });
 
 test('bold 高 → fearThreshold 高（要更大威胁才害怕）', () => {
@@ -137,17 +171,17 @@ test('curious 高 → exploreRadius 大', () => {
   assert.ok(thresholds(P({ curious: 1 })).exploreRadius > thresholds(P({ curious: 0 })).exploreRadius);
 });
 
-test('libido 高 → courtshipWillingness 更高', () => {
+test('broody 高 → courtshipWillingness 更高（孤雌改造中间态，A2 删）', () => {
   // 注意：原计划这里还断言了一个 `arousalRate`（"求偶欲上升快"），现已**删除该字段**（2026-10-14 预飞审查）。
   // 理由：全项目没有任何消费者，而 spec 4.9 那行"求偶欲上升快"实际是由
   // Task 4 的 computeTargets 给 arousal **目标值** 0.25 权重实现的，
   // 上升快慢则由全局 CONFIG.emotions.inertia 决定 —— 都不是"每只生物一个速率"。
   // 保留它等于留一个"看起来在起作用、其实没人读"的旋钮，
-  // 哪天有人真的接上去就会把 libido 的影响重复计算一次。
-  // libido 对 arousal 的调制已在 tests/emotions.test.js 的目标值测试里钉住。
+  // 哪天有人真的接上去就会把 broody 的影响重复计算一次。
+  // broody 对 arousal 的调制已在 tests/emotions.test.js 的目标值测试里钉住。
   assert.ok(
-    thresholds(P({ libido: 1 })).courtshipWillingness
-    > thresholds(P({ libido: 0 })).courtshipWillingness,
+    thresholds(P({ broody: 1 })).courtshipWillingness
+    > thresholds(P({ broody: 0 })).courtshipWillingness,
   );
 });
 
@@ -182,8 +216,8 @@ test('阈值单调：基因从 0 到 1 连续扫描时方向不变', () => {
 
 test('极端基因也不产生荒谬值（区间与正负号都合理）', () => {
   for (const p of [
-    P({ bold: 0, clingy: 0, irritable: 0, gluttonous: 0, curious: 0, libido: 0 }),
-    P({ bold: 1, clingy: 1, irritable: 1, gluttonous: 1, curious: 1, libido: 1 }),
+    P({ bold: 0, clingy: 0, irritable: 0, gluttonous: 0, curious: 0, broody: 0, activity: 0, talk: 0, intellect: 0 }),
+    P({ bold: 1, clingy: 1, irritable: 1, gluttonous: 1, curious: 1, broody: 1, activity: 1, talk: 1, intellect: 1 }),
     P({ bold: 1, irritable: 0, clingy: 0, curious: 0 }),
     P({ bold: 0, irritable: 1, clingy: 1, curious: 1 }),
   ]) {
@@ -197,6 +231,12 @@ test('极端基因也不产生荒谬值（区间与正负号都合理）', () =>
     assert.ok(t.playerApproach >= -1 && t.playerApproach <= 1, `playerApproach: ${t.playerApproach}`);
     assert.ok(t.turnRate > 0 && t.turnRate <= 12, `turnRate: ${t.turnRate}`);
     assert.ok(t.courtshipWillingness > 0 && t.courtshipWillingness <= 2, `courtshipWillingness: ${t.courtshipWillingness}`);
+    assert.ok(t.hopWeight > 0 && t.hopWeight <= 2, `hopWeight: ${t.hopWeight}`);
+    assert.ok(t.energyDrainFactor >= 0.5 && t.energyDrainFactor <= 2.5, `energyDrainFactor: ${t.energyDrainFactor}`);
+    assert.ok(t.speechCooldown >= 6 && t.speechCooldown <= 18, `speechCooldown: ${t.speechCooldown}`);
+    assert.ok(t.heardCapacity >= 4 && t.heardCapacity <= 12, `heardCapacity: ${t.heardCapacity}`);
+    assert.ok(t.misspeakChance >= 0 && t.misspeakChance <= 0.25, `misspeakChance: ${t.misspeakChance}`);
+    assert.ok(t.broodInterval >= 120 && t.broodInterval <= 260, `broodInterval: ${t.broodInterval}`);
   }
 });
 
@@ -213,4 +253,38 @@ test('thresholds 是纯映射，不依赖任何随机源', () => {
   // 同一份性格在不同"时刻"调用结果一致 —— 行为可复现的前提
   const p = P({ clingy: 0.3, curious: 0.9 });
   assert.deepEqual(thresholds(p), thresholds(p));
+});
+
+// ---------------- 2026-10-20 新增四维的方向断言 ----------------
+// 上面那条已经把系数与两端取值钉死，这里再补方向：
+// 两者不冗余 —— 字面量那条抓"斜率被改小"，方向这条抓"斜率被改成负数"，
+// 而后者若只靠字面量断言，需要有人恰好去读那两端的数才知道。
+
+test('activity 高 → hopWeight 高，且 energyDrainFactor 同向高', () => {
+  // 同向是刻意的：好动的跳得多、也因此先累。两个方向一起才让"累了会休息"
+  // 成为涌现结果，而不需要任何一处硬门控。若只有 hopWeight 随 activity 上升、
+  // 消耗却不随之上升，好动的个体就会永远跳下去。
+  const lo = thresholds(P({ activity: 0 }));
+  const hi = thresholds(P({ activity: 1 }));
+  assert.ok(hi.hopWeight > lo.hopWeight, 'hopWeight 应随 activity 上升');
+  assert.ok(hi.energyDrainFactor > lo.energyDrainFactor, 'energyDrainFactor 应随 activity 上升');
+});
+
+test('talk 高 → speechCooldown 短（话痨出词密，高冷的半天一句）', () => {
+  assert.ok(thresholds(P({ talk: 1 })).speechCooldown
+    < thresholds(P({ talk: 0 })).speechCooldown);
+});
+
+test('intellect 高 → heardCapacity 大且 misspeakChance 小（两个方向必须同时成立）', () => {
+  // 只测容量不测准确率，就会出现"聪明的记得多、说得一样错"，
+  // 那智力在行为上仍然不可观察 —— spec §4.8.1 明确要求它看得见。
+  const lo = thresholds(P({ intellect: 0 }));
+  const hi = thresholds(P({ intellect: 1 }));
+  assert.ok(hi.heardCapacity > lo.heardCapacity, 'heardCapacity 应随 intellect 上升');
+  assert.ok(hi.misspeakChance < lo.misspeakChance, 'misspeakChance 应随 intellect 下降');
+});
+
+test('broody 高 → broodInterval 短（自产卵间隔）', () => {
+  assert.ok(thresholds(P({ broody: 1 })).broodInterval
+    < thresholds(P({ broody: 0 })).broodInterval);
 });
