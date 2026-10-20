@@ -98,6 +98,22 @@ const CONFIG = {
     bubbleTtl: 3,
   },
 
+  // ---- 五档心情的阈值（spec §4.5.1，2026-10-20 新增）----
+  // **顺序**在 emotions.moodOf 的 if 链里，不在这里：愤怒必须第一个判，
+  // 否则"又饿又气但 joy 还有惯性残留"的个体会报出"幸福"—— 那是当着玩家的面说谎。
+  // 这八个数是语言层选词的唯一依据，spec 把它们列进 §12 的授权范围（按观感调），
+  // 但两侧取值由 tests/emotions.test.js 逐条钉住，调它们必须是一次有意识的动作。
+  mood: {
+    angerMin: 0.5,          // anger ≥ 该值 → 愤怒
+    sadJoyMax: 0.25,        // joy < 该值 且 fear ≥ sadFearMin → 伤心
+    sadFearMin: 0.4,
+    sadSocialMin: 0.7,      // 社交匮乏 ≥ 该值单独就够 → 伤心
+    happyJoyMin: 0.45,      // joy ≥ 该值 → 快乐
+    blissJoyMin: 0.6,       // 幸福要三样齐全：joy、四条需求、对玩家好感
+    blissNeedMax: 0.25,
+    blissAffMin: 0.6,
+  },
+
   // ---- 需求（每秒变化率）----
   needs: {
     hungerRate: 0.0083,        // 裸速率下 1/0.0083 ≈ 120s，但这不是"从 0 到 1"的真实耗时：

@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { CONFIG } from '../src/config.js';
 import { decode, randomGenome } from '../src/genes.js';
 import { createRng } from '../src/rng.js';
 import { createNeeds } from '../src/needs.js';
+import { createMemory, remember, decay as decayMemory, PLAYER_ID } from '../src/memory.js';
 import {
-  EMOTION_KEYS, EVENT_KINDS,
-  createEmotions, computeTargets, update, applyEvent, dominant, secondary,
+  EMOTION_KEYS, EVENT_KINDS, MOODS,
+  createEmotions, computeTargets, update, applyEvent, dominant, secondary, moodOf,
 } from '../src/emotions.js';
 
 const traits = (over = {}) => {
@@ -693,4 +695,170 @@ test('长时间混沌驱动后六个分量仍是有限的 [0,1] 数', () => {
     }
   }
   assert.deepEqual(Object.keys(e).sort(), [...EMOTION_KEYS].sort(), '长跑后键集被改动');
+});
+
+// ===========================================================================
+// 五档心情 moodOf（spec §4.5.1，Task A5）
+//
+// 它是**连续的六分量内核**与**离散的词表**之间唯一的桥：一只生物不会说
+// "我 joy 0.62 arousal 0.11"，它说的是"喵喵 开心"。所以这一档必须存在，
+// 且必须只有一个定义点 —— 表现层若自己再写一套 if，语言层和身体语言就会分家。
+//
+// 顺序本身就是设计，不是排版：愤怒排第一，是因为"又饿又气但 joy 还有 0.65
+// 惯性残留"的个体若先过幸福判据，就会报出"幸福" —— 那是假话，而且假得能看见
+// （它同时在颤抖）。幸福排在伤心之后是同一个理由。
+// ===========================================================================
+
+const M = CONFIG.mood;
+
+// 六分量与四需求都显式给值：默认 createEmotions() 全 0，任何"某分量恰好等于阈值"
+// 的用例都会被别的分量的默认值影响，显式给死才让断言只归因于这一项。
+const emo = (over = {}) => Object.assign(createEmotions(), over);
+const nee = (over = {}) => Object.assign(createNeeds(), over);
+const mem = (affection) => {
+  const m = createMemory();
+  remember(m, { id: PLAYER_ID, familiarity: 1, affection, kinship: 0, role: null });
+  return m;
+};
+// 一个"什么都好"的人设：让每一条断言只由**它要测的那一项**决定
+const blissful = (over = {}) => moodOf(
+  emo({ joy: over.joy === undefined ? 0.7 : over.joy, anger: over.anger || 0, fear: over.fear || 0 }),
+  nee({ hunger: over.hunger === undefined ? 0.1 : over.hunger,
+        energy: over.energy === undefined ? 0.1 : over.energy,
+        social: over.social === undefined ? 0.1 : over.social,
+        safety: over.safety === undefined ? 0.1 : over.safety }),
+  mem(over.aff === undefined ? 0.7 : over.aff),
+  { adversity: !!over.adversity },
+);
+const affBelowBliss = (m) => m.entries[0].affection < M.blissAffMin;
+
+test('MOODS 恰好五档、被冻结，且冻结这件事本身被钉住', () => {
+  // 摘掉 Object.freeze 不会让任何 deepEqual 内容断言变红 —— 与 PATTERNS / INTENTS 同一条纪律。
+  // 顺序就是 spec §4.5.1 表里的**判据优先级**，所以它承载语义。
+  // moodOf 本身不读这张表（它按 if 顺序返回字符串），它是给表现层与验收脚本用的
+  // **唯一一份档名清单** —— 两边各自列一遍就会分家。
+  assert.deepEqual([...MOODS], ['anger', 'sad', 'bliss', 'happy', 'calm']);
+  assert.ok(Object.isFrozen(MOODS), 'MOODS 应被冻结');
+  assert.throws(() => MOODS.push('__probe__'), TypeError, 'push 应抛 TypeError');
+  assert.throws(() => MOODS.reverse(), TypeError, 'reverse 应抛 TypeError');
+  assert.throws(() => { MOODS[0] = '__probe__'; }, TypeError, '下标赋值应抛 TypeError');
+});
+
+test('判据顺序的钉子：anger 0.6 + joy 0.7 + 需求全满 + 好感 0.9 → 报 anger，不报 bliss', () => {
+  // 这一条是整节存在的理由。少了它，"谁先判"就成了无人看守的排版问题，
+  // 而把它判错的后果是**当着玩家的面说谎**：一只同时在颤抖的个体报"幸福"。
+  assert.equal(blissful({ anger: 0.6 }), 'anger');
+  assert.equal(blissful({}), 'bliss', '前置条件：把 anger 归零时同一个人设确实报 bliss');
+});
+
+test('刚有死亡事件时 joy 再高也报 sad（死亡这一支不受 joy 门控）', () => {
+  // spec 表格原先写成 `joy < 0.25 且 (fear ≥ 0.4 或 近期有死亡/被欺负)`，
+  // 那个括号把死亡也关进了 joy 的低区间；而 §4.5.1 的正文说"joy 高但刚死了同伴的，
+  // 应该报伤心"。两者冲突时以正文为准，表格已按此改正（见 spec §4.5.1 的 2026-10-20 注）。
+  assert.equal(blissful({ adversity: true }), 'sad');
+  assert.equal(blissful({ adversity: true, joy: 0.95 }), 'sad', 'joy 抬到顶也不该翻回 bliss');
+});
+
+test('伤心三支各自的边界：恐惧要与低 joy 同时成立，社交匮乏单独就能成立', () => {
+  // joy 低 + fear 低 → 只是安静，不是伤心（防止把"且"写成"或"的对偶错误）
+  assert.equal(blissful({ joy: 0.1, fear: 0.1 }), 'calm');
+  assert.equal(blissful({ joy: 0.1, fear: 0.5 }), 'sad');
+  // joy 高时恐惧**不**触发伤心。这里只能断言"不是 sad"：joy 0.9 + 需求全低 + 好感 0.7
+  // 本来就该报 bliss —— 断言成 calm 是把"伤心没触发"误当成"什么都不成立"。
+  assert.notEqual(blissful({ joy: 0.9, fear: 0.9 }), 'sad', 'joy 高时恐惧不该判成伤心');
+  assert.equal(blissful({ joy: 0.9, fear: 0.9, aff: 0 }), 'happy', '把 bliss 的三个条件之一抽掉后它落回 happy');
+  // social 单独越线就够，哪怕其他一切都好
+  assert.equal(blissful({ social: 0.8 }), 'sad');
+});
+
+test('幸福要三样齐全：joy、四条需求全低、对玩家好感', () => {
+  assert.equal(blissful({}), 'bliss');
+  assert.equal(blissful({ joy: 0.55 }), 'happy', 'joy 不够高就退回快乐');
+  assert.equal(blissful({ hunger: 0.4 }), 'happy', '有一条需求没过就不算幸福');
+  assert.equal(blissful({ aff: 0.4 }), 'happy', '对玩家没好感就不算幸福');
+  // 四条需求里的每一条都要查（写死其中一条就漏掉一整类"看起来幸福但其实很难受"）
+  for (const key of ['energy', 'social', 'safety']) {
+    assert.equal(blissful({ [key]: 0.4 }), 'happy', `${key} 没过时不该报幸福`);
+  }
+});
+
+test('joy 0.5 其余低 → happy；全低 → calm', () => {
+  assert.equal(blissful({ joy: 0.5 }), 'happy');
+  assert.equal(blissful({ joy: 0.2, hunger: 0.6, energy: 0.6, social: 0.6, safety: 0.6 }), 'calm');
+});
+
+test('八个阈值两侧的取值都被钉住（斜率与截距一起定死）', () => {
+  // 只测方向的断言是空洞的（personality.test.js 抓过的那类）：这里每个阈值都取上下两侧。
+  const eps = 1e-9;
+  assert.equal(blissful({ anger: M.angerMin - eps }), 'bliss');
+  assert.equal(blissful({ anger: M.angerMin }), 'anger', 'anger 判据是 >=');
+  assert.equal(blissful({ joy: M.sadJoyMax - eps / 2, fear: M.sadFearMin }), 'sad');
+  assert.equal(blissful({ joy: M.sadJoyMax, fear: M.sadFearMin }), 'calm',
+    '恰好等于上界不算"joy 低" ⇒ 不报伤心（joy 只有 0.25，够不到 happy，所以落回 calm）');
+  assert.equal(blissful({ joy: 0.1, fear: M.sadFearMin - eps }), 'calm');
+  assert.equal(blissful({ joy: 0.1, fear: M.sadFearMin }), 'sad');
+  assert.equal(blissful({ social: M.sadSocialMin - eps }), 'happy',
+    '差一点没到社交匮乏线：bliss 也被 0.6999 的需求挡住 ⇒ 落回 happy');
+  assert.equal(blissful({ social: M.sadSocialMin }), 'sad');
+  assert.equal(blissful({ joy: M.blissJoyMin - eps }), 'happy');
+  assert.equal(blissful({ joy: M.blissJoyMin }), 'bliss');
+  assert.equal(blissful({ hunger: M.blissNeedMax }), 'bliss', '需求判据是 <=');
+  assert.equal(blissful({ hunger: M.blissNeedMax + eps }), 'happy');
+  assert.equal(blissful({ aff: M.blissAffMin }), 'bliss');
+  assert.equal(blissful({ aff: M.blissAffMin - eps }), 'happy');
+  assert.equal(blissful({ joy: M.happyJoyMin, aff: 0 }), 'happy');
+  assert.equal(blissful({ joy: M.happyJoyMin - eps, aff: 0 }), 'calm');
+});
+
+test('moodOf 是纯函数：不修改任何入参（六分量、四需求、记忆、ctx 各自快照）', () => {
+  const e = emo({ joy: 0.7, anger: 0.2, fear: 0.1, curiosity: 0.3, sleepy: 0.4, arousal: 0.5 });
+  const n = nee({ hunger: 0.1, energy: 0.2, social: 0.3, safety: 0.4 });
+  const m = mem(0.7);
+  const ctx = { adversity: false };
+  const se = structuredClone(e); const sn = structuredClone(n);
+  const sm = structuredClone(m); const sc = structuredClone(ctx);
+  moodOf(e, n, m, ctx);
+  moodOf(e, n, m, ctx);          // 跑两次：任何一次写入都会让第二次与快照不符
+  assert.deepEqual(e, se);
+  assert.deepEqual(n, sn);
+  assert.deepEqual(m, sm);
+  assert.deepEqual(ctx, sc);
+});
+
+test('moodOf 的源码里没有任何数字字面量（阈值必须全部来自 CONFIG.mood）', () => {
+  // 与 personality.test.js 那组同类的守卫：阈值钉在本文件里就等于绕过了 config.js
+  // 这个唯一来源，而 spec §4.5.1 明写"阈值全部进 CONFIG.mood，可调"。
+  // 扫的是**函数源码**而不是整个文件 —— computeTargets 那一堆系数另有测试钉住。
+  const src = moodOf.toString();
+  const digits = src.match(/[0-9]/g);
+  assert.equal(digits, null,
+    `moodOf 里出现了数字字面量（${digits && digits.join('')}）—— 请搬进 CONFIG.mood`);
+});
+
+test('幸福没有后门：放着不管，对玩家好感衰减之后 bliss 自己就消失（spec §4.5.1 陷阱条）', () => {
+  // 这条是**陷阱的反向证明**。玩家那条记忆的 familiarity 豁免衰减，但 affection
+  // 仍按普通速率淡化（90be12e 的裁定）。若实现给 bliss 开了后门
+  // （"是玩家就永不掉好感"），这条会立刻变红。
+  const e = emo({ joy: 0.7 });
+  const n = nee({ hunger: 0.1, energy: 0.1, social: 0.1, safety: 0.1 });
+  const m = mem(0.7);
+  assert.equal(moodOf(e, n, m, { adversity: false }), 'bliss', '前置条件：一开始确实幸福');
+  decayMemory(m, 8);            // 0.7 × exp(−0.02 × 8) = 0.5989…，刚好掉到 0.6 以下
+  assert.ok(affBelowBliss(m), '前置条件：好感确实淡到了 blissAffMin 之下');
+  assert.equal(moodOf(e, n, m, { adversity: false }), 'happy',
+    '好感淡了就只剩快乐 —— 不许给 bliss 单独开后门');
+});
+
+test('返回的档位一定是 MOODS 的成员（表现层按这张表建样式，不会撞到 undefined）', () => {
+  const samples = [
+    [emo({ anger: 0.9 }), nee(), mem(0)],
+    [emo({ joy: 0.1, fear: 0.9 }), nee({ social: 0.9 }), mem(0)],
+    [emo({ joy: 0.95 }), nee({ hunger: 0, energy: 0, social: 0, safety: 0 }), mem(1)],
+    [emo({ joy: 0.5 }), nee(), mem(0)],
+    [emo(), nee(), mem(0)],
+  ];
+  for (const [e, n, m] of samples) {
+    const got = moodOf(e, n, m, { adversity: false });
+    assert.ok(MOODS.includes(got), `非法档位 ${got}`);
+  }
 });

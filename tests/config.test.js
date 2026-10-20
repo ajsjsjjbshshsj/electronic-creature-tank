@@ -187,3 +187,25 @@ test('package.json 不含任何依赖（零依赖约束）', async () => {
     'package.json 只允许这四个键 —— 任何依赖字段都违反零依赖约束');
   assert.deepEqual(Object.keys(pkg.scripts).sort(), ['simulate', 'test']);
 });
+
+test('五档心情的八个阈值被字面量钉住（两侧取值由 emotions.test.js 负责）', () => {
+  // 分工：config.test.js 钉**数值本身**，emotions.test.js 钉**每个数两侧的档位**。
+  // 只钉一侧的话，把 angerMin 从 0.5 改成 0.05 也能通过所有档位测试
+  // （因为档位测试读的是 CONFIG），而这会让任何一生物在有点烦的时候都报"愤怒"。
+  const m = CONFIG.mood;
+  assert.deepEqual(Object.keys(m).sort(), [
+    'angerMin', 'blissAffMin', 'blissJoyMin', 'blissNeedMax',
+    'happyJoyMin', 'sadFearMin', 'sadJoyMax', 'sadSocialMin',
+  ], '八个阈值，不多不少 —— 加一个就得同时加两侧档位的测试');
+  assert.equal(m.angerMin, 0.5);
+  assert.equal(m.sadJoyMax, 0.25);
+  assert.equal(m.sadFearMin, 0.4);
+  assert.equal(m.sadSocialMin, 0.7);
+  assert.equal(m.happyJoyMin, 0.45);
+  assert.equal(m.blissJoyMin, 0.6);
+  assert.equal(m.blissNeedMax, 0.25);
+  assert.equal(m.blissAffMin, 0.6);
+  // 档位之间必须**有顺序**，否则五档会塌成三档（幸福线低于快乐线就是这种错误）
+  assert.ok(m.blissJoyMin > m.happyJoyMin, '幸福必须比快乐要求更高的 joy');
+  assert.ok(m.sadSocialMin > m.blissNeedMax, '社交匮乏线必须远高于"需求已满足"线');
+});

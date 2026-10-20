@@ -22,6 +22,10 @@
 // 注意 affection（依恋/卖萌）**不在**这里：它是 memory 里针对特定对象的
 // 关系性数值（"依恋谁"是关于一段关系的，不是关于当下状态的），见 spec 4.5。
 import { CONFIG } from './config.js';
+// moodOf 需要读"对玩家的好感"（幸福的第三个条件）。memory.js 只依赖 config.js，
+// 所以这条 import 不产生环；而 PLAYER_ID 必须在两处保持一致（写侧是 sim、读侧是这里），
+// 所以从 memory.js 引进来而不是在这里重抄一遍 'PLAYER' 字面量。
+import { affectionFor, PLAYER_ID } from './memory.js';
 
 // 恰好六个分量。affection 不在这里 —— 它是 memory 的关系性数值（spec 4.5）。
 //
@@ -162,4 +166,45 @@ export function secondary(emotions) {
     if (k !== first && emotions[k] > bestV) { bestV = emotions[k]; best = k; }
   }
   return bestV >= firstV * 0.5 ? best : null;
+}
+
+// ---------------------------------------------------------------- 五档心情（spec §4.5.1）
+//
+// 心情是六分量向量的**只读派生量**，不是第二个状态。谁都不许把它写回去 ——
+// 那正是 §4.5 刚否决过的互斥状态机。它存在的唯一理由是：语言层要选词，
+// 而一只生物不会说"我 joy 0.62 arousal 0.11"，它说的是"喵喵 开心"。
+// 所以**连续内核与离散词表之间必须有这一座桥，且只能有一个定义点**：
+// 表现层若自己再写一套 if，说出来的话和做出来的动作就会分家。
+//
+// 判据顺序就是设计，不是排版（下面的每一条都对应 tests/emotions.test.js 的一条钉子）：
+//   1. 愤怒排在最前 —— 一只又饿又气、joy 还有 0.65 惯性残留的个体，
+//      若先过幸福判据就会报"幸福"，而它同时在颤抖。那是假话，且假得能看见。
+//   2. 伤心排在幸福之前 —— "joy 高但刚死了同伴"应该报伤心（spec 正文）。
+//      ⚠️ spec 表格里原先把"近期有死亡"写在 `joy < 0.25 且 (…)` 的括号**里面**，
+//      那与正文冲突；实现按正文走（死亡这一支不受 joy 门控），表格已于 2026-10-20 改正。
+//   3. 幸福要求三样齐全：joy 够高 + 四条需求全部够低 + 对玩家好感够高。
+//      缺任何一样都退回快乐 —— "什么都不缺但也不依恋你"是快乐，不是幸福。
+//
+// ctx.adversity：**近期有死亡/被欺负事件**。内核里目前只有一个生产者 ——
+// sim 传 `c.mourn > 0`（onDeath 给 mournRadius 内每只个体点上的哀悼计时，spec §4.11）。
+// "被欺负"那一半**暂时没有生产者**：欺负在冲突里表现为 bumped 事件 + 好感下降，
+// 那是瞬时量，没有"近期"这层记忆；硬造一个字段就是无生产者的装饰，
+// 所以留到这里，等计划 3 的交互层出现真正的欺负事件再接。
+//
+// 阈值一律来自 CONFIG.mood，函数体里不许出现数字字面量
+// （由 tests/emotions.test.js 的正则扫描钉住 —— 与 personality.test.js 那组同类守卫）。
+export const MOODS = Object.freeze(['anger', 'sad', 'bliss', 'happy', 'calm']);
+
+export function moodOf(emotions, needs, memory, ctx) {
+  const m = CONFIG.mood;
+  const adversity = !!(ctx && ctx.adversity);
+  if (emotions.anger >= m.angerMin) return 'anger';
+  if (adversity) return 'sad';
+  if (emotions.joy < m.sadJoyMax && emotions.fear >= m.sadFearMin) return 'sad';
+  if (needs.social >= m.sadSocialMin) return 'sad';
+  if (emotions.joy >= m.blissJoyMin
+      && Object.values(needs).every((v) => v <= m.blissNeedMax)
+      && affectionFor(memory, PLAYER_ID) >= m.blissAffMin) return 'bliss';
+  if (emotions.joy >= m.happyJoyMin) return 'happy';
+  return 'calm';
 }
