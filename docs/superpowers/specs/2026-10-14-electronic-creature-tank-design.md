@@ -713,7 +713,7 @@ score(候选) = 需求紧迫度 × 性格权重 × 情境可行性 × 情绪倾�
 // 种群
 POPULATION_CAP_DESKTOP = 24
 POPULATION_CAP_MOBILE  = 16
-INITIAL_CREATURES      = 4      // 亚成体
+INITIAL_CREATURES      = 8      // 亚成体；2026-10-14 由 4 调到 8（控制方裁定），实测依据见 §9.1 的裁定注
 
 // 生命周期（模拟秒，@1×）；总和 = 完整寿命 1200s = 20min
 STAGE_EGG        = 60
