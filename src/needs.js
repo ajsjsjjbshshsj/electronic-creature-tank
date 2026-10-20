@@ -49,9 +49,12 @@ export function decay(needs, dt, traits, ctx) {
   // 恢复的唯一入口就是这里的 ctx.resting 分支（energyRateRest 是负速率）——
   // 不要再另开一个 rest() 之类的快捷函数，那会让"只调它"冻结另外三条需求、
   // "两个都调"把精力恢复跑成 2 倍速。
+  // 好动的个体把精力掉得更快（ctx.drainFactor 来自 thresholds.energyDrainFactor，默认 1.2）。
+  // 休息那一支**不乘** —— 恢复速率是"睡着有多快"，与性格好动与否无关，乘上去会让话痨/好动者反而睡得更慢。
+  const drain = ctx.drainFactor === undefined ? 1 : ctx.drainFactor;
   const energyRate = ctx.resting
     ? CONFIG.needs.energyRateRest
-    : (ctx.moving ? CONFIG.needs.energyRateActive : CONFIG.needs.energyRateIdle);
+    : (ctx.moving ? CONFIG.needs.energyRateActive * drain : CONFIG.needs.energyRateIdle * drain);
   needs.energy = clamp01(needs.energy + energyRate * dt);
 
   // 社交：有同伴在场则大幅抑制匮乏

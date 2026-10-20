@@ -711,9 +711,9 @@ test('INTENTS 被冻结，且冻结这件事本身被钉住', () => {
   assert.throws(() => INTENTS.reverse(), TypeError, 'reverse 应抛 TypeError');
   assert.throws(() => { INTENTS[0] = '__probe__'; }, TypeError, '下标赋值应抛 TypeError');
   // 反向确认：冻结只挡写，不挡读与展开（decide / scoreAll 靠遍历它工作）
-  assert.equal([...INTENTS].length, 12);
+  assert.equal([...INTENTS].length, 13);
   assert.deepEqual([...INTENTS], ['forage', 'eat', 'rest', 'socialize', 'brood', 'explore',
-    'flee', 'beg', 'protest', 'fight', 'mourn', 'idle']);
+    'flee', 'beg', 'hop', 'protest', 'fight', 'mourn', 'idle']);
 });
 
 test('每个意图都恰好有一个分数，且键集与 INTENTS 一致（不多不少）', () => {
@@ -725,8 +725,8 @@ test('每个意图都恰好有一个分数，且键集与 INTENTS 一致（不�
   const scores = scoreAll(c, emptySenses({ foods: [food()] }));
   assert.deepEqual(Object.keys(scores).sort(),
     ['beg', 'brood', 'eat', 'explore', 'fight', 'flee',
-      'forage', 'idle', 'mourn', 'protest', 'rest', 'socialize']);
-  assert.equal(Object.keys(scores).length, 12, '恰好 12 个候选，与 INTENTS 一一对应');
+      'forage', 'hop', 'idle', 'mourn', 'protest', 'rest', 'socialize']);
+  assert.equal(Object.keys(scores).length, 13, '恰好 13 个候选，与 INTENTS 一一对应');
   // 每个值都必须是有限数：`Number.isFinite` 必须在范围断言**之前**，
   // 否则 NaN 会被 `NaN >= 0` 为假而误报成"越界"，诊断信息就丢了。
   for (const [k, v] of Object.entries(scores)) {
@@ -769,4 +769,37 @@ test('每个意图都恰好有一个分数，且键集与 INTENTS 一致（不�
   assert.ok(MIN_DURATION.brood > MIN_DURATION.flee, '孵卵必须比逃命长（逃命要能随时改向）');
   assert.ok(MIN_DURATION.brood < MIN_DURATION.rest, '孵卵必须比睡觉短');
   assert.ok(MIN_DURATION.fight < MIN_DURATION.protest, 'fight 必须短于 protest');
+});
+
+// ==================== 2026-10-20 Task A4：蹦跳 hop ====================
+
+test('hop 的分数随 activity 上升（方向断言）', () => {
+  const mkC = (activity) => {
+    const c = mk();
+    c.emotions.joy = 0.8; c.needs.energy = 0.2;
+    c.thresholds.hopWeight = 0.4 + activity * 1.2;   // 与 personality.thresholds 同式
+    return c;
+  };
+  const quiet = scoreAll(mkC(0), emptySenses()).hop;
+  const lively = scoreAll(mkC(1), emptySenses()).hop;
+  assert.ok(lively > quiet, `好动的 hop 分应更高：${quiet} vs ${lively}`);
+});
+
+test('累了就不跳：energy 是唯一变量时 hop 从正分塌到 0', () => {
+  // 这条测的是"累了会休息"必须是**涌现**的 —— 公式里没有任何一处写死
+  // "energy > X 就不许跳"，只有 (1 − energy) 这个乘子。
+  const c = mk();
+  c.emotions.joy = 0.9;
+  c.thresholds.hopWeight = 1.6;
+  assert.ok(scoreAll(c, emptySenses()).hop > 0, '前置条件：精力充沛时必须给分');
+  c.needs.energy = 0.75;                       // 只改这一项
+  assert.equal(scoreAll(c, emptySenses()).hop, 0, '累到 energy ≥ 0.7 时必须退出竞争');
+});
+
+test('joy 低时 hop 不给分（不高兴就不蹦）', () => {
+  const c = mk();
+  c.needs.energy = 0.05;
+  c.thresholds.hopWeight = 1.6;
+  c.emotions.joy = 0.2;
+  assert.equal(scoreAll(c, emptySenses()).hop, 0);
 });

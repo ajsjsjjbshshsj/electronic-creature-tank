@@ -575,6 +575,7 @@ function tickCreature(world, c, dt) {
   decayNeeds(c.needs, dt, c.traits, {
     moving: c.moving,
     resting: c.resting,
+    drainFactor: c.thresholds.energyDrainFactor,
     companions: senses.neighbors.length,
   });
 

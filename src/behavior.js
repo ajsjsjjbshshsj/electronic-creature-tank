@@ -29,7 +29,7 @@ import { affectionFor, familiarityFor, PLAYER_ID } from './memory.js';
 // （Task 2 的 PATTERNS 就是这样被 .reverse() 静默重排、害得整缸花纹错位的。）
 export const INTENTS = Object.freeze([
   'forage', 'eat', 'rest', 'socialize', 'brood', 'explore',
-  'flee', 'beg', 'protest', 'fight', 'mourn', 'idle',
+  'flee', 'beg', 'hop', 'protest', 'fight', 'mourn', 'idle',
 ]);
 
 // ---------------------------------------------------------------- 共享阈值
@@ -83,6 +83,7 @@ const M = CONFIG.behavior.minIntentDuration;
 export const MIN_DURATION = Object.freeze({
   forage: M * 1.25, eat: M, rest: M * 2.5, socialize: M * 1.7,
   brood: M * 2.0, explore: M * 1.7, flee: M * 0.4, beg: M * 1.25,
+  hop: M * 0.7,
   protest: M, fight: M * 0.85, mourn: M * 1.7, idle: M * 1.25,
 });
 
@@ -143,6 +144,14 @@ export function scoreAll(c, senses) {
       ? senses.broodScore * CONFIG.behavior.broodUrgency
       : 0,
 
+    // 蹦跳（spec §4.7.2）。**energy 是乘子里的一项而不是 if 门控**：
+    // 累了它自己就掉出竞争，不需要任何一处硬编码"累了不许跳"。
+    // 好动的两项都推高它（hopWeight 随 activity 上升、能量掉得也快），
+    // 于是"越好动跳得越勤、也越早歇"是同一条因果的两端。
+    hop: (e.joy > 0.25 && n.energy < 0.7)
+      ? t.hopWeight * (0.3 + e.joy) * (1 - n.energy)
+      : 0,
+
     // 探索：好奇驱动，且在没有更紧迫的事时才有分量
     explore: e.curiosity * (0.4 + t.exploreRadius) * (1.2 - Math.max(n.hunger, n.energy)),
 
@@ -174,7 +183,9 @@ export function scoreAll(c, senses) {
       : 0,
 
     // 抗议：生气但不敢/不想真打。愤怒超过性格阈值才启动。
-    protest: e.anger > t.angerThreshold && provoker
+    // 求关注升级链的第二级（spec §4.10）：beg 被冷落够久就从"卖萌"翻成"抗议"。
+    // 加成挂在 begIgnored 上，所以这不是新机制 —— 是同一个被冷落计时的第二个出口。
+    protest:e.anger > t.angerThreshold && provoker
       ? e.anger * 1.2 * (1 - e.fear)
       : 0,
 

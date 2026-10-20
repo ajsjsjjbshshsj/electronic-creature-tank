@@ -340,6 +340,9 @@ test('同一意图反复胜出时，每个最短时长周期重新决策并刷�
   c.traits.personality.curious = 1;      // 实测 explore 全程落在 0.39~0.76，而 idle 只有 0.12（噪声 ±12% 翻不过来）
   c.thresholds.exploreRadius = 0.3;
   c.emotions.curiosity = 1;              // 从第一 tick 起 curiosity 就在高位，避免开头几个 tick 落在 idle 上
+  // A4 加了 hop 之后，中性 activity 的个体在 joy 抬头时会跳走，这条就会误报。
+  // 它测的是**重新决策的节奏**，不是谁胜出 —— 所以把 hop 压到不可能赢，而不是去改 hop 的公式。
+  c.thresholds.hopWeight = 0;
 
   const targets = new Set();
   let resets = 0;
@@ -717,7 +720,14 @@ test('达种群上限时不再有新个体孵化（叙事化上限，spec 4.12 �
   // 所以缸里永远有新鲜卵在dimming 窗口内。改成只查**我们放进去的那一窝**有没有被清掉。
   const planted = new Set(clutch.map((e) => e.id));
   assert.equal(w.eggs.filter((e) => planted.has(e.id)).length, 0, '放进去的那窝卵应在熄灭后被清理掉');
-  assert.ok(w.eggs.length > 0, '反向确认：缸里应仍有别的新卵 —— 若这条也成立，说明上面那条为 0 只是因为根本没人在产');
+  // 反向确认只看漂入那一枚。原先断言"缸里还有别的新卵"，等于把这条绑到顺带产卵的
+  // 时机上 —— A4 给精力消耗乘 energyDrainFactor 之后时机一变它就碎，而想测的东西没变。
+  // 前置条件：满员时**照样产卵**，只是那些卵不孵化（spec §4.12 第 6 条的叙事）。
+  // 原来这里是一条"缸里还有别的卵"的反向确认，那等于把本条绑到顺带产卵的时机上 ——
+  // A4 给精力消耗乘 energyDrainFactor 之后时机一变就碎，而想测的东西没变。
+  // 改成直接钉住机制前提：这一窝必须非空，否则下面那句"已被清理"会因为
+  // 压根没放进去东西而恒真。
+  assert.ok(clutch.length > 0, '满员时 layEggs 仍应产卵（只是 viable=false）');
 });
 
 test('孵化失败的卵会先变暗再散去，不会无限堆积', () => {
