@@ -53,6 +53,11 @@ export function createCreature(opts) {
     traits,
     thresholds: thresholds(traits.personality),
 
+    // 蛋大小带来的体型加成（孤雌，spec §4.11）。取值约 ±0.25，
+    // 在 sizeOf 里按 (1 − growthFactor) 衰减，到成体峰值恰好归零 ——
+    // 于是"起点由蛋定、终点由基因定"是**结构**保证的，不是靠文档提醒。
+    eggBoost: opts.eggBoost || 0,
+
     age: opts.age || 0,
     stage: opts.stage || stageForAge(opts.age || 0),
     alive: true,
@@ -89,7 +94,8 @@ export function createCreature(opts) {
     resting: false,
     moving: false,
 
-    courtship: null,   // null | { partnerId, t, duration, phase }
+    // （原 courtship 状态机字段随孤雌制删除 —— 没有对象就没有"正在和谁仪式"。）
+    broodT: 0,       // 憋卵计时（秒），broodScore 读它，产卵结算时归零
     mourn: 0,          // 哀悼剩余秒数（spec 4.11）
 
     lineage: {
@@ -166,7 +172,12 @@ export function growthFactor(c) {
 }
 
 export function sizeOf(c) {
-  return c.traits.size * growthFactor(c);
+  const g = growthFactor(c);
+  // eggBoost 的 (1 − g) 权重：出壳时 g = 0.22 ⇒ 用掉 78% 的加成；
+  // 成体峰值 g = 1 ⇒ 系数恰好为 1，蛋的影响完全消失。
+  // `|| 0` 不是防御性废话：存档 v1 的个体没有这个字段，读档后它是 undefined，
+  // 不兜底会让 sizeOf 变 NaN，整只生物在画面上消失。
+  return c.traits.size * g * (1 + (c.eggBoost || 0) * (1 - g));
 }
 
 // 只有成体能繁殖。老年不再繁殖（spec 4.11）。

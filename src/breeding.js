@@ -1,7 +1,7 @@
 import { CONFIG } from './config.js';
-import { inherit } from './genes.js';
-import { canBreed, createCreature } from './creature.js';
-import { KINSHIP, affectionFor, ensure, kinshipBetween } from './memory.js';
+import { inherit, phenotype, eggTintBucket } from './genes.js';
+import { createCreature } from './creature.js';
+import { KINSHIP, ensure } from './memory.js';
 
 // 卵的 id 计数器。模块级状态是这里唯一的例外 ——
 // 它只用于生成唯一 id，不参与任何模拟决策，因此不影响可复现性。
@@ -9,157 +9,95 @@ let eggSeq = 0;
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
-// 求偶的前置门槛。前三项是硬性事实（阶段、血缘、距离）；
-// 后两项（arousal/hunger/fear 与好感）其实是**意愿**判断，但它们在这里也是门槛式的 ——
-// 连续评分那部分由下面的 courtshipScore 负责。
-// （此处原先写"不含任何意愿判断"，与下面那段 willingness 代码自相矛盾，已修正。）
-export function canCourt(a, b, opts) {
-  if (a === b || a.id === b.id) return false;
-  if (!canBreed(a) || !canBreed(b)) return false;
-  if (a.courtship || b.courtship) return false;
-
-  // 近亲回避（spec 4.12 第 5 条）：双向检查，只要一方记得亲缘就拒绝。
-  // 用 > 而非 >= —— kinship 恰好 0.25（半同胞/祖孙）属于允许的边缘，
-  // 严格超过才拒绝。
-  const kinA = kinshipBetween(a.memory, b.id);
-  const kinB = kinshipBetween(b.memory, a.id);
-  if (kinA > CONFIG.kinshipMateMax || kinB > CONFIG.kinshipMateMax) return false;
-
-  // 好感太低就不开始（spec 4.12 第 2 条：若一方 affection 太低 → 拒绝，转身离开）。
-  // 这是"意愿"里唯一被当作硬门槛的一项 —— 依据是 spec 把它明确写成"拒绝"，
-  // 而不像 arousal / hunger / fear 那样可以被其他因素抵消。
-  // 原计划漏了这条：`rejectionAffection` 被列进 Consumes，却只在 Task 10 里
-  // 当作"被拒后的记忆惩罚"使用，于是 affection = -1 的一对也会开始完整的求偶仪式。
-  // 阈值两侧（恰好 -0.15 允许 / 低于则拒绝）由测试钉住。
-  if (affectionFor(a.memory, b.id) < CONFIG.rejectionAffection) return false;
-  if (affectionFor(b.memory, a.id) < CONFIG.rejectionAffection) return false;
-
-  if (opts.distance > CONFIG.courtshipRange) return false;
-
-  // 意愿门槛：arousal 足够、不太饿、不太害怕
-  const minArousal = 0.35;
-  const maxHunger = 0.75;
-  const maxFear = 0.5;
-  if (a.emotions.arousal < minArousal || b.emotions.arousal < minArousal) return false;
-  if (a.needs.hunger > maxHunger || b.needs.hunger > maxHunger) return false;
-  if (a.emotions.fear > maxFear || b.emotions.fear > maxFear) return false;
-
-  return true;
-}
-
-// 求偶的效用分，供 behavior.js 作为一个候选行为参与竞争。
+// ---------- 2026-10-20 孤雌改造：求偶整段删除 ----------
+// 这里原有 canCourt / courtshipScore / startCourtship / tickCourtship / interruptCourtship
+// 五个导出（约 100 行）。spec §4.12 改成"自己下蛋就行，不需要交配"之后，
+// 它们服务的机制没有了：没有受者，就没有"能不能求偶""求偶评分""仪式进度"。
 //
-// 种群上限在这里体现为"评分被压低"，而不是返回 false（spec 4.12 第 6 条）。
-// 区别很重要：压低意味着它们仍会偶尔尝试、然后彼此失去兴趣 —— 这是行为；
-// 归零意味着代码禁止了一件本该由世界规则解释的事 —— 那是穿帮。
+// 被删掉的画面里有一样东西**不打算丢**：体色脉动同步。spec §4.12 第 6 条把它
+// 改挂在 socialize 的高级表现上（两只高好感、高 joy 的个体自发同步），
+// 小铃音也跟着挪。那是 B 阶段的活，这里先记账。
 //
-// 渐变而非断崖：从 70% 容量开始线性衰减，该乘数到满容量时降到 0.12 倍
-// （实测：population 8/24 时得分 2.5182124518，24/24 时 0.3021854942，比值恰好 0.12）。
-// 转折点 0.7 由测试用 0.6999 / 0.7001 夹住（不是用 16.8 与 16.56"得分相同"来推 ——
-// 任何 ≤ 0.69 的阈值都会给出同样的相同结果，那样推不出转折点在哪）。
-export function courtshipScore(a, b, opts) {
-  if (!canCourt(a, b, opts)) return 0;
+// kinshipOf / registerKinship **原样保留** —— 亲缘仍是客观事实，
+// 亲属偏好、守巢、家谱三处都要用。死的只是"闸门"，不是"关系"。
 
-  const loadRatio = opts.populationCap > 0 ? opts.population / opts.populationCap : 0;
-  // ⚠️ loadRatio 必须**夹到 1**：卵的 viable 是在"产卵那一刻"定的，而孵化发生在 60 秒后，
-  // 期间种群可能已经超过上限（addCreature 刻意不检查上限）。未夹的 loadRatio 会让
-  // crowding 变成负数，再被下面那个 Math.max(0, …) 夹成**精确 0** ——
-  // 那就成了 spec 4.12 第 6 条明令禁止的硬阻断（要的是"评分被压低"，不是归零）。
-  // 下限 0.12 是第二道保险，保证"超上限"与"恰好满"给同样的分。
-  const crowding = loadRatio < 0.7
-    ? 1
-    : Math.max(0.12, 1 - ((Math.min(1, loadRatio) - 0.7) / 0.3) * 0.88);   // 0.7→1.0 降到 0.12，超过则保持 0.12
-
-  const affection = (affectionFor(a.memory, b.id) + affectionFor(b.memory, a.id)) / 2;
-  const willingness = (a.thresholds.courtshipWillingness + b.thresholds.courtshipWillingness) / 2;
-  const arousal = (a.emotions.arousal + b.emotions.arousal) / 2;
-  // 距离越近越容易开始；归一化到 [0,1]
-  const proximity = 1 - opts.distance / CONFIG.courtshipRange;
-
-  return Math.max(0, crowding * willingness * (0.4 + arousal) * (0.6 + proximity) * (1 + affection));
+// 种群拥挤乘数（spec §4.12 第 6 条：上限要表现为"压低"，不是"禁止"）。
+// 原来内联在被删掉的 courtshipScore 里；孤雌改造后由 sim 的 broodScore 复用 ——
+// **这条语义与有没有父方无关**，所以它必须活下来，不能跟着求偶函数一起删。
+// 下限 0.12 是"永不为 0"的那道保险：归零就成了 spec 明令禁止的硬阻断。
+export function crowdingFactor(loadRatio) {
+  if (loadRatio < 0.7) return 1;
+  return Math.max(0.12, 1 - ((Math.min(1, loadRatio) - 0.7) / 0.3) * 0.88);
 }
 
-// 仪式时长必须双方一致 —— 否则一方先结束会导致另一方卡在求偶状态。
-export function startCourtship(a, b, rng) {
-  const duration = rng.range(CONFIG.courtship.min, CONFIG.courtship.max);
-  a.courtship = { partnerId: b.id, t: 0, duration, phase: 0 };
-  b.courtship = { partnerId: a.id, t: 0, duration, phase: 0 };
-}
-
-// 推进仪式。返回 'complete' 时清空 courtship，
-// 保证同一场仪式不会被完成两次（否则会产两窝卵）。
-//
-// phase 把仪式切成四段（spec 4.12 第 2 条），供表现层编舞：
-//   0 绕圈（速度逐渐同步）  1 体色脉动同步  2 前端轻触  3 膨胀展示
-export function tickCourtship(c, dt) {
-  const court = c.courtship;
-  if (!court) return 'ongoing';
-  court.t += dt;
-  const progress = Math.min(1, court.t / court.duration);
-  court.phase = progress < 0.35 ? 0 : progress < 0.6 ? 1 : progress < 0.85 ? 2 : 3;
-  if (court.t >= court.duration) {
-    c.courtship = null;
-    return 'complete';
-  }
-  return 'ongoing';
-}
-
-export function interruptCourtship(c) {
-  c.courtship = null;
-}
-
-// 产卵。位置落在缸底附近（y 大 = 靠近底部，与世界坐标 y 向下增长一致），
+// 产卵（孤雌）。位置落在缸底附近（y 大 = 靠近底部，与世界坐标 y 向下增长一致），
 // 母体若在中上层，卵也会沉到缸底 —— 这符合"沉性卵"的直觉。
-export function layEggs(mother, father, rng, opts) {
+//
+// 基因走**自体合并**：`inherit(rng, mother.genes, mother.genes)`。inherit 本身一行未改
+// （spec §4.12 第 3 条）—— 两个配子各自独立分离 + 变异，所以同窝每枚蛋仍然互不相同。
+// 代价是杂合度每代砍一半，由 sim 的外来血统漂入补，见 §4.12 与 Task A3。
+export function layEggs(mother, rng, opts) {
   const count = rng.int(CONFIG.eggsPerClutch[0], CONFIG.eggsPerClutch[1]);
+  // 蛋色取**母方**的 eggTint 表现型，不是子代的：一窝蛋同色，"这一家都下蓝蛋"
+  // 这条家谱线索才存在（spec §4.1 加这个位点的唯一理由）。子代自己的 eggTint 等位
+  // 要到它成年产卵时才兑现。
+  // 这里从 genes 现算而不是读 mother.traits.eggTint —— 表现型是出生时算的快照，
+  // 而存档恢复与测试都会事后改 genes，缓存值会过期。
+  const tint = eggTintBucket(phenotype('eggTint', mother.genes.eggTint));
   const eggs = [];
   for (let i = 0; i < count; i++) {
     eggSeq += 1;
     eggs.push({
       id: `e${eggSeq}`,
-      // 每枚卵独立走一次分离+重组+变异，所以同窝各不相同
-      genes: inherit(rng, mother.genes, father.genes),
+      // 每枚卵独立走一次分离 + 变异，所以同窝各不相同
+      genes: inherit(rng, mother.genes, mother.genes),
       age: 0,
       pos: {
         x: clamp01(mother.pos.x + rng.range(-0.04, 0.04)),
         y: clamp01(rng.range(0.78, 0.97)),
       },
       motherId: mother.id,
-      fatherId: father.id,
+      // fatherId 这个键**保留**、恒 null：存档 v1 里它有值，删键会改变存档形状，
+      // 迁移成本远高于留一个恒 null 的字段（spec §7.2）。
+      fatherId: null,
+      eggSize: rollEggSize(mother, rng),
+      eggTint: tint,
       // 不可孵化不是"不产卵"，而是"产了但光会慢慢熄灭"（spec 4.12 第 6 条）
       viable: !opts.atPopulationCap,
     });
   }
 
-  // 双亲互记为 mate。用 includes 去重，否则反复产卵会把 mates 塞满同一个 id。
-  if (!mother.lineage.mates.includes(father.id)) mother.lineage.mates.push(father.id);
-  if (!father.lineage.mates.includes(mother.id)) father.lineage.mates.push(mother.id);
-
-  // 同时把 mate 关系**写进双方的关系记忆** —— 这是 spec 4.8
-  // "长期伴侣的衰减极慢、近乎不忘"那条通道的**唯一生产者**。
-  // 在此之前全项目没有任何代码写过 role: 'mate'（grep 只在 ROLES 定义里出现），
-  // 而 memory.decay 判定"是否亲属"看的是 `e.role !== null || e.kinship >= 0.25`：
-  // 伴侣的 kinship 按规定是 0（KINSHIP.mate = 0 —— 配偶没有血缘，不能因"它是我伴侣"
-  // 就被判成近亲），所以 role 不写就两条通道都不命中，伴侣会按**普通速率**淡忘，
-  // 与 spec 明文相悖，且全链路不报错、不抛异常。
-  //
-  // 必须**强制写入**而不是只靠 ensure：双方的记忆条目此时已经存在（此前互动建的），
-  // 而 ensure 是幂等的、对已存在条目不会覆盖 kinship/role。
-  const writeMate = (owner, partnerId) => {
-    const e = ensure(owner.memory, partnerId, { kinship: KINSHIP.mate, role: 'mate' });
-    if (e.kinship !== KINSHIP.mate) e.kinship = KINSHIP.mate;
-    if (e.role !== 'mate') e.role = 'mate';
-  };
-  writeMate(mother, father.id);
-  writeMate(father, mother.id);
-
+  // 2026-10-20：原「双亲互记 mate」的 20 行随求偶制删除。
+  // 那段曾是 role:'mate' 的唯一生产者；现在 mate 这个 role 本身已经不存在了
+  // （spec §4.8 改成 companion），而 companion 的生产者在社交路径上，不在产卵里。
   return eggs;
+}
+
+// 蛋大小：母方的 size 表现型 × broody × 营养，再加一点抖动。
+// 营养项 (1 − hunger) 是**玩家能直接感知的因果** —— "喂得好，蛋就大"（spec §4.11），
+// 这条比数值本身重要，所以它必须真的单调，由测试钉住。
+function rollEggSize(mother, rng) {
+  const { min, max } = CONFIG.eggSize;
+  const sizeP = (mother.traits.size - CONFIG.minSize) / (CONFIG.maxSize - CONFIG.minSize);
+  const broodyP = mother.traits.personality.broody;
+  const u = clamp01(
+    0.30 + 0.25 * sizeP + 0.15 * broodyP + 0.30 * (1 - mother.needs.hunger)
+      + rng.range(-0.10, 0.10),
+  );
+  return min + u * (max - min);
+}
+
+// 孵化时长随蛋大小上升（"大的孵得久"）。系数在 CONFIG，边界值由测试夹住。
+export function eggDuration(egg) {
+  const { min, max, durationFactor } = CONFIG.eggSize;
+  const u = clamp01((egg.eggSize - min) / (max - min));
+  return CONFIG.stage.egg * (durationFactor[0] + durationFactor[1] * u);
 }
 
 export function tickEgg(egg, dt) {
   egg.age += dt;
   if (!egg.viable) return 'failed';
-  return egg.age >= CONFIG.stage.egg ? 'ready' : 'incubating';
+  return egg.age >= eggDuration(egg) ? 'ready' : 'incubating';
 }
 
 // 谱系 → 亲缘系数（交接要求第 5 条）。
@@ -239,6 +177,8 @@ export function registerKinship(baby, others, byId) {
 // 孵化。基因组直接取自卵，不再二次变异 ——
 // 变异已经在配子形成时发生过了，再加一次会让遗传学模型失真。
 export function hatch(egg, rng, opts) {
+  const { min, max, hatchGain } = CONFIG.eggSize;
+  const u = clamp01((egg.eggSize - min) / (max - min));
   const baby = createCreature({
     id: `c-${egg.id}`,
     name: opts.nameFor(egg.genes, 0),
@@ -249,12 +189,18 @@ export function hatch(egg, rng, opts) {
     genes: egg.genes,
     generation: opts.generation,
     mother: egg.motherId,
-    father: egg.fatherId,
+    father: egg.fatherId,      // 孤雌下恒 null，但键保留（存档形状契约）
+    // 蛋大小给的是**起点**，不是终点：这个加成按 (1 − growthFactor) 衰减，
+    // 到成体峰值恰好归零，所以成年体型完全由 size 基因定
+    // （EGG_SIZE_BIAS = 0，控制方 2026-10-20 裁定；见 creature.sizeOf）。
+    eggBoost: (u - 0.5) * hatchGain,
     rng,
   });
 
-  // 孩子认得父母（spec 4.11：幼体"认妈妈"）。
-  // 父母侧的记忆由 sim.js 写回 —— 本模块不持有世界，拿不到父母对象。
+  // 孩子认得妈妈（spec 4.11：幼体"认妈妈"）。
+  // 母亲侧的记忆由 sim.js 写回 —— 本模块不持有世界，拿不到母亲对象。
+  // 下面那条 father 分支保留但**永不触发**（egg.fatherId 恒 null）：
+  // 留着是为了让"父方条目不会被写入"这件事由测试正面钉住，而不是靠巧合。
   if (egg.motherId) ensure(baby.memory, egg.motherId, { kinship: KINSHIP.mother, role: 'mother' });
   if (egg.fatherId) ensure(baby.memory, egg.fatherId, { kinship: KINSHIP.father, role: 'father' });
 

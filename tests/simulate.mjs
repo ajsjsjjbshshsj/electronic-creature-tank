@@ -116,7 +116,9 @@ const world = createWorld({ seed });
 console.log(`种子 ${seed} · 模拟 ${minutes} 分钟 · 上限 ${world.populationCap}`);
 console.log('─'.repeat(74));
 console.log(
-  '时刻    存活  卵  食物  出生  死亡  孵化失败  拒绝  世代  最老个体',
+  // 2026-10-20：原表头有"拒绝"一列。孤雌下没有求偶就没有拒绝，那个统计量恒为 0，
+  // 留着等于让验收脚本教人以为这条通路还在。列与对应的两个打印点一并删除。
+  '时刻    存活  卵  食物  出生  死亡  孵化失败  世代  最老个体',
 );
 console.log('─'.repeat(74));
 
@@ -187,7 +189,6 @@ for (let step = 0; step <= totalSteps; step++) {
       + `${String(s.births).padStart(5)}  `
       + `${String(s.deaths).padStart(5)}  `
       + `${String(s.hatchFailures).padStart(9)}  `
-      + `${String(s.rejected).padStart(5)}  `
       + `${String(s.generation).padStart(5)}  `
       + `${(oldest ? oldest.age.toFixed(0) : '0').padStart(7)}s  `
       + (oldest ? oldest.name : '—'),
@@ -203,7 +204,8 @@ const s = worldStats(world);
 const alive = aliveCreatures(world);
 const survivorLines = alive.slice(0, 8).map((c) => {
   const p = c.traits.personality;
-  const dominant = ['bold', 'clingy', 'irritable', 'gluttonous', 'curious', 'libido']
+  const dominant = ['bold', 'clingy', 'irritable', 'gluttonous', 'curious',
+    'activity', 'talk', 'intellect', 'broody']   // 2026-10-20：libido→broody，另加三个新位点
     .sort((a, b) => p[b] - p[a])[0];
   return `  ${c.name.padEnd(10)} 第${c.generation}代  ${c.stage.padEnd(10)} `
     + `${c.age.toFixed(0).padStart(4)}s  hue ${c.traits.hue.toFixed(0).padStart(3)}°  `
@@ -217,7 +219,7 @@ console.log(`  峰值种群     ${peak}`);
 console.log(`  累计出生     ${s.births}`);
 console.log(`  累计死亡     ${s.deaths}`);
 console.log(`  孵化失败     ${s.hatchFailures}  （达种群上限所致）`);
-console.log(`  求偶被拒     ${s.rejected}`);
+// （2026-10-20："求偶被拒"统计量随孤雌制删除 —— 没有对象就没有拒绝，它恒为 0。）
 console.log(`  最高世代     ${s.generation}`);
 console.log(`  灭绝时刻     ${extinctAt < 0 ? '未灭绝' : extinctAt.toFixed(0) + 's'}`);
 
@@ -415,7 +417,7 @@ if (pet) {
       + `压住它的是 ${topKind}（${topN} tick）。`);
     console.log(`    beg 分 ${begScoreEst.toFixed(3)} 要赢的不只是 explore 地板（0.4~0.6）：`
       + 'socialize = n.social×1.3×(1+pApproach×0.15)（最高 ≈1.34）、'
-      + 'court = suitorScore×arousal×1.6（可到 3~4）。');
+      + 'brood = broodScore×broodUrgency(1.6)（憋满且不满员时约 0.5~1.5）。');
     console.log('    ⚠️ 所以这**不是** begUrgency 被调回不可达量级：tests/sim.test.js 里'
       + '"抚摸 20 秒必然卖萌"那条断言是绿的（稀疏缸）。这里差的是**社交竞争** —— '
       + '满缸成体时求偶/社交总有更高优先的事。要让满缸里也稳定买到好感，得抬 begUrgency'

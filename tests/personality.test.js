@@ -15,7 +15,7 @@ const P = (over = {}) => ({
 const FIELDS = [
   'fearThreshold', 'angerThreshold', 'angerDuration', 'hungerTrigger',
   'socialTrigger', 'exploreRadius', 'playerApproach',
-  'turnRate', 'courtshipWillingness',
+  'turnRate',   // 2026-10-20：courtshipWillingness 随孤雌制删除
   // 2026-10-20 新增六项
   'hopWeight', 'energyDrainFactor', 'speechCooldown',
   'heardCapacity', 'misspeakChance', 'broodInterval',
@@ -38,13 +38,13 @@ test('阈值字段集恰好是 FIELDS —— 不多不少', () => {
   const t = thresholds(P());
   assert.deepEqual(Object.keys(t).sort(), [...FIELDS].sort(),
     '输出键集必须与 FIELDS 完全一致（多一个或少一个都要变红）');
-  assert.equal(FIELDS.length, 15, '阈值恰好 15 个（原 9 个 + 2026-10-20 新增 6 个）');
-  assert.equal(Object.keys(t).length, 15);
+  assert.equal(FIELDS.length, 14, '阈值恰好 14 个（原 9 个 − 求偶 1 个 + 新增 6 个）');
+  assert.equal(Object.keys(t).length, 14);
   assert.ok(!('arousalRate' in t),
     'arousalRate 已被刻意删除（死字段：无消费者，spec 4.9 那行由 Task 4 的 arousal 目标值实现）');
 });
 
-test('十五个阈值的系数与两端取值都被字面量钉住', () => {
+test('十四个阈值的系数与两端取值都被字面量钉住', () => {
   // 与 playerApproach 同理：只测方向的断言是空洞的。
   // 实测把 angerDuration / hungerTrigger / turnRate 的斜率缩小 10 倍，
   // 17 条既有测试仍然全绿 —— 而这三个值直接决定"气多久""多饿才觅食""转身多果断"。
@@ -89,11 +89,8 @@ test('十五个阈值的系数与两端取值都被字面量钉住', () => {
   // turnRate = 2 + bold*4（rad/s）
   assert.ok(Math.abs(t({ bold: 0 }).turnRate - 2) < 1e-12);
   assert.ok(Math.abs(t({ bold: 1 }).turnRate - 6) < 1e-12);
-  // courtshipWillingness = 0.6 + broody*0.8
-  // ⚠️ 孤雌改造的中间态：驱动基因已由 libido 改名为 broody，公式与取值不变。
-  // 这一项连同它的断言都会在 Task A2 随求偶路径一起删掉。
-  assert.ok(Math.abs(t({ broody: 0 }).courtshipWillingness - 0.6) < 1e-12);
-  assert.ok(Math.abs(t({ broody: 1 }).courtshipWillingness - 1.4) < 1e-12);
+  // （courtshipWillingness 的端点断言随该字段一起删除。驱动它的 libido→broody 改名
+  //   曾在 Task A1 留作中间态，Task A2 已收尾。）
   // ---- 2026-10-20 新增六项：同样取两个极端，把斜率与截距一起钉死 ----
   // hopWeight = 0.4 + activity*1.2
   assert.ok(Math.abs(t({ activity: 0 }).hopWeight - 0.4) < 1e-12);
@@ -122,7 +119,6 @@ test('十五个阈值的系数与两端取值都被字面量钉住', () => {
   assert.ok(Math.abs(n.socialTrigger - 0.36) < 1e-12);
   assert.ok(Math.abs(n.exploreRadius - 0.55) < 1e-12);
   assert.ok(Math.abs(n.turnRate - 4) < 1e-12);
-  assert.ok(Math.abs(n.courtshipWillingness - 1) < 1e-12);
   assert.ok(Math.abs(n.hopWeight - 1) < 1e-12);
   assert.ok(Math.abs(n.energyDrainFactor - 1.2) < 1e-12);
   assert.ok(Math.abs(n.speechCooldown - 12) < 1e-12);
@@ -171,19 +167,6 @@ test('curious 高 → exploreRadius 大', () => {
   assert.ok(thresholds(P({ curious: 1 })).exploreRadius > thresholds(P({ curious: 0 })).exploreRadius);
 });
 
-test('broody 高 → courtshipWillingness 更高（孤雌改造中间态，A2 删）', () => {
-  // 注意：原计划这里还断言了一个 `arousalRate`（"求偶欲上升快"），现已**删除该字段**（2026-10-14 预飞审查）。
-  // 理由：全项目没有任何消费者，而 spec 4.9 那行"求偶欲上升快"实际是由
-  // Task 4 的 computeTargets 给 arousal **目标值** 0.25 权重实现的，
-  // 上升快慢则由全局 CONFIG.emotions.inertia 决定 —— 都不是"每只生物一个速率"。
-  // 保留它等于留一个"看起来在起作用、其实没人读"的旋钮，
-  // 哪天有人真的接上去就会把 broody 的影响重复计算一次。
-  // broody 对 arousal 的调制已在 tests/emotions.test.js 的目标值测试里钉住。
-  assert.ok(
-    thresholds(P({ broody: 1 })).courtshipWillingness
-    > thresholds(P({ broody: 0 })).courtshipWillingness,
-  );
-});
 
 test('playerApproach 的各项系数与两端取值被字面量钉住（含负值一侧）', () => {
   // 这个系数是 Task 9 里 beg / socialize 的乘子，所以它的**量级**是承重的。
@@ -230,7 +213,6 @@ test('极端基因也不产生荒谬值（区间与正负号都合理）', () =>
     assert.ok(t.exploreRadius > 0 && t.exploreRadius <= 1, `exploreRadius: ${t.exploreRadius}`);
     assert.ok(t.playerApproach >= -1 && t.playerApproach <= 1, `playerApproach: ${t.playerApproach}`);
     assert.ok(t.turnRate > 0 && t.turnRate <= 12, `turnRate: ${t.turnRate}`);
-    assert.ok(t.courtshipWillingness > 0 && t.courtshipWillingness <= 2, `courtshipWillingness: ${t.courtshipWillingness}`);
     assert.ok(t.hopWeight > 0 && t.hopWeight <= 2, `hopWeight: ${t.hopWeight}`);
     assert.ok(t.energyDrainFactor >= 0.5 && t.energyDrainFactor <= 2.5, `energyDrainFactor: ${t.energyDrainFactor}`);
     assert.ok(t.speechCooldown >= 6 && t.speechCooldown <= 18, `speechCooldown: ${t.speechCooldown}`);

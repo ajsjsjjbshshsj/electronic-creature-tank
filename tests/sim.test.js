@@ -73,12 +73,11 @@ test('Task 10 追加的四组常量被字面量钉住（config.test.js 没有覆
   assert.deepEqual({ ...CONFIG.motion.stageFactor },
     { hatchling: 0.45, juvenile: 0.85, adult: 1, elder: 0.55 });
   assert.equal(CONFIG.motion.fleeFactor, 2.2);
-  assert.equal(CONFIG.motion.courtshipFactor, 0.55);
   assert.equal(CONFIG.motion.facingLerp, 6);
   assert.equal(CONFIG.motion.wallMargin, 0.03);
-  // 逃命必须比求偶快，否则"逃"这个意图在表现上等于没有
+  // 逃命必须是加速（倍率 > 1），否则"逃"这个意图在表现上等于没有
   assert.ok(CONFIG.motion.fleeFactor > 1, 'fleeFactor 是加速倍率，必须大于 1');
-  assert.ok(CONFIG.motion.courtshipFactor < 1, '求偶应放慢，而不是加速');
+  // （原 courtshipFactor < 1 那条随求偶制删除：没有仪式，就没有"靠近时放慢"这件事。）
 
   assert.equal(CONFIG.food.algae.energy, 0.45);
   assert.equal(CONFIG.food.nectar.energy, 0.85);
@@ -304,18 +303,21 @@ test('设置 world.playerHand 后能被感知到', () => {
   assert.ok(Math.abs(senses.playerHand.dist - 0.05) < 1e-6);
 });
 
-test('courtshipOptions 只包含合法的求偶对象', () => {
+test('broodScore 只对可繁殖的个体给正分（幼体与死者为 0）', () => {
   const w = createWorld({ seed: 19, initialCreatures: 0 });
   const a = createCreature({ id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, rng: createRng(1) });
-  const b = createCreature({ id: 'b', name: 'B', x: 0.55, y: 0.5, age: 600, rng: createRng(2) });
   const kid = createCreature({ id: 'kid', name: 'K', x: 0.6, y: 0.5, age: 10, rng: createRng(3) });
-  for (const c of [a, b, kid]) addCreature(w, c);
-  a.emotions.arousal = 0.9; b.emotions.arousal = 0.9;
-  const options = perceive(w, a).courtshipOptions;
-  const ids = options.filter((o) => o.score > 0).map((o) => o.id);
-  assert.ok(ids.includes('b'), '成年个体 b 应是合法候选');
-  assert.ok(!ids.includes('kid'), '幼体不该是候选');
-  assert.ok(!ids.includes('a'), '不该把自己列为候选');
+  const dead = createCreature({ id: 'dead', name: 'D', x: 0.6, y: 0.6, age: 600, rng: createRng(4) });
+  dead.alive = false;
+  for (const c of [a, kid, dead]) addCreature(w, c);
+  a.emotions.arousal = 0.9; kid.emotions.arousal = 0.9; dead.emotions.arousal = 0.9;
+  a.broodT = 999; kid.broodT = 999; dead.broodT = 999;   // 都"憋满了"
+
+  assert.ok(perceive(w, a).broodScore > 0, '成体憋满时应给正分');
+  assert.equal(perceive(w, kid).broodScore, 0, '亚成体不得产卵（canBreed 只看阶段）');
+  assert.equal(perceive(w, dead).broodScore, 0, '死者不得产卵');
+  // 孤雌下这里**不再有候选列表**：没有对象，就没有"谁是合法求偶对象"这回事。
+  // 原测试断言的是 ids 含 b 不含 kid/a，现在它对应的语义变成"我能不能生"。
 });
 
 // ---------- 意图锁定语义 ----------
@@ -416,32 +418,29 @@ test('进食阈值 EAT_DIST 在行为层与执行层是同一个数（执行层�
   assert.equal(w2.foods.length, 1, '够不着就不该被吃掉');
 });
 
-test('超过种群上限时求偶评分被压低而不是归零（spec 4.12 第 6 条：不得硬阻断）', () => {
-  // spec 4.12 第 6 条要的是"达上限时表现为求偶评分被压低 + 卵不孵化"，
-  // **不是**"不许求偶"。硬阻断（评分恰好 0）会穿帮：玩家看到的是"缸满了以后
-  // 它们突然互相不理不睬"，而不是"它们还试，但总是失去兴趣"。
-  // 这里同时钉住两侧：评分必须 > 0，且被压到 breeding 里那个 0.12 的下限。
+test('超过种群上限时产卵 readiness 被压低而不是归零（spec §4.12 第 6 条：不得硬阻断）', () => {
+  // 与求偶时代同一条语义，只是换了主语：满员时它**照样孵、照样产卵**，
+  // 只是那些卵的光会慢慢熄灭。硬阻断（评分恰好 0）会穿帮 ——
+  // 玩家会看到"缸满了它们突然就不孵了"，而不是一条世界规则。
   const mk = (cap) => {
     const w = createWorld({ seed: 50, initialCreatures: 0, populationCap: cap });
     w.foods.length = 0;
     const a = createCreature({ id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, rng: createRng(1) });
-    const b = createCreature({ id: 'b', name: 'B', x: 0.53, y: 0.5, age: 600, rng: createRng(2) });
-    for (const c of [a, b]) {
-      addCreature(w, c);
-      c.emotions.arousal = 0.9;
-      c.needs.hunger = 0.1;
-      c.needs.energy = 0.1;
-    }
+    addCreature(w, a);
+    a.emotions.arousal = 0.9;
+    a.needs.hunger = 0.1;
+    a.needs.energy = 0.1;
+    a.broodT = 999;                       // 憋满，让 crowding 成为唯一变量
     return w;
   };
-  const scoreOf = (w) => perceive(w, w.creatures[0]).courtshipOptions.find((o) => o.id === 'b').score;
-  const below = scoreOf(mk(24));   // 2/24 = 8.3% 装载：crowding = 1
-  const over = scoreOf(mk(1));     // 2/1 = 200% 装载：夹到 1，取 crowding 的下限
+  const scoreOf = (w) => perceive(w, w.creatures[0]).broodScore;
+  const below = scoreOf(mk(24));   // 1/24 装载：crowding = 1
+  const over = scoreOf(mk(1));     // 满员：loadRatio 夹到 1，取 crowding 的下限
 
-  assert.ok(below > 0, '前置条件：上限之下的求偶评分应大于 0');
-  assert.ok(over > 0, '超过上限时不得把求偶评分硬压到 0（那就是 spec 4.12 第 6 条禁止的硬阻断）');
+  assert.ok(below > 0, '前置条件：上限之下的 readiness 应大于 0');
+  assert.ok(over > 0, '满员时不得压到 0 —— 那就是 spec §4.12 第 6 条禁止的硬阻断');
   assert.ok(Math.abs(over / below - 0.12) < 1e-12,
-    `上限压力应把评分压到恰好 0.12 倍（breeding 的 crowding 下限），实际比值 ${over / below}`);
+    `上限压力应把评分压到恰好 0.12 倍（crowdingFactor 的下限），实际比值 ${over / below}`);
 });
 
 test('光藻会自然再生，但不会超过 foodMax', () => {
@@ -606,7 +605,7 @@ test('目击死亡的个体会收到 death 情绪冲击', () => {
 test('新缸在没有玩家干预时会自行求偶产卵（arousal 不得被循环门控锁死在 0）', () => {
   // spec 9.1 的承诺是"几分钟内就能看到第一次求偶"，而这依赖 arousal 能自己升起来。
   // 危险写法是把 canBreed 情境也挂在"已经有合法求偶对象"上：
-  //   arousal 目标值 = canBreed ? … : 0；而 courtshipScore 又要求双方 arousal >= 0.35
+  //   arousal 目标值 = canBreed ? … : 0；而 broodScore 里 arousal 是一项乘子
   //   ⇒ 谁也开不了头，全缸 arousal 恒为 0，永远不会求偶、永远没有后代，
   //     而且不报错、不抛异常 —— 症状只是"这个缸不生"。
   // 所以这里跑一个**没有任何手动赋值**的新缸，要求它自己走到产卵。
@@ -664,7 +663,7 @@ test('卵孵化后成为新个体，且世代数递增', () => {
   assert.ok(w.stats.generation >= 2);
 });
 
-test('孵化出的幼体记得父母，父母也记得孩子', () => {
+test('孵化出的幼体记得母亲，母亲也记得孩子', () => {
   const w = createWorld({ seed: 32, initialCreatures: 0 });
   const a = createCreature({ id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, rng: createRng(1) });
   const b = createCreature({ id: 'b', name: 'B', x: 0.55, y: 0.5, age: 600, rng: createRng(2) });
@@ -678,37 +677,21 @@ test('孵化出的幼体记得父母，父母也记得孩子', () => {
   step(w, 150);
   const baby = w.creatures.find((c) => c.stage === 'hatchling');
   assert.ok(baby, '应已孵化');
-  assert.ok(a.lineage.offspring.includes(baby.id), '母亲应记录子代');
+  // 原来这里钉死是 a 当母亲（双亲制下 slot 0 就是母方）。孤雌下哪只先憋够不可预测，
+  // 所以改成顺着幼体自己记的母亲去找 —— 断言的关系没变，变的只是"谁是母亲"由谁说了算。
+  const mother = w.creatures.find((c) => c.id === baby.lineage.mother);
+  assert.ok(mother, '幼体必须记着自己的母亲');
+  assert.ok(mother.lineage.offspring.includes(baby.id), '母亲应记录子代');
   assert.ok(b.lineage.offspring.includes(baby.id), '父亲应记录子代');
-  const momEntry = baby.memory.entries.find((e) => e.id === 'a');
+  // 原来这里找的是 id === 'a'（双亲制下 a 固定是母方）。孤雌下哪只先憋够不可预测，
+  // 所以顺着幼体自己记的母亲去找 —— 断言的关系没变，只是"谁是母亲"改由数据说了算。
+  const momEntry = baby.memory.entries.find((e) => e.id === baby.lineage.mother);
   assert.ok(momEntry, '孩子应记得妈妈');
   assert.equal(momEntry.kinship, 0.5);
-  assert.equal(a.lineage.mates.includes('b'), true, '双亲应互记为 mate');
+  // （原「双亲应互记为 mate」那条随 mate 角色一起删除。孤雌下没有配偶，
+  //   lineage.mates 这个数组本身也再没有生产者。）
 });
 
-test('同胞之间不会求偶（近亲回避在世界层面生效）', () => {
-  const w = createWorld({ seed: 33, initialCreatures: 0 });
-  const a = createCreature({ id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, rng: createRng(1) });
-  const b = createCreature({ id: 'b', name: 'B', x: 0.55, y: 0.5, age: 600, rng: createRng(2) });
-  for (const c of [a, b]) {
-    addCreature(w, c);
-    c.emotions.arousal = 0.95;
-    c.needs.hunger = 0.05;
-    c.needs.energy = 0.05;
-  }
-  for (let i = 0; i < 10; i++) spawnFood(w, 'nectar', { x: 0.5 + i * 0.01, y: 0.5 });
-  step(w, 250);
-  const babies = w.creatures.filter((c) => c.lineage.mother === 'a' && c.lineage.father === 'b');
-  assert.ok(babies.length >= 2, `需要同胞才能验证近亲回避，实际 ${babies.length} 只`);
-  // 把同胞都催成成体，看它们会不会互相求偶
-  for (const kid of babies) { kid.age = 600; kid.stage = 'adult'; kid.emotions.arousal = 0.95; }
-  w.eggs.length = 0;
-  step(w, 200);
-  const siblingEggs = w.eggs.filter(
-    (e) => babies.some((k) => k.id === e.motherId) && babies.some((k) => k.id === e.fatherId),
-  );
-  assert.equal(siblingEggs.length, 0, '同胞之间绝不能产卵');
-});
 
 test('达种群上限时不再有新个体孵化（叙事化上限，spec 4.12 第 6 条）', () => {
   const w = createWorld({ seed: 34, initialCreatures: 0, populationCap: 2 });
@@ -722,13 +705,18 @@ test('达种群上限时不再有新个体孵化（叙事化上限，spec 4.12 �
   // 不让这条测试去赌"求偶会不会恰好在 250 秒内发生"：种群上限对求偶评分的
   // 压制已经在 Task 8 单独测过了，这里要测的是 sim 对不可孵化卵的处理。
   // 混在一起的话，测试失败时无法区分是"上限没生效"还是"这次运气不好没求偶"。
-  const clutch = layEggs(a, b, createRng(9), { atPopulationCap: true });
+  const clutch = layEggs(a, createRng(9), { atPopulationCap: true });
   for (const egg of clutch) w.eggs.push(egg);
 
   step(w, 250);
   assert.equal(aliveCreatures(w).length, 2, '不得有新个体出现');
   assert.ok(w.stats.hatchFailures > 0, '应记录孵化失败（卵的光慢慢熄灭）');
-  assert.equal(w.eggs.length, 0, '失败的卵应在熄灭后被清理掉');
+  // 原来这里断言的是 `w.eggs.length === 0`。**孤雌下它不再成立，而且是因为机制在生效**：
+  // a 与 b 在这 250 秒里会各自持续憋出新的卵（满员时同样产、只是不孵化、慢慢熄灭），
+  // 所以缸里永远有新鲜卵在dimming 窗口内。改成只查**我们放进去的那一窝**有没有被清掉。
+  const planted = new Set(clutch.map((e) => e.id));
+  assert.equal(w.eggs.filter((e) => planted.has(e.id)).length, 0, '放进去的那窝卵应在熄灭后被清理掉');
+  assert.ok(w.eggs.length > 0, '反向确认：缸里应仍有别的新卵 —— 若这条也成立，说明上面那条为 0 只是因为根本没人在产');
 });
 
 test('孵化失败的卵会先变暗再散去，不会无限堆积', () => {
@@ -744,7 +732,7 @@ test('孵化失败的卵会先变暗再散去，不会无限堆积', () => {
 
   let laid = 0;
   for (let clutch = 0; clutch < 5; clutch++) {
-    for (const egg of layEggs(a, b, createRng(100 + clutch), { atPopulationCap: true })) {
+    for (const egg of layEggs(a, createRng(100 + clutch), { atPopulationCap: true })) {
       w.eggs.push(egg);
       laid++;
     }
@@ -785,7 +773,7 @@ function fullTankWithReadyEgg(seed, eggSeed, eggAge) {
   addCreature(w, b);
 
   // viable=true ⇒ "产卵那一刻缸还没满"；再把 age 推到到期，模拟"60 秒后孵化时缸满了"
-  const [egg] = layEggs(a, b, createRng(eggSeed), { atPopulationCap: false });
+  const [egg] = layEggs(a, createRng(eggSeed), { atPopulationCap: false });
   egg.age = eggAge;
   w.eggs.push(egg);
   return { w, a, b, egg };
@@ -1066,4 +1054,47 @@ test('种群循环的廉价门：新缸 420 秒内必须真的孵出个体（长
   // 全量回归会先变慢再变红，而不是悄无声息地拖到分钟级。
   assert.ok(Date.now() - t0 < 20000,
     `420 模拟秒不应超过 20 秒墙钟（实测 2.5–4.5 秒），实际 ${Date.now() - t0}ms`);
+});
+
+// ---------- 2026-10-20 孤雌：两条由变异探针逼出来的测试 ----------
+
+test('满员时产出的卵一律不可孵化（结算必须把 atCap 传下去）', () => {
+  // 探针：把 layEggs 的 { atPopulationCap: atCap } 改成硬编码 false → 全库 358 条**无一变红**。
+  // 也就是说"缸满了卵会慢慢熄灭"这条 spec §4.12 第 6 条的叙事，
+  // 原来只在上限压分那一条里被测到（评分变低），**产卵那一刻的 viable 没人测**。
+  const w = createWorld({ seed: 71, initialCreatures: 0, populationCap: 2 });
+  w.foods.length = 0;
+  const a = createCreature({ id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, rng: createRng(1) });
+  const b = createCreature({ id: 'b', name: 'B', x: 0.55, y: 0.5, age: 600, rng: createRng(2) });
+  for (const c of [a, b]) {
+    addCreature(w, c);
+    c.emotions.arousal = 0.95;
+    c.needs.hunger = 0.05;
+    c.needs.energy = 0.05;
+    c.broodT = 9999;                        // 两只都憋满
+  }
+  step(w, 60);
+  assert.ok(w.eggs.length > 0, '前置条件：这一小时里必须真的产了卵，否则下面那条是空断言');
+  assert.ok(w.eggs.every((e) => e.viable === false),
+    `满员时产下的每一枚卵都必须 viable=false，实际有 ${w.eggs.filter((e) => e.viable).length} 枚可孵化`);
+});
+
+test('一次 brood 意图只产一窝（一次性标记不得失效）', () => {
+  // 探针：把 case 'brood' 里的 `if (!intent.laid)` 改成 `if (true)` → 全库无一变红。
+  // 那个标记是"孵一次 = 产一窝"的唯一保证；它失效的话每 tick 都会产 1–3 枚，
+  // 症状是卵在缸底指数堆积，而所有平均值断言照样好看。
+  const w = createWorld({ seed: 77, initialCreatures: 0, populationCap: 24 });
+  w.foods.length = 0;
+  const a = createCreature({ id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, rng: createRng(1) });
+  addCreature(w, a);
+  a.emotions.arousal = 0.95;
+  a.needs.hunger = 0.05;
+  a.needs.energy = 0.05;
+  a.broodT = 9999;
+  // 强制一个 brood 意图并让它持续 10 秒（每 tick 都走 executeIntent）
+  a.intent = { kind: 'brood', minDuration: 999 };
+  step(w, 10);
+  assert.ok(w.eggs.length >= 1, '前置条件：这一窝里必须真的产了卵');
+  assert.ok(w.eggs.length <= CONFIG.eggsPerClutch[1],
+    `一次意图最多产一窝（${CONFIG.eggsPerClutch[1]} 枚），实际 ${w.eggs.length} 枚 ⇒ 一次性标记失效`);
 });

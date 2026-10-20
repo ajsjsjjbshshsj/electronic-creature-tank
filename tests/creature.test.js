@@ -63,7 +63,7 @@ test('createCreature 生成完整的状态容器', () => {
     'id', 'name', 'customName', 'generation', 'genes', 'traits', 'thresholds',
     'age', 'stage', 'alive', 'sick', 'dying', 'pos', 'vel', 'facing',
     'needs', 'emotions', 'memory', 'intent', 'intentTime',
-    'resting', 'moving', 'courtship', 'mourn', 'lineage',
+    'resting', 'moving', 'broodT', 'mourn', 'lineage',
   ]) {
     assert.ok(k in c, `缺少字段 ${k}`);
   }
@@ -76,7 +76,7 @@ test('createCreature 生成完整的状态容器', () => {
   assert.deepEqual(c.pos, { x: 0.5, y: 0.5 });
   assert.deepEqual(c.vel, { x: 0, y: 0 });
   assert.equal(c.intent, null);
-  assert.equal(c.courtship, null);
+  assert.equal(c.broodT, 0, '刚出生的个体不该已经憋了 0 秒以上（计时器从 0 起）');
   assert.equal(c.mourn, 0);
 });
 
