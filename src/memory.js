@@ -43,18 +43,29 @@ export const PLAYER_ID = 'PLAYER';
 
 // 两个导出常量都**冻结**，纪律来自 Task 2 复查：src/genes.js 的 PATTERNS 曾被
 // 别处 .reverse() 静默重排，后果是所有生物的花纹错位而没有任何一处抛错。
-// KINSHIP 被改写的后果更隐蔽：KINSHIP.mate = 0.5 会让繁殖过的两只从此被判成
+// KINSHIP 被改写的后果更隐蔽：KINSHIP.companion = 0.5 会让繁殖过的两只从此被判成
 // 近亲、绝不再求偶 —— 种群静默绝育。
 // 注意：**摘掉 Object.freeze 不会让任何 deepEqual 内容断言变红**（deepEqual
 // 比内容与原型，不比可变性），所以冻结本身由测试
 // 'ROLES 与 KINSHIP 被冻结，且冻结这件事本身被钉住' 单独钉住。
-export const ROLES = Object.freeze(['mother', 'father', 'sibling', 'mate', 'offspring']);
+// 2026-10-20 孤雌：'mate' 改名 'companion'（长期凑在一起的社交伙伴）—— 这套繁殖里
+// 没有配偶这个概念了，但**关系本身必须留着**，否则缸里只剩血亲一种关系。
+// 'father' **保留**：存档 v1 的条目里 role 可能是 'father'，而 remember() 会校验
+// role ∈ ROLES —— 删了它，旧档一读就抛错。没有生产者不等于可以删，这里就是例子。
+export const ROLES = Object.freeze(['mother', 'father', 'sibling', 'companion', 'offspring']);
+
+// 亲缘系数是**客观血缘事实**，与"它们关系多好"无关。
+// companion 为 0 —— 伙伴没有血缘。于是"伙伴不被遗忘"与"伙伴不是亲属"走
+// **两条独立通道**：前者看 role（见 decay 的慢衰减判定），后者只看 kinship。
+// 2026-10-20：原来这段写的是"近亲回避（mate 为 0，配偶可以繁殖）"，
+// 那个闸门已随孤雌制删除，但两条通道分开的结构原样保留 —— 它防的是
+// "为了让某段关系不被遗忘而顺手把它的亲缘也调高"，这个诱惑一直都在。
 
 // 亲缘系数用于近亲回避（spec 4.12 第 5 条：kinship > 0.25 绝不进入求偶）。
 // mate 为 0 —— 配偶没有血缘关系，不能因为"它是我伴侣"就误判为近亲而拒绝交配。
 // 于是"伴侣不被遗忘"与"伴侣可以繁殖"这两件事走**两条独立通道**：
 // 前者看 role（见 decay），后者只看 kinship（见 Task 8）。
-// 这个分工由测试 'role 为 mate 走慢衰减，但 kinship 仍是 0（Task 8 的近亲
+// 这个分工由测试 'role 为 companion 走慢衰减，但 kinship 仍是 0（原
 // 回避不得拦住配偶）' 钉住。
 //
 // 查表警告：KINSHIP 是朴素对象字面量，原型键在它上面解析成 **truthy 的继承值**
@@ -65,7 +76,7 @@ export const ROLES = Object.freeze(['mother', 'father', 'sibling', 'mate', 'offs
 export const KINSHIP = Object.freeze({
   mother: 0.5, father: 0.5, sibling: 0.5, offspring: 0.5,
   grandparent: 0.25, grandchild: 0.25, halfSibling: 0.25,
-  mate: 0,
+  companion: 0,
 });
 
 // 与 needs.js / emotions.js 的 clamp01 同型：两个比较对 NaN 都是 false，

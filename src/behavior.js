@@ -16,8 +16,8 @@
 //    由测试 'scoreAll 是纯函数（不修改 creature，也不修改 senses）' 钉住。
 //
 // 依赖方向：本模块**只**依赖 config 与 memory（read-only 查询）。
-// 刻意不 import breeding —— 求偶可行性与分数由 Task 10 用 courtshipScore 预算好
-// 放进 senses.courtshipOptions，否则会形成 behavior → breeding → creature 的耦合链。
+// 刻意不 import breeding —— 产卵 readiness 由 sim 的 broodScore 预算好放进 senses.broodScore，
+// 否则会形成 behavior → breeding → creature 的耦合链。（2026-10-20 孤雌：原 courtshipOptions 已删。）
 import { CONFIG } from './config.js';
 import { affectionFor, familiarityFor, PLAYER_ID } from './memory.js';
 
@@ -28,7 +28,7 @@ import { affectionFor, familiarityFor, PLAYER_ID } from './memory.js';
 // **摘掉 Object.freeze 不会让任何 deepEqual 内容断言变红**（它比内容不比可变性）。
 // （Task 2 的 PATTERNS 就是这样被 .reverse() 静默重排、害得整缸花纹错位的。）
 export const INTENTS = Object.freeze([
-  'forage', 'eat', 'rest', 'socialize', 'court', 'explore',
+  'forage', 'eat', 'rest', 'socialize', 'brood', 'explore',
   'flee', 'beg', 'protest', 'fight', 'mourn', 'idle',
 ]);
 
@@ -73,7 +73,8 @@ const clampPos = (v) => (v < 0.02 ? 0.02 : v > 0.98 ? 0.98 : v);
 //
 // 相对倍率的含义：
 //   flee  0.4× —— 刻意最短。逃命时必须能随时改向，被锁定 1.2 秒会一头撞墙。
-//   court 3.3× —— 刻意最长。求偶仪式本来就不该被一点风吹草动打断。
+//   brood 2.0× —— 中等。孵一窝不是仪式，做完就该起身；原来的 court 3.3×（刻意最长）
+//   随求偶制一起删了。
 //   fight 0.85× —— 略短于基准：打斗是短促的爆发，不该拖成僵持。
 const M = CONFIG.behavior.minIntentDuration;
 // 导出（仅供测试与调试，与 scoreAll 同理）并冻结：它是 12 个意图的锁定时长表，
@@ -81,7 +82,7 @@ const M = CONFIG.behavior.minIntentDuration;
 // 冻结理由同 INTENTS —— 摘掉 Object.freeze 不会让任何内容断言变红。
 export const MIN_DURATION = Object.freeze({
   forage: M * 1.25, eat: M, rest: M * 2.5, socialize: M * 1.7,
-  court: M * 3.3, explore: M * 1.7, flee: M * 0.4, beg: M * 1.25,
+  brood: M * 2.0, explore: M * 1.7, flee: M * 0.4, beg: M * 1.25,
   protest: M, fight: M * 0.85, mourn: M * 1.7, idle: M * 1.25,
 });
 
@@ -106,10 +107,6 @@ export function scoreAll(c, senses) {
   const nearestNeighbor = senses.neighbors.length ? senses.neighbors[0] : null;
   const nearestThreat = senses.threats.length ? senses.threats[0] : null;
   const hand = senses.playerHand;
-  const bestSuitor = senses.courtshipOptions.length
-    ? senses.courtshipOptions.reduce((a, b) => (b.score > a.score ? b : a))
-    : null;
-
   // provoker：senses 显式指出的肇事者（perceive 用 anger > 0.5 && dist < 0.08 选出），
   // 再回 neighbors 里取它的完整信息。筛选标准只在 perceive 里定义一处。
   const provokerId = senses.provokerId || null;
@@ -140,10 +137,10 @@ export function scoreAll(c, senses) {
       ? n.social * 1.3 * (1 + t.playerApproach * 0.15)
       : 0,
 
-    // 求偶：分数直接来自 sim 预算好的 courtshipScore，
-    // 因此"种群上限压低求偶"与"近亲归零"自动传导到这里。
-    court: bestSuitor && bestSuitor.score > 0
-      ? bestSuitor.score * e.arousal * 1.6
+    // 自产卵（孤雌）：分数由 sim 的 broodScore 预算好，读的是"这只憋了多久"× 拥挤乘数。
+    // 于是"种群上限压低产卵"自动传导到这里，与当年求偶分数的传导路径同构。
+    brood: senses.broodScore > 0
+      ? senses.broodScore * CONFIG.behavior.broodUrgency
       : 0,
 
     // 探索：好奇驱动，且在没有更紧迫的事时才有分量
@@ -251,10 +248,6 @@ export function decide(c, senses, rng) {
   // 从而改变它"纯粹是 Record<string, number>"的接口）。
   const nearestFood = senses.foods.length ? senses.foods[0] : null;
   const nearestNeighbor = senses.neighbors.length ? senses.neighbors[0] : null;
-  const bestSuitor = senses.courtshipOptions.length
-    ? senses.courtshipOptions.reduce((a, b) => (b.score > a.score ? b : a))
-    : null;
-
   const intent = { kind: bestKind, minDuration: MIN_DURATION[bestKind] };
 
   switch (bestKind) {
@@ -267,8 +260,8 @@ export function decide(c, senses, rng) {
       intent.targetId = nearestNeighbor.id;
       intent.targetPos = { x: nearestNeighbor.pos.x, y: nearestNeighbor.pos.y };
       break;
-    case 'court':
-      intent.targetId = bestSuitor.id;
+    case 'brood':
+      // 没有对象，也没有目标点：它就在原地趴下来孵。
       break;
     case 'beg':
       intent.targetPos = { x: senses.playerHand.pos.x, y: senses.playerHand.pos.y };

@@ -19,7 +19,7 @@
 //
 // 2. **world.events 是与表现层唯一的通道，且只写不读。**
 //    内核往队列里 push，从不关心谁读、也不检查它是否被清空。
-//    它是**一次性**事件（death / hatch / eat / mated / rejected / dissolved / eggFailed /
+//    它是**一次性**事件（death / hatch / eat / laid / dissolved / eggFailed /
 //    error），不是状态快照 —— 状态由 world 本身提供。消费方（计划 2）每帧取走后清空，
 //    否则队列会无界增长（本模块不代为清理，因为"取走"这个动作只有消费方知道）。
 //
@@ -38,8 +38,7 @@ import {
 } from './memory.js';
 import { createCreature, ageCreature, canBreed, sizeOf } from './creature.js';
 import {
-  courtshipScore, kinshipOf, startCourtship, tickCourtship, interruptCourtship,
-  layEggs, tickEgg, hatch, registerKinship,
+  kinshipOf, crowdingFactor, layEggs, tickEgg, hatch, registerKinship,
 } from './breeding.js';
 import { decide, EAT_DIST, HAND_SPEED_POKE } from './behavior.js';
 
@@ -75,32 +74,25 @@ const byDistThenId = (a, b) => (a.dist - b.dist) || (a.id < b.id ? -1 : 1);
 
 const byIdIn = (world) => (id) => world.creatures.find((x) => x.id === id) || null;
 
-// 世界层面的求偶评分 = **谱系**近亲回避 + breeding 的 courtshipScore。
+// 世界层的产卵 readiness 评分（孤雌，spec §4.12 第 1 条）。
 //
-// 为什么要在 breeding 的记忆式判定（canCourt 读 kinshipBetween(memory, id)）之外
-// 再加一道由 lineage 推出来的闸门：memory 是**有容量上限**的缓存，而 registerKinship
-// 会给每一只同胞各写一条 familiarity 为 0 的条目；一窝超过 12 只时
-// `prune` 按"familiarity 最低"淘汰，先被挤掉的正是这些亲属条目
-// （实测：往一个空记忆里按 mother / father / 11 个 sibling 的顺序 ensure 13 条，
-//   第 13 条一进来母亲那条就没了 —— memoryCapacity 是 12）。
-// 缓存一丢，`kinship > 0.25` 的近亲回避就静默失效 —— 兄妹可以互相求偶产卵，全链路不报错。
-// ⚠️ 这里原写着"实测：去掉这道闸门后，同胞之间在 200 秒里产下了 10 枚卵"，
-// 但那个数字**无法从测试复现**：那条同胞测试只有一只母亲/父亲条目（远不到 12 条容量），
-// 所以它根本没有走到淘汰路径，去掉闸门也不会产卵。
-// 能复现的说法只有上面那条：往空记忆里 ensure 13 条会把最早写入的亲属条目挤掉
-// （对应测试 '父母条目被容量淘汰后会被重新缓存回来' 里构造的前置条件）。
-// 闸门本身的价值不依赖那个数字：只要缓存可能丢，把亲缘判定建立在**客观谱系**上就更稳。
-// 亲缘是**客观事实**（breeding.kinshipOf 只读 lineage，与"它还记不记得"无关），
-// 所以世界层用谱系来把关，不受缓存淘汰影响。阈值仍用 CONFIG.kinshipMateMax 与
-// 严格 `>`：恰好 0.25 的祖孙/半同胞**不被**阻断（交接要求第 6 条）。
-// 注意这只是补强：canCourt 的记忆判定原样保留，两者都只会让它更不可能求偶。
-function mateScore(world, c, o, distance) {
-  if (kinshipOf(c, o, byIdIn(world)) > CONFIG.kinshipMateMax) return 0;
-  return courtshipScore(c, o, {
-    population: aliveCreatures(world).length,
-    populationCap: world.populationCap,
-    distance,
-  });
+// 与原 mateScore 最大的区别：**没有对象**。所以"近亲闸门"整段消失了 —— 它当年防的是
+// 兄妹互相求偶，而孤雌不需要同意。kinshipOf / registerKinship 仍然留着，
+// 因为亲缘还要管亲属偏好、守巢与家谱。
+//
+// readiness 是"这只憋了多久"：随 broodT 线性升到 1，产卵后归零。所以产卵不是定时器
+// 触发的事件，而是**与其他候选一起竞争胜出**的行为（spec §4.10）—— 一只又饿又怕的
+// 成体即使憋满也不会去孵，这正是效用评分比定时器真实的地方。
+//
+// 种群上限仍走"压低而非硬阻断"：crowdingFactor 下限 0.12，**永不为 0**。
+function broodScore(world, c) {
+  if (!canBreed(c)) return 0;
+  const interval = Math.max(1e-6, c.thresholds.broodInterval);
+  const readiness = Math.min(1, (c.broodT || 0) / interval);
+  const loadRatio = world.populationCap > 0
+    ? aliveCreatures(world).length / world.populationCap : 0;
+  return readiness * crowdingFactor(loadRatio)
+    * (0.4 + c.emotions.arousal) * (1.2 - c.needs.hunger);
 }
 
 // ---------------------------------------------------------------- 世界构建
@@ -117,7 +109,7 @@ export function createWorld(opts) {
     foods: [],
     grid: new Map(),
     playerHand: null,      // { pos, speed } | null —— 由计划 2 的 input 层写入
-    stats: { births: 0, deaths: 0, hatchFailures: 0, generation: 1, rejected: 0 },
+    stats: { births: 0, deaths: 0, hatchFailures: 0, generation: 1 },
     events: [],
     nameFor: opts.nameFor || defaultNameFor,
   };
@@ -229,7 +221,6 @@ export function worldStats(world) {
     deaths: world.stats.deaths,
     generation: world.stats.generation,
     hatchFailures: world.stats.hatchFailures,
-    rejected: world.stats.rejected,
   };
 }
 
@@ -328,35 +319,23 @@ export function perceive(world, c) {
     }
   }
 
-  // 求偶候选：分数由 mateScore（谱系闸门 + breeding 的 courtshipScore）预算，
-  // behavior 只读这个数字（behavior 刻意不 import breeding，见 behavior.js 文件头）。
-  // 分数里已经包含了种群上限的压制：crowding 这一项的下限是 0.12，**永不为 0** ——
-  // 所以上限本身不会把评分归零，它只会让求偶变得稀少（归零只来自与上限无关的闸门：
-  // 亲缘 > 0.25、意愿不足、好感过低）。这就是 spec 4.12 第 6 条要的"压低而非硬阻断"。
-  // 候选列表对每个邻居都给一项，不可行的给 0 分而不是从列表里剔掉；
-  // behavior 用 `bestSuitor.score > 0` 判可行性，列表长度本身不承载语义
-  // （空列表会让 bestSuitor 为 null，同样得到 court = 0）。
+  // 产卵 readiness（孤雌）：由世界层算好放进 senses，behavior 只读数字 ——
+  // behavior 刻意不 import breeding，否则会形成 behavior → breeding → creature 的耦合链。
+  // 分数里已含种群上限的压制（crowdingFactor 下限 0.12，永不为 0），
+  // 所以上限本身不会把评分归零，只会让产卵变得稀少。这就是 spec §4.12 第 6 条要的
+  // "压低而非硬阻断"。原来的 courtshipOptions 列表（每个邻居一项、配对打分）整组作废。
+  // 满员判定：perceive 与 resolve 各算一次是刻意的（两处读的种群时点不同）。
   const atCap = aliveCreatures(world).length >= world.populationCap;
-  const courtshipOptions = [];
-  for (const n of neighbors) {
-    const o = world.creatures.find((x) => x.id === n.id);
-    if (!o) continue;
-    courtshipOptions.push({
-      id: n.id,
-      dist: n.dist,
-      score: mateScore(world, c, o, n.dist),
-    });
-  }
-
+  const brood = broodScore(world, c);
   // provoker：最近那个也在生气、且离得很近的邻居。
   // behavior 用它决定 protest / fight 的目标（筛选标准只在 perceive 里定义一处）。
   const provoker = neighbors.find((n) => n.anger > 0.5 && n.dist < 0.08);
 
   return {
-    foods, neighbors, threats, playerHand, courtshipOptions,
+    foods, neighbors, threats, playerHand, broodScore: brood,
     provokerId: provoker ? provoker.id : null,
     // population / populationCap / atPopulationCap 目前**没有**生产代码里的消费者：
-    // 种群上限的效果全部经由 courtshipOptions[].score 传导（见上），
+    // 种群上限的效果全部经由 broodScore 传导（见上），
     // 所以 behavior 不需要读它们。留着是给计划 2/3 的表现层与调试面板用的只读诊断读数
     // （例如显示"24/24"或给 UI 一个"缸满了"的提示）。**不要**在 behavior 里
     // 把它们接成条件门控 —— 那就成了 spec 4.12 第 6 条禁止的硬阻断。
@@ -386,11 +365,12 @@ function emotionCtx(c, senses) {
     novelty: hand ? 0.6 : (senses.foods.length ? 0.25 : 0.1),
     // arousal 的开关**只看阶段**（canBreed：成体、活着、不 sick），
     // 刻意**不**再要求"已经有合法求偶对象"。
-    // 为什么：这个情境是 emotions.computeTargets 里 arousal 的一票门控，
-    // 而 courtshipScore 又要求双方 arousal >= 0.35 —— 若这里也要求
-    // `courtshipOptions.some(score > 0)`，两者互为前提，arousal 会永远停在 0：
-    // 全缸不求偶、没有后代，且不报错、不抛异常，症状只是"这个缸不生"。
-    // emotions.js 的模块说明也是这个意思：这门控是为了"亚成体与老年个体不该有求偶欲"。
+    // 为什么：这门控**只看阶段**（成体、活着、不 sick），刻意不再要求"此刻真能产卵"。
+    // 孤雌改造后这条约束换了名字但**没有消失**：arousal 是 broodScore 的一项乘子
+    // （0.4 + arousal），而 arousal 又只能由这个 canBreed 门控打开。若这里再叠一层
+    // "broodT 已经憋满"之类的条件，两者互为前提 ⇒ arousal 永远停在 0 ⇒ 全缸不生，
+    // 且不报错、不抛异常，症状只是"这个缸不生"。原实测记录见 Task 9-11 的预飞审查。
+    // emotions.js 的模块说明也是这个意思：这门控是为了"亚成体与老年个体不该有性冲动"。
     canBreed: canBreed(c),
   };
 }
@@ -411,7 +391,7 @@ function executeIntent(world, c, senses, dt) {
     speedFactor *= 0.85 + world.rng.range(0, 0.3);
   }
   if (intent.kind === 'flee') speedFactor *= CONFIG.motion.fleeFactor;
-  if (c.courtship) speedFactor *= CONFIG.motion.courtshipFactor;
+  // （原 `if (c.courtship) speedFactor *= motion.courtshipFactor` 随求偶制删除。）
   if (c.mourn > 0 && intent.kind === 'mourn') speedFactor *= 0.1;   // 哀悼 = 几乎静止
 
   switch (intent.kind) {
@@ -482,27 +462,26 @@ function executeIntent(world, c, senses, dt) {
       if (intent.targetPos) moveToward(c, intent.targetPos, dt, speedFactor);
       break;
 
-    case 'court': {
-      // 求偶的编舞由 breeding 的 phase 驱动（绕圈/脉动同步/轻触/膨胀展示）。
-      // 内核只负责让双方靠近并维持仪式；具体的圆圈轨迹在计划 2 的表现层实现。
-      const partner = world.creatures.find((x) => x.id === intent.targetId);
-      if (!partner || !partner.alive) { interruptCourtship(c); c.intent = null; break; }
-      if (!c.courtship) {
-        const d = Math.hypot(partner.pos.x - c.pos.x, partner.pos.y - c.pos.y);
-        // 回到求偶范围内才起仪式；分数为 0（近亲、意愿不足、好感过低等）就不起，
-        // 继续靠近。这里与 perceive 用**同一个** mateScore ——
-        // 只在一处设闸会让另一条路径绕过它（perceive 挡住了但这里放行，就会真的产卵）。
-        if (d < CONFIG.courtshipRange && mateScore(world, c, partner, d) > 0) {
-          startCourtship(c, partner, world.rng);
-        } else {
-          moveToward(c, partner.pos, dt, speedFactor);
-        }
-      } else {
-        moveToward(c, partner.pos, dt, speedFactor * 0.6);
+    case 'brood': {
+      // 孵卵不移动：它就在原地趴着。产卵在意图**第一次被执行到**时结算，一次性。
+      //
+      // ⚠️ 为什么不在 resolve 里等"意图做满 minDuration 再结算"：那样永远等不到。
+      // tickCreature 的判定是 `if (!c.intent || c.intentTime >= minDuration) 重新决策`，
+      // 而它跑在 resolve **之前** —— 计时器刚到阈值就被换成新意图并归零，
+      // resolve 每次看到的都是"刚起的新 brood"，条件恒不成立。
+      // 实测症状：新缸跑 420 秒 eggs=0 births=0，全链路不报错。
+      // 一次性标记挂在 intent 上（而不是 creature 上），所以换意图天然就重置了。
+      if (!intent.laid) {
+        intent.laid = true;
+        c.broodT = 0;
+        const atCap = aliveCreatures(world).length >= world.populationCap;
+        const eggs = layEggs(c, world.rng, { atPopulationCap: atCap });
+        for (const egg of eggs) world.eggs.push(egg);
+        applyEvent(c.emotions, 'laid');
+        world.events.push({ kind: 'laid', id: c.id, eggs: eggs.length, atPopulationCap: atCap });
       }
       break;
     }
-
     default:
       break;
   }
@@ -543,20 +522,11 @@ function tickCreature(world, c, dt) {
 
   c.intentTime += dt;
 
-  // 求偶仪式进行中：锁定 court 意图，完全不重新决策。
-  //
-  // 这不是优化，是必需的正确性修复。canCourt 要求 `!a.courtship`，
-  // 所以仪式一旦开始，courtshipScore 对这一对就返回 0 —— 若此时照常重新决策，
-  // court 候选的分数归零，两只会各自游开，仪式在半路上散掉。
-  // 表现层（计划 2）会看到它们本该绕圈共舞却越走越远。
-  if (c.courtship) {
-    c.intent = {
-      kind: 'court',
-      targetId: c.courtship.partnerId,
-      minDuration: c.courtship.duration,
-    };
-    c.intentTime = 0;
-  } else if (!c.intent || c.intentTime >= c.intent.minDuration) {
+  // 2026-10-20：这里原有一整段"仪式进行中锁定 court 意图、完全不重新决策"的逻辑。
+  // 它存在的理由是 canCourt 要求 !a.courtship，于是仪式一开始分数就归零，
+  // 不锁定的话两只会在半路各自游开。**孤雌下没有对象，这个失效模式整类消失**，
+  // 所以锁定逻辑一并删除，而不是"改成锁定 brood"。
+  if (!c.intent || c.intentTime >= c.intent.minDuration) {
     // 行为有最小持续时间，防止每帧重新决策导致的高频抖动（spec 4.10）。
     //
     // 语义**就是"至少保持 minDuration，然后重新决策一次"**：重新决策时一律
@@ -603,20 +573,10 @@ function tickCreature(world, c, dt) {
 
   updateEmotions(c.emotions, computeTargets(c.needs, emotionCtx(c, senses), c.traits), dt);
 
-  // 求偶仪式推进。
-  //
-  // tickCourtship 在返回 'complete' 的同时会把 c.courtship 置为 null
-  // （这是它防止同一场仪式被完成两次的机制）。但 resolve() 需要知道
-  // "刚才是和谁完成的"才能配对产卵，所以必须在清空之前把 partnerId 抄下来。
-  // 漏掉这一行，求偶永远完成不了、永远不会产卵。
-  if (c.courtship) {
-    c.courtshipPartnerId = c.courtship.partnerId;
-    if (tickCourtship(c, dt) === 'complete') c.courtshipCompleted = true;
-  } else {
-    c.courtshipCompleted = false;
-    c.courtshipPartnerId = null;
-  }
-
+  // 憋卵计时（孤雌）。broodScore 读它，产卵结算时归零。
+  // 原来这段是 tickCourtship + courtshipCompleted/courtshipPartnerId 两个一次性标记，
+  // 那是"双方都要在同一 tick 标记完成才算成功"的配对协议 —— 没有对象就没有协议。
+  c.broodT = (c.broodT || 0) + dt;
   if (c.mourn > 0) c.mourn = Math.max(0, c.mourn - dt);
 
   ageCreature(c, dt);
@@ -773,61 +733,8 @@ function tickEggs(world, dt) {
 function resolve(world, dt) {
   const alive = aliveCreatures(world);
 
-  // 求偶完成：双方都在同一 tick 标记完成才算成功。
-  // 单方完成（对方被打断/死亡）则视为被拒绝，触发 rejected 事件。
-  const completed = alive.filter((c) => c.courtshipCompleted);
-  const paired = new Set();
-  for (const a of completed) {
-    const partner = alive.find((x) => x.id === a.courtshipPartnerId && x.courtshipCompleted);
-    if (partner && !paired.has(a.id) && !paired.has(partner.id)) {
-      paired.add(a.id);
-      paired.add(partner.id);
-      // 上限在这里体现为"卵不可孵化"（layEggs 的 viable=false），
-      // 而不是"不许产卵"。用 >= 判断，且**没有**任何 `> cap` 的拒绝分支：
-      // 满员时照样求偶、照样产卵，只是那些卵的光会慢慢熄灭 ——
-      // 于是"缸满了"是一件**能被看见的事**（卵在缸底暗下去），而不是一条静默的禁令。
-      // ⚠️ 控制方曾把这道判定从"产卵时"移到"孵化时"（卵改为一律 viable，
-      // 由 tickEggs 排队等位置），理由是 spec 4.12 第 6 条的字面语义是"达上限时卵**孵化失败**"。
-      // 实测**否决**了这个改动（diag-hatchgate.mjs / diag-crowding.mjs，同 8 个种子 × 60 分钟）：
-      // 灭绝 4/8 → **5/8**，且 seed 20261014 从"存活 60 分钟、出生 72、母亲 12、世代 6"
-      // 退化成"2102s 灭绝、出生 24、母亲 3"。机制是：排队让腾出的位置被**立刻**补上 ⇒
-      // 种群长期钉死在上限 ⇒ 血统停止更新；而旧行为靠"卵全灭 → 种群跌破上限 →
-      // crowding 松绑 → 重新繁殖"的振荡，反而维持了多条血统。已撤销，保留这条记录免得重推一遍。
-      const atCap = alive.length >= world.populationCap;
-      const eggs = layEggs(a, partner, world.rng, { atPopulationCap: atCap });
-      for (const egg of eggs) world.eggs.push(egg);
-      applyEvent(a.emotions, 'mated');
-      applyEvent(partner.emotions, 'mated');
-      adjustMemory(a.memory, partner.id, 0.25, 0.1);
-      adjustMemory(partner.memory, a.id, 0.25, 0.1);
-      world.events.push({
-        kind: 'mated', a: a.id, b: partner.id,
-        eggs: eggs.length, atPopulationCap: atCap,
-      });
-      a.courtshipCompleted = false;
-      partner.courtshipCompleted = false;
-    }
-  }
-  // 落单的完成者：对方没能一起完成（被打断、死亡、或走开了），算一次失败的求偶。
-  //
-  // 被拒绝要在关系记忆里留痕（CONFIG.rejectionAffection = -0.15）——
-  // 这是 spec 4.8"恩怨"的一部分：被同一只拒绝过几次之后，
-  // 它下次再靠近时这只的好感已经低了，求偶评分随之下降，于是会去别处。
-  // 少了这一行，拒绝就只是一次性动画，世界不会记住它。
-  //
-  // 必须先抄下 partnerId 再清空，否则下面就找不到该记在谁的头上了。
-  for (const a of completed) {
-    if (!paired.has(a.id)) {
-      const pid = a.courtshipPartnerId;
-      a.courtshipCompleted = false;
-      a.courtshipPartnerId = null;
-      applyEvent(a.emotions, 'rejected');
-      if (pid) adjustMemory(a.memory, pid, CONFIG.rejectionAffection, 0.05);
-      world.stats.rejected += 1;
-      world.events.push({ kind: 'rejected', id: a.id, by: pid });
-    }
-  }
-
+  // （2026-10-20：自产卵的结算不在这里，在 executeIntent 的 case 'brood'。
+  //   原来放在这里会导致产卵永远不发生 —— 理由那条注释写在 case 'brood' 里。）
   // 身体碰撞：重叠时互相推开，并给双方一点"被撞"的情绪冲击。
   // 只在真的挤到一起时触发，避免正常游动也被判为冲突。
   //
@@ -851,18 +758,17 @@ function resolve(world, dt) {
         b.pos.x = clampPos(b.pos.x + nx * push);
         b.pos.y = clampPos(b.pos.y + ny * push);
 
-        // 求偶中的碰撞不算冲突 —— 仪式本来就要贴近
-        if (!a.courtship && !b.courtship) {
-          applyEvent(a.emotions, 'bumped', 0.4);
-          applyEvent(b.emotions, 'bumped', 0.4);
-          // 记住这笔小账：好感轻微下降，多次碰撞才会累积成恩怨
-          adjustMemory(a.memory, b.id, -0.01, 0.02);
-          adjustMemory(b.memory, a.id, -0.01, 0.02);
-        }
+        // 2026-10-20：原来这里包着一层"求偶中的碰撞不算冲突"的豁免（仪式本来就要贴近）。
+        // 没有仪式了，豁免条件恒真 —— 留着就是一段永不成立的分支在假装做事，所以直接摊平。
+        applyEvent(a.emotions, 'bumped', 0.4);
+        applyEvent(b.emotions, 'bumped', 0.4);
+        // 记住这笔小账：好感轻微下降，多次碰撞才会累积成恩怨
+        adjustMemory(a.memory, b.id, -0.01, 0.02);
+        adjustMemory(b.memory, a.id, -0.01, 0.02);
         // ⚠️ spec 4.8 的"更容忍亲属靠近"在整个内核里**没有生产者**：
         // 这里的推开对所有个体一视同仁（推的是身体，不是关系），perceive 也不按 kinship
-        // 放宽距离。全项目内 kinship 的消费者只有近亲回避（mateScore / canCourt）
-        // 与 memory.decay 的慢衰减通道。如实记下，免得后来者以为这里已经实现了它。
+        // 放宽距离。2026-10-20 孤雌之后近亲回避已随 mateScore 一起删除，现在 kinship 的消费者
+        // 只剩 memory.decay 的慢衰减通道与家谱。如实记下，免得后来者以为这里已经实现了它。
       }
     }
   }
@@ -900,7 +806,8 @@ function respawnFood(world, dt) {
 // 所以世界层每 tick 把**父母**这一条重新缓存一次（spec 4.11 明文对应的那一件事）。
 // 代价可控：ensure 命中已存在的条目会立刻返回，所以正常情况下每只每 tick 只是两次
 // 线性扫描（12 条以内）的空操作；只有条目真的被挤掉时才会重建（并顺带挤掉别的低熟悉度条目）。
-// 同胞/祖孙那一侧不在这里补：近亲回避已经由 mateScore 的谱系闸门兜住，不依赖缓存。
+// 同胞/祖孙那一侧不在这里补：它原本由 mateScore 的谱系闸门兜住（不依赖缓存）；
+// 孤雌改造后那道闸门已删，这里补的只是**记忆缓存**，供慢衰减通道与家谱使用。
 //
 // ⚠️ 已知债务（记在计划 Task 5 段的说明里，不是本模块能修的）：memory.prune 只按
 // familiarity 淘汰、没有任何亲属保留规则，所以"母子近乎不忘"这句 spec 在**保留**这一侧

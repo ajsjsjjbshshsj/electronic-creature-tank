@@ -44,17 +44,10 @@ const CONFIG = {
   minSize: 14,
   maxSize: 38,
 
-  // ---- 繁殖 ----
-  // ⚠️ 2026-10-20 孤雌改造进行中：courtship* 与 kinshipMateMax 这几项目前**仍有消费者**
-  // （breeding.js / behavior.js 的求偶路径），它们随 Task A2 一起删。
-  // 本 Task 只加新键、不删旧键，是为了让 A1 结束时测试套件仍然全绿 ——
-  // 如果现在就删，thresholds().courtshipWillingness 会变 undefined，
-  // 求偶评分静默变 NaN，那是一笔"看起来绿、其实坏了"的提交。
-  courtship: { min: 8, max: 12 },   // 求偶仪式时长区间（秒）
+  // ---- 繁殖（孤雌，2026-10-20）----
+  // 求偶时代的五个常量（courtship.min/max、kinshipMateMax、courtshipRange、
+  // rejectionAffection）与 motion.courtshipFactor 已随 spec §4.12 改孤雌删除。
   eggsPerClutch: [1, 3],
-  kinshipMateMax: 0.25,             // 超过则绝不求偶
-  courtshipRange: 0.22,             // 归一化距离，超过则无法开始仪式
-  rejectionAffection: -0.15,        // 好感低于此值会拒绝对方
   // 达上限时卵孵化失败的概率（spec 4.12 第 6 条）。
   // ⚠️ 当前实现**不采样**这个值：`layEggs` 用 `viable: !atPopulationCap`，是确定性的。
   // 值为 1 时两者行为完全等价（达上限必失败），所以不是 bug —— 但它目前**没有消费者**。
@@ -67,11 +60,14 @@ const CONFIG = {
   broody: { intervalMin: 120, intervalMax: 260 },   // 秒；两次自产卵的间隔区间
   eggSize: {
     min: 0.6, max: 1.4,      // 相对值，由母方 size × broody × 营养决定
-    hatchGain: 1.0,          // hatchSize 直接读蛋大小的归一量
+    hatchGain: 0.5,          // 起点加成：eggBoost = (归一 − 0.5) × 该值 ⇒ 出壳 ±19.5% 体型
+                             // （0.25 × (1 − growthFactor 0.22)）
     bias: 0,                 // ⚠️ 控制方裁定（10-20 不追认）：蛋大小**不影响**成年体型。
                              //    结构留着，改这一个数即可恢复；不许在别处再乘一次。
     durationFactor: [0.8, 0.5],   // 孵化时长 = stage.egg × (f0 + f1 × 归一) ⇒ 大蛋孵得久
-    hatchlingFactor: [1.25, 0.5], // 幼体期时长 = stage.hatchling × (f0 − f1 × 归一)
+    // （原 hatchlingFactor「大蛋幼体期更短」没有落地：stageForAge 用的是全局边界，
+    //   要做个体差异得改阶段模型。它不在本轮任何裁定里，也不该留一个没人读的旋钮，
+    //   所以删掉，并在 spec §13 记为未实现。见 progress.md 的 A2 一节。）
   },
   // 蛋色用**累积边界**分段，不用宽度数组（宽度要额外断言浮点和为 1，会漂）。
   // 末项必须恰为 1.0，由 tests/genes.test.js 钉住。黑蛋 0.025 是稀有度的唯一来源。
@@ -131,8 +127,7 @@ const CONFIG = {
       petted:   { joy: 0.4, fear: -0.2 },
       fed:      { joy: 0.3 },
       bumped:   { anger: 0.35, fear: 0.1 },
-      rejected: { anger: 0.3, joy: -0.35 },
-      mated:    { joy: 0.6 },
+          laid:     { joy: 0.6 },   // 2026-10-20：原 mated（求偶成功）随孤雌制改名
       startled: { fear: 0.6 },
       death:    { fear: 0.25, joy: -0.4 },   // 目击同族死亡 → 触发哀悼
     },
@@ -170,6 +165,7 @@ const CONFIG = {
     // 所以"手一直停着也能一直卖萌"这件事要等有真实输入后再调 ——
     // 合理的下一步是让 beg 的分数随手的**移动**上升，而不是仅凭"手在附近"。
     begUrgency: 7.0,
+    broodUrgency: 1.5,           // 自产卵候选的放大（孤雌，spec §4.10）
     fightUrgency: 1.1,
     fleeUrgency: 2.2,          // 逃避优先于一切，靠高权重而非硬门控实现
   },
@@ -196,7 +192,6 @@ const CONFIG = {
     baseSpeed: 0.055,      // 归一化世界单位/秒
     stageFactor: { hatchling: 0.45, juvenile: 0.85, adult: 1, elder: 0.55 },
     fleeFactor: 2.2,
-    courtshipFactor: 0.55,
     facingLerp: 6,         // 朝向插值速率；实际还会乘 thresholds.turnRate / 4
     wallMargin: 0.03,      // 边界内缩，避免身体一半贴在缸壁上
   },

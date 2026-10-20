@@ -14,7 +14,7 @@ import {
 
 test('PLAYER_ID 与角色表符合 spec 4.8', () => {
   assert.equal(PLAYER_ID, 'PLAYER');
-  assert.deepEqual(ROLES, ['mother', 'father', 'sibling', 'mate', 'offspring']);
+  assert.deepEqual(ROLES, ['mother', 'father', 'sibling', 'companion', 'offspring']);
 });
 
 test('亲缘系数：父母/同胞/子代 0.5，祖孙 0.25，伴侣 0', () => {
@@ -25,7 +25,7 @@ test('亲缘系数：父母/同胞/子代 0.5，祖孙 0.25，伴侣 0', () => {
   assert.equal(KINSHIP.grandparent, 0.25);
   assert.equal(KINSHIP.grandchild, 0.25);
   assert.equal(KINSHIP.halfSibling, 0.25);
-  assert.equal(KINSHIP.mate, 0, '配偶无血缘，近亲回避不得因配偶关系误判');
+  assert.equal(KINSHIP.companion, 0, '配偶无血缘，近亲回避不得因配偶关系误判');
 });
 
 test('createMemory 是空的', () => {
@@ -273,10 +273,10 @@ test('kinshipBetween 返回记录中的亲缘系数', () => {
 test('remember 可批量写入且同 id 覆盖（存档恢复用）', () => {
   const m = createMemory();
   remember(m, { id: 'c1', familiarity: 0.5, affection: 0.2, kinship: 0, role: null });
-  remember(m, { id: 'c1', familiarity: 0.8, affection: 0.4, kinship: 0, role: 'mate' });
+  remember(m, { id: 'c1', familiarity: 0.8, affection: 0.4, kinship: 0, role: 'companion' });
   assert.equal(m.entries.length, 1);
   assert.equal(affectionFor(m, 'c1'), 0.4, '同 id 应覆盖');
-  assert.equal(get(m, 'c1').role, 'mate');
+  assert.equal(get(m, 'c1').role, 'companion');
   assert.equal(get(m, 'c1').familiarity, 0.8);
 });
 
@@ -363,7 +363,7 @@ test('remember 的校验顺带让 ROLES 成为生产代码的消费者', () => {
   // 这条断言从行为侧证明该消费者真实存在 —— 把 ROLES 换成空数组会让它变红。
   assert.ok(ROLES.length > 0, 'ROLES 不得为空，否则下面的校验形同虚设');
   const m = createMemory();
-  assert.doesNotThrow(() => remember(m, { id: 'p', familiarity: 1, affection: 1, kinship: 0, role: 'mate' }),
+  assert.doesNotThrow(() => remember(m, { id: 'p', familiarity: 1, affection: 1, kinship: 0, role: 'companion' }),
     'ROLES 里的取值必须被 remember 接受');
   assert.throws(() => remember(createMemory(), { id: 'q', familiarity: 1, affection: 1, kinship: 0, role: 'nope' }),
     TypeError, 'ROLES 之外的取值必须被 remember 拒绝');
@@ -403,7 +403,7 @@ test('ROLES 与 KINSHIP 被冻结，且冻结这件事本身被钉住', () => {
   //
   // 本模块的两个导出常量都会被 Task 8（近亲回避）与 Task 9（卖萌触发）import：
   //   ROLES.sort()   → 角色表顺序被改（无害但说明有人在改共享常量）
-  //   KINSHIP.mate = 0.5 → 配偶被判成近亲 → 繁殖过的两只从此绝不再求偶，
+  //   KINSHIP.companion = 0.5 → 配偶被判成近亲 → 繁殖过的两只从此绝不再求偶，
   //                        种群静默绝育，没有任何一处抛错。
   // KINSHIP 是对象、ROLES 是数组，可写探针不同：
   // 对象上 obj.push?.() 会**静默不抛**（可选调用短路成 undefined），
@@ -412,15 +412,15 @@ test('ROLES 与 KINSHIP 被冻结，且冻结这件事本身被钉住', () => {
   assert.throws(() => ROLES.push('__probe__'), TypeError, 'ROLES.push 应抛 TypeError');
   assert.throws(() => ROLES.reverse(), TypeError, 'ROLES.reverse 应抛 TypeError');
   assert.throws(() => { ROLES[0] = '__probe__'; }, TypeError, 'ROLES[0] 赋值应抛 TypeError');
-  assert.deepEqual(ROLES, ['mother', 'father', 'sibling', 'mate', 'offspring'],
+  assert.deepEqual(ROLES, ['mother', 'father', 'sibling', 'companion', 'offspring'],
     '写入探针之后 ROLES 的内容与顺序都不得改变');
 
   assert.ok(Object.isFrozen(KINSHIP), 'KINSHIP 应被冻结');
-  assert.throws(() => { KINSHIP.mate = 0.5; }, TypeError, 'KINSHIP.mate 必须不可写');
+  assert.throws(() => { KINSHIP.companion = 0.5; }, TypeError, 'KINSHIP.companion 必须不可写');
   assert.throws(() => { KINSHIP.grandparent = 0.9; }, TypeError, 'KINSHIP.grandparent 必须不可写');
   assert.throws(() => { KINSHIP.__probe__ = 1; }, TypeError, 'KINSHIP 加新键应抛 TypeError');
   assert.throws(() => { delete KINSHIP.mother; }, TypeError, 'KINSHIP 删键应抛 TypeError');
-  assert.equal(KINSHIP.mate, 0, '写入探针之后 mate 仍应是 0');
+  assert.equal(KINSHIP.companion, 0, '写入探针之后 mate 仍应是 0');
   assert.equal(KINSHIP.grandparent, 0.25, '写入探针之后 grandparent 仍应是 0.25');
 
   // 反向确认：冻结只挡写，不挡读与展开（否则 Task 8 / Task 9 会跟着坏）
@@ -432,7 +432,7 @@ test('KINSHIP 的键集恰好是 spec 4.8 / 4.12 的八个，无多余项', () =
   // 多一个键不会让上面那条逐系数断言变红，却会让 Task 8 的遍历行为改变。
   assert.deepEqual(
     Object.keys(KINSHIP).sort(),
-    ['father', 'grandchild', 'grandparent', 'halfSibling', 'mate', 'mother', 'offspring', 'sibling'],
+    ['companion', 'father', 'grandchild', 'grandparent', 'halfSibling', 'mother', 'offspring', 'sibling'],
   );
 });
 
@@ -587,26 +587,24 @@ test('kinship 阈值两侧都被钉住：恰好 0.25 走慢衰减，0.24 走快�
     '阈值两侧的差必须方向正确（亲缘越近忘得越慢）');
 });
 
-test('role 为 mate 走慢衰减，但 kinship 仍是 0（Task 8 的近亲回避不得拦住配偶）', () => {
+test('role 为 companion 走慢衰减，但 kinship 仍是 0（伙伴不得被误判成血亲）', () => {
   // 这是本模块最容易写错的一处：spec 4.8 要求"长期伴侣的衰减极慢"，
   // 而 spec 4.12 第 5 条要求"kinship > 0.25 绝不求偶"。
-  // 若为了让伴侣不被遗忘就把 KINSHIP.mate 设成 0.5，繁殖过的两只
-  // 从此永远不再求偶 —— 种群静默绝育，且没有任何一处抛错。
-  // 正确解法是两条通道分开：慢衰减看 role，近亲回避只看 kinship。
+  // 若为了让伙伴不被遗忘就把 KINSHIP.companion 设成 0.5，常在一起的两只
+  //   // 从此在亲属偏好与守巢里被判成血亲 —— 关系模型就此失真，且没有任何一处抛错。
+  // 正确解法是两条通道分开：慢衰减看 role，亲缘只看 kinship。
   const m = createMemory();
-  ensure(m, 'p', { role: 'mate', kinship: KINSHIP.mate });
+  ensure(m, 'p', { role: 'companion', kinship: KINSHIP.companion });
   adjust(m, 'p', 0.9, 1);
   for (let i = 0; i < 600; i++) decay(m, 1 / 60);        // 10 秒
   assert.ok(Math.abs(affectionFor(m, 'p') - 0.882178805976080) < 1e-9,
     `伴侣应按 affectionDecayKin 衰减，实际 ${affectionFor(m, 'p')}`);
   assert.equal(kinshipBetween(m, 'p'), 0);
-  assert.equal(kinshipBetween(m, 'p') > CONFIG.kinshipMateMax, false,
-    '配偶不得触发近亲回避');
-  // 反向确认：母子确实**会**被近亲回避拦住，否则上面那条 false 毫无意义
+  assert.equal(kinshipBetween(m, 'p'), 0, '伙伴关系本身不产生亲缘');
+  // 反向确认：母子确实有亲缘，否则上面那条 0 毫无意义（两边都可能只是没写进去）。
   const kin = createMemory();
   ensure(kin, 'mom', { role: 'mother', kinship: KINSHIP.mother });
-  assert.equal(kinshipBetween(kin, 'mom') > CONFIG.kinshipMateMax, true,
-    '母子必须触发近亲回避');
+  assert.equal(kinshipBetween(kin, 'mom'), 0.5, '母子必须有亲缘');
 });
 
 test('prune 的 protectId 参数真的豁免那一条（直接调用，不经 ensure）', () => {

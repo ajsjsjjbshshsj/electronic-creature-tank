@@ -52,11 +52,6 @@ export function thresholds(p) {
     // bold 高 → 转身果断（rad/s）。胆小的迟疑，这本身就是身体语言。
     turnRate: 2 + bold * 4,
 
-    // ⚠️ 孤雌改造的中间态，Task A2 删除。
-    // 现在由 broody 驱动（原来的 libido 已不存在）。留着是因为 breeding.js / behavior.js
-    // 的求偶评分仍在读它 —— 现在删会让分数静默变 NaN，那笔提交看起来是绿的但已经坏了。
-    courtshipWillingness: 0.6 + broody * 0.8,
-
     // ---- 2026-10-20 新增六项（spec §4.9）----
     // 方向注释一律写"X 高 → 效果"，改数值时照注释检查方向；方向反了是本模块最难的 bug。
 

@@ -39,7 +39,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   assert.ok(visited.length >= 21, `只遍历到 ${visited.length} 个节点，少于已知的 21 个`);
   for (const path of [
     'CONFIG',
-    'CONFIG.behavior', 'CONFIG.courtship', 'CONFIG.particles',   // 抽查时代漏掉的三个
+    'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
     'CONFIG.emotions.eventMagnitude.poked',                       // 第三层
     'CONFIG.timeScales', 'CONFIG.hueRange', 'CONFIG.eggsPerClutch', // 数组节点
   ]) {
@@ -100,13 +100,20 @@ test('固定步长与累加上限', () => {
   assert.deepEqual([...CONFIG.timeScales], [0.5, 1, 2, 4]);
 });
 
-test('近亲回避阈值 0.25，求偶范围 0.22，拒绝好感惩罚 -0.15', () => {
-  assert.equal(CONFIG.kinshipMateMax, 0.25);
-  assert.equal(CONFIG.courtshipRange, 0.22);
-  assert.equal(CONFIG.rejectionAffection, -0.15);
-  assert.equal(CONFIG.courtship.min, 8);
-  assert.equal(CONFIG.courtship.max, 12);
+test('孤雌繁殖常量齐备（求偶三常量已随 spec §4.12 删除）', () => {
   assert.deepEqual([...CONFIG.eggsPerClutch], [1, 3]);
+  assert.equal(CONFIG.eggSize.min, 0.6);
+  assert.equal(CONFIG.eggSize.max, 1.4);
+  // 这条是裁定的钉子：控制方 2026-10-20 **不追认**蛋大小影响成年体型。
+  // 没有它，将来有人觉得"大蛋就该长成大的"顺手调成 0.3，全库不会有任何测试变红。
+  assert.equal(CONFIG.eggSize.bias, 0, 'EGG_SIZE_BIAS 必须是 0（裁定）');
+  assert.equal(CONFIG.drift.interval, 240, '漂入是孤雌下多样性的唯一补给阀门');
+  assert.equal(CONFIG.drift.form, 'egg');
+  // 反向确认：删掉的必须真的没了。留着"看起来还在其实没人读"的常量，
+  // 比删掉更糟 —— 调它不会有任何效果，而这正是"改了配置却没生效"那一类。
+  assert.equal(CONFIG.kinshipMateMax, undefined, '近亲闸门常量必须已删除');
+  assert.equal(CONFIG.courtship, undefined, '求偶时长区间必须已删除');
+  assert.equal(CONFIG.rejectionAffection, undefined, '拒绝好感惩罚必须已删除');
 });
 
 test('记忆容量 12，三条衰减率齐备', () => {
@@ -118,11 +125,15 @@ test('记忆容量 12，三条衰减率齐备', () => {
     '亲属的淡忘必须比普通关系慢，否则"近乎不忘"不成立');
 });
 
-test('情绪惯性与八个事件冲击都在', () => {
+test('情绪惯性与七个事件冲击都在（mated→laid，rejected 随求偶制删除）', () => {
   assert.equal(CONFIG.emotions.inertia, 1.6);
   const kinds = Object.keys(CONFIG.emotions.eventMagnitude).sort();
   assert.deepEqual(kinds,
-    ['bumped', 'death', 'fed', 'mated', 'petted', 'poked', 'rejected', 'startled']);
+    ['bumped', 'death', 'fed', 'laid', 'petted', 'poked', 'startled']);
+  // 'rejected' 曾经的生产者只有一处：求偶被拒。孤雌下那个场景不存在了，
+  // 所以整个事件种类删掉 —— 留一个永远不会被 applyEvent 到的种类，
+  // 就是 Task 9 复查抓过的"无生产者的字段"。
+  assert.ok(!('rejected' in CONFIG.emotions.eventMagnitude));
 });
 
 test('需求速率齐备，且休息是唯一的负值（恢复）', () => {

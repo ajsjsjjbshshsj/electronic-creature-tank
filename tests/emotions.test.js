@@ -297,7 +297,7 @@ test('applyEvent 可以让某分量下降（负冲击）', () => {
 test('所有 EVENT_KINDS 都在 CONFIG 中有定义且不会抛错', () => {
   assert.deepEqual(
     [...EVENT_KINDS].sort(),
-    ['bumped', 'death', 'fed', 'mated', 'petted', 'poked', 'rejected', 'startled'],
+    ['bumped', 'death', 'fed', 'laid', 'petted', 'poked', 'startled'],
   );
   const e = createEmotions();
   for (const kind of EVENT_KINDS) {
@@ -414,13 +414,12 @@ const MAGNITUDES = {
   petted:   { joy: 0.4, fear: -0.2 },
   fed:      { joy: 0.3 },
   bumped:   { anger: 0.35, fear: 0.1 },
-  rejected: { anger: 0.3, joy: -0.35 },
-  mated:    { joy: 0.6 },
+  laid:    { joy: 0.6 },
   startled: { fear: 0.6 },
   death:    { fear: 0.25, joy: -0.4 },
 };
 
-test('八种事件冲击的幅度与正负号被硬编码字面量逐一钉住', () => {
+test('七种事件冲击的幅度与正负号被硬编码字面量逐一钉住（mated→laid、rejected 随孤雌删除）', () => {
   // 为什么必须有这一条：spec 8.1 对本模块的要求是「事件冲击幅度正确」，
   // 而 brief 的既有用例只给了**下界**（startled 后 fear > 0.5）、**比例**
   // （scale = 0.5 时恰好一半）与**范围**（clamp 在 [0,1]）。把 startled 的
