@@ -4,7 +4,7 @@ import { CONFIG } from '../src/config.js';
 import { createRng } from '../src/rng.js';
 import { createCreature } from '../src/creature.js';
 import { PLAYER_ID, adjust } from '../src/memory.js';
-import { INTENTS, MIN_DURATION, decide, scoreAll } from '../src/behavior.js';
+import { INTENTS, MIN_DURATION, decide, scoreAll, begEscalation } from '../src/behavior.js';
 
 let uid = 0;
 const mk = (over = {}) => {
@@ -802,4 +802,123 @@ test('joy 低时 hop 不给分（不高兴就不蹦）', () => {
   c.thresholds.hopWeight = 1.6;
   c.emotions.joy = 0.2;
   assert.equal(scoreAll(c, emptySenses()).hop, 0);
+});
+
+// ---------------------------------------------------------------- 求关注升级链（spec §4.10，Task A4 尾）
+//
+// "最喜欢主人，想要主人的关注，会做一些自己认为可以吸引主人注意的事"落在这里。
+// 它**不是一个新意图**：beg / hop / protest 是同一个动机的三档强度。
+// 做成独立 attract 意图的话，beg 与 attract 会在效用评分里互相竞争，
+// 出现"它一边卖萌一边生气"的分裂表现。
+
+const ESC = CONFIG.behavior.begEscalate;
+const BU = CONFIG.behavior.begUrgency;
+
+// 手在**看得见但摸不到**的距离上：dist 大于 sim 的抚摸门（perceiveRadius×0.5 = 0.14），
+// 又小于感知门（perceiveRadius×1.5）。这一档就是"它冲你晃了晃手，但没真的碰你"。
+const nearHand = (over = {}) => emptySenses({
+  playerHand: { pos: { x: 0.65, y: 0.5 }, dist: 0.15, speed: 0.01 }, ...over,
+});
+
+// 一只高兴、不累、正在闹脾气的个体。joy / energy 显式设死，
+// 因为 hop 的门是 joy > 0.25 && energy < 0.7，而这两项默认值随机基因的干扰会盖过升级。
+const ignored = (begIgnored) => {
+  const c = mk({ begIgnored });
+  c.emotions.joy = 0.6;
+  c.needs.energy = 0.1;
+  // ⚠️ hopWeight 必须钉死：mk() 每次调用都重抽一份随机基因，
+  // 而 hop 的基分里有它 —— 不钉住的话"s1 − s0"测的是两只不同个体的差异，
+  // 不是升级加成。这是本项目第四次踩同一个坑（前三次都在算 std / 配对比较时）。
+  c.thresholds.hopWeight = 1.0;
+  return c;
+};
+
+test('升级到第一级给 hop 的加成 = begEscalate.hopBonus × begUrgency（公式与常数双重钉住）', () => {
+  // 基分写成**表达式**而不是字面量 0.81：1.0 × (0.3+0.6) × (1−0.1) 在二进制下是
+  // 0.8099999999999999，写 0.81 会不等（personality.test.js 那组为同样的尾巴改用 1e-12 容差；
+  // 这里不用容差，因为容差正是"藏错的地方"—— 改成与实现同序的表达式，断言就是精确的）。
+  const HOP_BASE = 1.0 * (0.3 + 0.6) * (1 - 0.1);
+  const base = scoreAll(ignored(0), nearHand()).hop;
+  assert.equal(base, HOP_BASE, '前置条件：基分只能由钉住的 hopWeight/joy/energy 决定');
+  const lvl1 = scoreAll(ignored(ESC.hopAfter), nearHand()).hop;
+  assert.equal(lvl1, base + ESC.hopBonus * BU, '升级 = 在基分上加上那个**乘**出来的加成');
+  assert.equal(ESC.hopBonus * BU, 1.75, '加成必须是 0.25 × 7.0（config.test.js 同步钉这四个数）');
+  assert.ok(lvl1 > base, '升级后 hop 的分必须真的变高');
+});
+
+test('第二级不再给 hop 加成（出口是替换不是叠加，否则它越被冷落越开心）', () => {
+  const lvl2 = scoreAll(ignored(ESC.protestAfter), nearHand());
+  assert.equal(lvl2.hop, 1.0 * (0.3 + 0.6) * (1 - 0.1), '到第二级 hop 该退回基分：它已经不打算讨关注了');
+  assert.ok(lvl2.protest > lvl2.hop, '第二级必须由 protest 赢过 hop');
+});
+
+test('INTENTS 恰好 13 项且含 hop（spec §4.10 的换血把这条算术写死了）', () => {
+  // 12 → 13 的推导：删 court（孤雌没有受者）、加 hop 与 brood。
+  // spec 早先写过"仍是 13 项"却只算了 −court +hop，漏了 +brood，是 298ddee 修掉的自己的算术错。
+  assert.equal(INTENTS.length, 13);
+  assert.equal(new Set(INTENTS).size, 13, '不得有重复项');
+  for (const kind of ['hop', 'brood']) assert.ok(INTENTS.includes(kind), `缺少 ${kind}`);
+  assert.ok(!INTENTS.includes('court'), 'court 应随孤雌制删除');
+});
+
+test('第二级才打开 protest 的保底分，而且必须手还在场', () => {
+  // 没人在场就不该"背过身生闷气"：那是一只对着空气闹脾气的生物，读起来是坏的。
+  assert.equal(scoreAll(ignored(ESC.hopAfter), nearHand()).protest, 0, '第一级还不是抗议');
+  assert.equal(scoreAll(ignored(ESC.protestAfter), nearHand()).protest, 1.75);
+  assert.equal(scoreAll(ignored(ESC.protestAfter), nearHand()).protest, ESC.protestFloor * BU);
+  assert.equal(
+    scoreAll(ignored(ESC.protestAfter), emptySenses()).protest, 0,
+    '手不在场时第二级不得给出抗议保底分',
+  );
+});
+
+test('升级判档的四个边界由 CONFIG 的秒数钉住（含两端）', () => {
+  const lvl = (s) => begEscalation(mk({ begIgnored: s })).level;
+  assert.equal(lvl(0), 0);
+  assert.equal(lvl(ESC.hopAfter - 1e-9), 0, '差一点点还不算升级');
+  assert.equal(lvl(ESC.hopAfter), 1, '恰好到点就算（>= 而非 >）');
+  assert.equal(lvl(ESC.protestAfter - 1e-9), 1);
+  assert.equal(lvl(ESC.protestAfter), 2);
+  assert.equal(lvl(1e6), 2, '再久也不会冒出第三档');
+});
+
+test('累了会休息压过闹脾气：energy ≥ 0.7 时升级加成打不开 hop 的门', () => {
+  // 探针敏感性：把 hop 的门控从 `(joy > .25 && energy < 0.7)` 改成
+  // 无条件加加成，这条立刻变红 —— 那才是真正在测的东西。
+  const c = ignored(ESC.protestAfter);
+  c.needs.energy = 0.9;                       // 只改这一项
+  assert.equal(scoreAll(c, nearHand()).hop, 0, '累到极点也不该蹦，哪怕它很想要关注');
+});
+
+test('begEscalation 的两个加成必须由 CONFIG 常数**相乘**得出（防硬编码）', () => {
+  // ⚠️ 这条是**探针逼出来的**：第一版只断言源码里出现 "begEscalate" 与 "begUrgency"
+  // 两个词，于是把 `E.hopBonus * U` 改成字面量 `1.75` 之后 386 条全绿 ——
+  // 因为函数头那两行 `const E = CONFIG.behavior.begEscalate` 自己就把关键词满足了。
+  // 关键词在不在源码里 ≠ 常数有没有被读。所以这里钉的是**乘法形状**本身。
+  const src = begEscalation.toString();
+  assert.match(src, /hopBonus\s*\*\s*U/, 'hop 加成必须是 hopBonus × begUrgency 的形状');
+  assert.match(src, /protestFloor\s*\*\s*U/, 'protest 保底必须是 protestFloor × begUrgency 的形状');
+  // 反向确认：这两个旋钮此刻确实等于 config.test.js 钉的那四个数（否则上两条正则
+  // 匹配的是一个"值已经错掉"的表达式）。
+  assert.equal(ESC.hopBonus * BU, 1.75);
+  assert.equal(ESC.protestFloor * BU, 1.75);
+});
+
+test('升级到第二级时 protest 会拿到目标点：背对手，而不是贴上去', () => {
+  const c = ignored(ESC.protestAfter);
+  const intent = decide(c, nearHand(), createRng(7));
+  assert.equal(intent.kind, 'protest', `应选抗议，实际 ${intent.kind}`);
+  assert.ok(intent.targetPos, '升级来的抗议必须带目标点，否则 executeIntent 立刻作废意图');
+  // 背对手 = 目标点在"远离手"的一侧：它在 0.5，手在 0.65，目标必须 ≤ 0.5
+  assert.ok(intent.targetPos.x < c.pos.x, `应往手的反方向去：${intent.targetPos.x} vs ${c.pos.x}`);
+});
+
+test('第一级的 hop 会把目标点设成手的位置，平时的 hop 没有目标点', () => {
+  const calm = decide(ignored(0), nearHand(), createRng(8));
+  const escalated = decide(ignored(ESC.hopAfter), nearHand(), createRng(9));
+  if (calm.kind === 'hop') {
+    assert.equal(calm.targetPos, undefined, '没升级时 hop 是原地蹦，不该追手');
+  }
+  assert.equal(escalated.kind, 'hop', `升级后应跳到手跟前，实际 ${escalated.kind}`);
+  assert.deepEqual(escalated.targetPos, { x: 0.65, y: 0.5 });
 });

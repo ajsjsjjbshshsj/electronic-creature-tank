@@ -125,15 +125,37 @@ test('记忆容量 12，三条衰减率齐备', () => {
     '亲属的淡忘必须比普通关系慢，否则"近乎不忘"不成立');
 });
 
-test('情绪惯性与七个事件冲击都在（mated→laid，rejected 随求偶制删除）', () => {
+test('情绪惯性与八个事件冲击都在（mated→laid，rejected 随求偶制删除，ignored 随升级链新增）', () => {
   assert.equal(CONFIG.emotions.inertia, 1.6);
   const kinds = Object.keys(CONFIG.emotions.eventMagnitude).sort();
   assert.deepEqual(kinds,
-    ['bumped', 'death', 'fed', 'laid', 'petted', 'poked', 'startled']);
+    ['bumped', 'death', 'fed', 'ignored', 'laid', 'petted', 'poked', 'startled']);
   // 'rejected' 曾经的生产者只有一处：求偶被拒。孤雌下那个场景不存在了，
   // 所以整个事件种类删掉 —— 留一个永远不会被 applyEvent 到的种类，
   // 就是 Task 9 复查抓过的"无生产者的字段"。
   assert.ok(!('rejected' in CONFIG.emotions.eventMagnitude));
+  // 'ignored' 的生产者恰好相反，它**有**：sim.tickCreature 在跨过第二级
+  // （begIgnored ≥ begEscalate.protestAfter）的那一刻发一次，由
+  // tests/sim.test.js 的"发一次 ignored 冲击，而且只发一次"钉住。
+  assert.ok('ignored' in CONFIG.emotions.eventMagnitude);
+});
+
+test('求关注升级链的两个秒数与两个加成都在，且第二级 = 第一级 + 5 秒', () => {
+  // 计划 A4 的陷阱条：升级链的强度必须从 begUrgency 推导，不能各写一个魔法数。
+  // 这里把四个旋钮钉成字面量，behavior.test.js 再把"加成 = hopBonus × begUrgency"钉住 ——
+  // 于是调 begUrgency 会让**两处同时变红**，两个常数就没法悄悄分家。
+  const e = CONFIG.behavior.begEscalate;
+  assert.equal(e.hopAfter, 3, 'spec §4.10：beg 了 3 秒没被理睬 → 升一级');
+  assert.equal(e.protestAfter, 8, 'spec §4.10：再 5 秒仍没被理睬 → 再升一级（3 + 5 = 8）');
+  assert.equal(e.protestAfter - e.hopAfter, 5, '两级之间必须正好是"再 5 秒"');
+  assert.equal(e.hopBonus, 0.25);
+  assert.equal(e.protestFloor, 0.25);
+  // 加成写成 7.0 的分数，两端取值必须是二进制精确的 —— 否则测试里的字面量断言
+  // 会像 personality 那组一样带上浮点尾巴（0.3 × 7 = 2.1000000000000005）。
+  assert.equal(e.hopBonus * CONFIG.behavior.begUrgency, 1.75);
+  assert.equal(e.protestFloor * CONFIG.behavior.begUrgency, 1.75);
+  assert.ok(CONFIG.emotions.eventMagnitude.ignored, '第二级要有情绪冲击才读得出来');
+  assert.deepEqual(CONFIG.emotions.eventMagnitude.ignored, { anger: 0.25, joy: -0.2 });
 });
 
 test('需求速率齐备，且休息是唯一的负值（恢复）', () => {

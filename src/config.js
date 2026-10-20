@@ -130,6 +130,9 @@ const CONFIG = {
           laid:     { joy: 0.6 },   // 2026-10-20：原 mated（求偶成功）随孤雌制改名
       startled: { fear: 0.6 },
       death:    { fear: 0.25, joy: -0.4 },   // 目击同族死亡 → 触发哀悼
+      // 求关注升级到第二级那一刻的冲击（spec §4.10）。
+      // 生产者恰好一处：sim.tickCreature 跨过 begEscalate.protestAfter 时发一次。
+      ignored:  { anger: 0.25, joy: -0.2 },
     },
   },
 
@@ -165,6 +168,19 @@ const CONFIG = {
     // 所以"手一直停着也能一直卖萌"这件事要等有真实输入后再调 ——
     // 合理的下一步是让 beg 的分数随手的**移动**上升，而不是仅凭"手在附近"。
     begUrgency: 7.0,
+    // 求关注升级链（spec §4.10）：**不是新意图**，是 beg 这一个动机的三档强度。
+    // 做成独立 attract 意图的话，beg 与 attract 会在效用评分里互相竞争，
+    // 出现"它一边卖萌一边生气"的分裂表现。
+    // 两个加成一律写成 **begUrgency 的分数**：调 begUrgency 时整条升级链跟着走，
+    // 不会留下两个各自漂移的常数（计划 A4 的陷阱条）。
+    // 取 0.25 / 0.25 而不是 0.3 / 0.3，还有一层实际理由：0.25 × 7 = 1.75 是二进制精确的，
+    // 0.3 × 7 = 2.1000000000000005 会让测试里的字面量断言带上浮点尾巴。
+    begEscalate: {
+      hopAfter: 3,          // 秒：被冷落这么久 → 第一级（蹦到手的正前方、尾巴幅度拉满、出词）
+      protestAfter: 8,      // 秒：第一级之后**再 5 秒** → 第二级（生气、背过身、不理你）
+      hopBonus: 0.25,       // × begUrgency ⇒ 1.75，第一级给 hop 的加成
+      protestFloor: 0.25,   // × begUrgency ⇒ 1.75，第二级给 protest 的保底分（此时没有 provoker）
+    },
     broodUrgency: 1.5,           // 自产卵候选的放大（孤雌，spec §4.10）
     fightUrgency: 1.1,
     fleeUrgency: 2.2,          // 逃避优先于一切，靠高权重而非硬门控实现

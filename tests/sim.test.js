@@ -4,9 +4,10 @@ import { CONFIG } from '../src/config.js';
 import { createRng } from '../src/rng.js';
 import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '../src/memory.js';
 import { createCreature } from '../src/creature.js';
-import { ALL_GENES } from '../src/genes.js';
+import { ALL_GENES, randomGenome } from '../src/genes.js';
 import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION } from '../src/behavior.js';
+import { thresholds } from '../src/personality.js';
 import {
   createWorld, tickWorld, perceive, addCreature, spawnFood, aliveCreatures, worldStats,
 } from '../src/sim.js';
@@ -1198,4 +1199,155 @@ test('漂入完全确定：同种子两次跑出同样的时刻、数量与基�
   };
   const a = once(), b = once();
   assert.deepEqual(a, b, '漂入必须走 world.rng，否则同种子不可复现');
+});
+
+// ---------------------------------------------------------------- 求关注升级链（spec §4.10，Task A4 尾）
+//
+// 计时器是 `c.begIgnored`（秒）。它**只在手在场且不回应时**累加：
+// 没人在场还越攒越气，读起来是"这只对着空气闹脾气"，是坏的表现。
+// "被理睬"的判定与熟悉度通道**共用同一个谓词**（sim.isPetting）——
+// 两处各自写一遍迟早漂移，所以只允许一个定义点。
+
+const ESC = CONFIG.behavior.begEscalate;
+
+// 一只缸里只有它自己、手一直晃在"看得见但摸不到"的距离上的个体。
+// 手跟着它挪，所以 dist 恒为 0.15：抚摸门是 perceiveRadius × 0.5 = 0.14，
+// 若让它偶尔飘近一点，"被冷落"就变成随机事件，测试会不稳。
+const ignoredTank = (seed) => {
+  const w = createWorld({ seed, initialCreatures: 0 });
+  w.foods.length = 0;                       // 别让觅食/进食的 joy 冲击掺进来
+  const c = createCreature({ id: 'lonely', name: 'L', x: 0.5, y: 0.5, age: 600, rng: createRng(seed) });
+  addCreature(w, c);
+  w.playerHand = { pos: { x: 0.65, y: 0.5 }, speed: 0.01 };
+  return { w, c };
+};
+const hover = (w, c) => { w.playerHand.pos.x = c.pos.x + 0.15; w.playerHand.pos.y = c.pos.y; };
+
+test('手不在场时 begIgnored 不累加（没人在场不该生闷气）', () => {
+  const { w, c } = ignoredTank(60);
+  w.playerHand = null;
+  step(w, 20);
+  assert.equal(c.begIgnored, 0, '没有玩家在场，升级计时必须停在 0');
+});
+
+test('被冷落满 8 秒会发一次 ignored 冲击，而且只发一次', () => {
+  const { w, c } = ignoredTank(61);
+  let crossings = 0;
+  let jump = 0;
+  let prevIgnored = c.begIgnored;
+  let prevAnger = c.emotions.anger;
+  for (let i = 0; i < Math.round(14 * 60); i++) {
+    hover(w, c);
+    tickWorld(w, 1 / 60);
+    if (prevIgnored < ESC.protestAfter && c.begIgnored >= ESC.protestAfter) {
+      crossings += 1;
+      jump = c.emotions.anger - prevAnger;
+    }
+    prevIgnored = c.begIgnored;
+    prevAnger = c.emotions.anger;
+  }
+  assert.equal(crossings, 1, '跨过第二级这个时刻只应发生一次（不是每 tick 都炸一次）');
+  assert.ok(jump > 0.15, `ignored 事件必须让 anger 当场跳起来，实测 ${jump.toFixed(4)}`);
+  assert.ok(c.begIgnored >= ESC.protestAfter, `前置条件：计时应已越过 ${ESC.protestAfter}`);
+});
+
+test('被抚摸后升级计数归零（spec §4.10 的"被理睬"出口）', () => {
+  const { w, c } = ignoredTank(62);
+  // 用 hover 而不是 step：手必须始终停在"看得见摸不到"的那 0.15 上。
+  // 若放手让它自己飘，dist 会随机穿过 0.14 的抚摸门或 0.42 的感知门，
+  // 于是这条测试测的是随机游走而不是归零。
+  for (let i = 0; i < Math.round(6 * 60); i++) { hover(w, c); tickWorld(w, 1 / 60); }
+  assert.ok(c.begIgnored > 3, `前置条件：应先已升到第一级，实测 ${c.begIgnored.toFixed(2)}`);
+  for (let i = 0; i < 60; i++) {
+    w.playerHand.pos.x = c.pos.x;          // 手凑过去，速度仍然温柔 ⇒ 命中 isPetting
+    w.playerHand.pos.y = c.pos.y;
+    tickWorld(w, 1 / 60);
+  }
+  assert.equal(c.begIgnored, 0, '被理睬之后不该继续记着这笔冷落账');
+});
+
+test('升级到第一级后 hop 会带目标点跳向手，升级前的 hop 没有目标点', () => {
+  const { w, c } = ignoredTank(63);
+  let before = 0;
+  let after = 0;
+  for (let i = 0; i < Math.round(12 * 60); i++) {
+    hover(w, c);
+    tickWorld(w, 1 / 60);
+    const it = c.intent;
+    if (it && it.kind === 'hop' && it.targetPos) {
+      if (i / 60 < ESC.hopAfter) before += 1; else after += 1;
+    }
+  }
+  assert.equal(before, 0, '升级前的 hop 是原地蹦，不该追手');
+  assert.ok(after > 0, '升级到第一级后应出现"跳到手跟前"的 hop');
+});
+
+test('一次 hop 只扣一次精力（intent.costed 是承重的）', () => {
+  const w = createWorld({ seed: 64, initialCreatures: 0 });
+  w.foods.length = 0;
+  const c = createCreature({ id: 'h', name: 'H', x: 0.5, y: 0.5, age: 600, rng: createRng(64) });
+  addCreature(w, c);
+  c.needs.energy = 0.1;
+  // 直接把意图钉成一次长 hop，绕开决策 —— 这样"扣费时机"是唯一变量
+  c.intent = { kind: 'hop', minDuration: 999 };
+  const e0 = c.needs.energy;
+  tickWorld(w, 1 / 60);
+  const e1 = c.needs.energy;
+  tickWorld(w, 1 / 60);
+  const e2 = c.needs.energy;
+  assert.ok(e1 - e0 >= CONFIG.hop.energyCost, `第一 tick 应扣到精力：${(e1 - e0).toFixed(6)}`);
+  assert.ok(e2 - e1 < 1e-4, `同一意图的第二 tick 不该再扣：${(e2 - e1).toFixed(6)}`);
+});
+
+test('好动的个体累计 hop 次数更多（"消耗量随 activity 上升"是累计意义上的）', () => {
+  // ⚠️ 单次 hop 的扣费是常量（CONFIG.hop.energyCost），不随 activity 变。
+  // 所以这条测的是**累计**：好动的跳得频繁，自己先把精力耗光，然后必须歇。
+  // 两只只改 activity，其余基因共用同一份 —— 否则测的是随机基因（上一轮踩过两次）。
+  const genes = randomGenome(createRng(65));
+  const run = (activity) => {
+    const w = createWorld({ seed: 66, initialCreatures: 0 });
+    w.foods.length = 0;
+    w.playerHand = null;
+    const c = createCreature({
+      id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, genes: JSON.parse(JSON.stringify(genes)),
+    });
+    c.traits.personality.activity = activity;
+    c.thresholds = thresholds(c.traits.personality);
+    addCreature(w, c);
+    let hops = 0;
+    let prev = null;
+    for (let i = 0; i < Math.round(120 * 60); i++) {
+      tickWorld(w, 1 / 60);
+      const k = c.intent ? c.intent.kind : null;
+      if (k === 'hop' && prev !== 'hop') hops += 1;
+      prev = k;
+    }
+    return hops;
+  };
+  const lively = run(1);
+  const quiet = run(0);
+  assert.ok(lively > quiet, `好动者应跳得更多：${quiet} vs ${lively}`);
+  assert.ok(lively > 0, '前置条件：好动者确实跳过，否则上面只是不等式空转');
+});
+
+test('同一颗种子下升级链整条可复现（计时、档位与意图序列）', () => {
+  const play = () => {
+    const { w, c } = ignoredTank(67);
+    const seq = [];
+    let maxAnger = 0;
+    for (let i = 0; i < Math.round(15 * 60); i++) {
+      hover(w, c);
+      tickWorld(w, 1 / 60);
+      maxAnger = Math.max(maxAnger, c.emotions.anger);
+      seq.push(`${c.intent ? c.intent.kind : '-'}:${c.begIgnored.toFixed(3)}`);
+    }
+    return { seq, maxAnger, protested: seq.some((s) => s.startsWith('protest:')) };
+  };
+  const a = play();
+  const b = play();
+  assert.deepEqual(a.seq, b.seq, '同种子下意图与计时必须逐步相同');
+  // 读的是**过程中的峰值**而不是末值：ignored 的冲击之后 anger 按惯性平复回去，
+  // 到 15 秒末早就归零了 —— 拿末值断言等于测空气。
+  assert.ok(a.protested, '前置条件：这条链真的走到了第二级（出现过 protest）');
+  assert.ok(a.maxAnger > 0.2, `protest 阶段应出现过怒气，峰值 ${a.maxAnger.toFixed(3)}`);
 });
