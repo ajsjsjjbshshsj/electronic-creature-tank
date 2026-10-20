@@ -4,6 +4,7 @@ import { CONFIG } from '../src/config.js';
 import { createRng } from '../src/rng.js';
 import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '../src/memory.js';
 import { createCreature } from '../src/creature.js';
+import { ALL_GENES } from '../src/genes.js';
 import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION } from '../src/behavior.js';
 import {
@@ -1097,4 +1098,94 @@ test('一次 brood 意图只产一窝（一次性标记不得失效）', () => {
   assert.ok(w.eggs.length >= 1, '前置条件：这一窝里必须真的产了卵');
   assert.ok(w.eggs.length <= CONFIG.eggsPerClutch[1],
     `一次意图最多产一窝（${CONFIG.eggsPerClutch[1]} 枚），实际 ${w.eggs.length} 枚 ⇒ 一次性标记失效`);
+});
+
+// ==================== 2026-10-20 Task A3：外来血统漂入 ====================
+//
+// ⚠️ 这一组只钉**机制契约**，不钉"漂入维持了多样性"。
+// 后者需要一条正反两向的判据，而基线实测（.superpowers/sdd/tmp/diag-drift.mjs）
+// 给出了两个否掉现有设计的结果，见下面 test('满员时漂入被挡…') 的注释。
+// 判据等策略定了再补 —— 拿一条测不出东西的指标冒充验收，是本项目反复抓的那类事。
+
+const founders = (w, n, seed, age = 400) => {
+  const r = createRng(seed);
+  for (let i = 0; i < n; i++) {
+    const genes = {};
+    for (const g of ALL_GENES) genes[g] = [r.next(), r.next()];
+    addCreature(w, createCreature({
+      id: `f${i}`, name: `F${i}`, x: 0.3 + i * 0.04, y: 0.5, age, genes, rng: r,
+    }));
+  }
+};
+
+test('漂入按 driftInterval 到点发生（有位置时）', () => {
+  const w = createWorld({ seed: 5, initialCreatures: 0, populationCap: 24, driftInterval: 240 });
+  step(w, 300);
+  assert.equal(w.stats.driftIns, 1, '300 秒应漂入一次');
+  const e = w.eggs.find((x) => x.drift);
+  assert.ok(e, '漂入物必须带 drift 标记');
+  assert.equal(e.motherId, null, '漂入的蛋没有母亲 —— 这是家谱上"外来支系"的唯一线索');
+  assert.equal(e.fatherId, null);
+  assert.ok(e.viable, '漂入的蛋必须可孵化，否则它进来做什么');
+});
+
+test('漂入携带的等位基因与缸内任何个体都不相同（真的补进新血统）', () => {
+  // driftInterval 取 30 而不是 240：createWorld 会把缸填到 initialCreatures（传 0 时
+  // 落到 CONFIG.initialCreatures=8），创始代一成年就开始产卵，240 秒时缸已经满了 ——
+  // 满员会挡掉漂入，这条就变成在测上一条策略而不是"补进新血统"。取 30 秒抢在满员之前。
+  const w = createWorld({ seed: 7, initialCreatures: 0, populationCap: 24, driftInterval: 30 });
+  founders(w, 4, 11);
+  step(w, 40);
+  const e = w.eggs.find((x) => x.drift);
+  assert.ok(e, '前置条件：必须已经漂入一枚');
+  const local = new Set();
+  for (const c of w.creatures) for (const g of ALL_GENES) for (const a of c.genes[g]) local.add(Math.round(a * 1e6));
+  const fresh = e.genes.hue.map((a) => Math.round(a * 1e6)).filter((a) => !local.has(a));
+  assert.equal(fresh.length, 2, '漂入蛋的 hue 两个等位都应是缸里没见过的新等位');
+});
+
+test('满员时漂入挤出一格：最老的老年个体漂走，种群不超上限', () => {
+  // 控制方裁定 C（2026-10-20）。原来这条测的是"满员就跳过"，而实测那是空操作 ——
+  // 缸一旦跑起来就长期钉在上限，40 个漂入窗口全部落空，开与关的模拟逐字节相同。
+  //
+  // 用 age=1000 造老年（elder 区间 960–1140）。**不能手改 stage**：
+  // ageCreature 每 tick 都按年龄重算它，改完活不过第一帧（实测踩过）。
+  const w = createWorld({ seed: 9, initialCreatures: 0, populationCap: 3, driftInterval: 60 });
+  founders(w, 3, 13, 1000);
+  // 三只必须**不同龄**：founders() 给的是同一个 age，那样"最老的那只"无从判定，
+  // reduce 会退化成"取第一个"而测试照样绿 —— 写这条测试时差点就漏在这里。
+  w.creatures.forEach((c, k) => { c.age = 990 + k * 20; });
+  assert.ok(w.creatures.every((c) => c.stage === 'elder'), '前置条件：三只都必须是老年');
+  const oldest = w.creatures.reduce((x, y) => (y.age > x.age ? y : x));
+  step(w, 100);
+  assert.equal(w.stats.driftIns, 1, '满员但有老年个体时，漂入必须真的进得来');
+  assert.equal(w.stats.emigrations, 1, '应当有一只老年个体漂走');
+  assert.ok(!w.creatures.some((c) => c.id === oldest.id), '被移走的应是最老的那只');
+  assert.ok(aliveCreatures(w).length <= 3, `不得超过上限，实际 ${aliveCreatures(w).length}`);
+  // 漂走不是死亡：不记 deaths、不发 death 事件（spec §4.11 的哀悼挂在"死亡"上）
+  assert.equal(w.stats.deaths, 0, 'emigrate 不得计入 deaths');
+  assert.ok(w.events.some((e) => e.kind === 'emigrate'), '应发出 emigrate 事件供表现层消费');
+  assert.ok(!w.events.some((e) => e.kind === 'death'), '不得发出 death 事件');
+});
+
+test('满员且缸里没有老年个体时，这一轮放弃（不降低标准去搬成体）', () => {
+  // age=700 → 成体（480–960）：满员、但没有可腾位的老年个体。
+  // 只跑 100 秒 —— 再久它们就老死、位置自然腾出来，那就不是在测本条了。
+  const w = createWorld({ seed: 15, initialCreatures: 0, populationCap: 3, driftInterval: 60 });
+  founders(w, 3, 17, 700);
+  assert.ok(w.creatures.every((c) => c.stage === 'adult'), '前置条件：三只都必须是成体而非老年');
+  step(w, 100);
+  assert.equal(w.stats.driftIns, 0, '没有可腾位的老年个体时不得强塞进来');
+  assert.equal(w.stats.emigrations, 0);
+  assert.ok(w.nextDriftAt > 100, '被挡掉的窗口必须已把时钟推过去（否则每帧重查）');
+});
+
+test('漂入完全确定：同种子两次跑出同样的时刻、数量与基因', () => {
+  const once = () => {
+    const w = createWorld({ seed: 21, initialCreatures: 0, populationCap: 24, driftInterval: 240 });
+    step(w, 1500);
+    return { n: w.stats.driftIns, genes: w.eggs.filter((e) => e.drift).map((e) => JSON.stringify(e.genes.hue)) };
+  };
+  const a = once(), b = once();
+  assert.deepEqual(a, b, '漂入必须走 world.rng，否则同种子不可复现');
 });

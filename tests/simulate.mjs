@@ -86,6 +86,7 @@
 //   · **每步清空 world.events**：内核只写不读，无头运行没有表现层来取走它。
 
 import { CONFIG } from '../src/config.js';
+import { phenotype } from '../src/genes.js';
 import { createWorld, tickWorld, aliveCreatures, worldStats } from '../src/sim.js';
 // adjust 只在"玩家羁绊观察"里用一次，用途写在那一节（内核买不到好感时才用得上）。
 import { adjust, affectionFor, familiarityFor, PLAYER_ID } from '../src/memory.js';
@@ -498,6 +499,28 @@ if (survivorLines.length) {
 }
 
 // ---- 自动断言：这个脚本本身就是验收，不合格要以非零码退出 ----
+// ---- 多样性判据（2026-10-20，Task A3）----
+// 用**表型色相的组内标准差**，不用"两等位是否不同"的杂合度：后者在
+// MUTATION_RATE=0.06 的连续扰动下 6 代仍停在 0.97（理论应约 0.004），
+// 测的是变异噪声而不是血统多样性 —— 基线实测见 .superpowers/sdd/tmp/diag-drift.mjs。
+// 这里只设一条"别变成一个颜色"的下限；**正反两向的 A/B 判据放在那个脚本里**，
+// 因为 60 分钟只跑到约第 3 代，而开/关漂入的差异要到第 4 代之后才拉开
+// （实测第 4 代 开 0.2301 vs 关 0.0869；第 3 代两者还都在 0.2 上下）。
+const endAlive = aliveCreatures(world);
+// ⚠️ 必须在 [0,1] 的**表现型空间**里算，不能在 traits.hue 的度数上算。
+// 第一版就是那么写的，输出 167°——因为粉色区间跨 0°（315°→385°=25°），
+// 359° 与 5° 实际只差 6°，被当成差 354°，标准差整个是假的。
+// 这正是 spec §4.1 "在基因空间插值才永远正确"那条警告的具体形态，我自己踩了一遍。
+const hueStd = (() => {
+  const v = endAlive.map((c) => phenotype('hue', c.genes.hue));
+  if (v.length < 2) return 0;
+  const m = v.reduce((a, b) => a + b, 0) / v.length;
+  return Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / v.length);
+})();
+console.log(`  色相组内标准差 ${hueStd.toFixed(4)}（表现型空间，0–1 满量程；< 0.03 视为缸已趋同）`);
+console.log(`  漂入 ${world.stats.driftIns} 次 / 老年个体漂走 ${world.stats.emigrations} 次`);
+if (hueStd < 0.03) failures.push(`多样性塌了：色相组内标准差只有 ${hueStd.toFixed(4)}`);
+
 const failures = [];
 
 // ⚠️ 2026-10-14 控制方裁定：**灭绝不再是验收失败，它是一个合法结局。**

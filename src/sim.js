@@ -29,7 +29,7 @@
 //    抛 TypeError，而不是让它经原型链解析成一个 truthy 的函数、最后变成 NaN 需求。
 import { CONFIG } from './config.js';
 import { createRng } from './rng.js';
-import { randomGenome } from './genes.js';
+import { randomGenome, phenotype, eggTintBucket } from './genes.js';
 import { decay as decayNeeds, feed as feedNeeds, comfort } from './needs.js';
 import { computeTargets, update as updateEmotions, applyEvent } from './emotions.js';
 import {
@@ -109,7 +109,14 @@ export function createWorld(opts) {
     foods: [],
     grid: new Map(),
     playerHand: null,      // { pos, speed } | null —— 由计划 2 的 input 层写入
-    stats: { births: 0, deaths: 0, hatchFailures: 0, generation: 1 },
+    // 外来血统漂入（spec §4.12）。nextDriftAt 是**下一次漂入的模拟时刻**，
+    // 不是倒计时 —— 它进存档（spec §7.2），读档后不会重置节奏。
+    // driftInterval 可以被 opts 覆盖成 Infinity 来关掉，多样性判据的正反两向
+    // 就靠这个开关做 A/B（见 tests/sim.test.js 的漂入组）。
+    nextDriftAt: opts.driftInterval ?? CONFIG.drift.interval,
+    driftInterval: opts.driftInterval ?? CONFIG.drift.interval,
+    driftCount: 0,
+    stats: { births: 0, deaths: 0, hatchFailures: 0, generation: 1, driftIns: 0, emigrations: 0 },
     events: [],
     nameFor: opts.nameFor || defaultNameFor,
   };
@@ -631,6 +638,81 @@ function reapDead(world, dt) {
 
 // ---------------------------------------------------------------- 卵
 
+// ---------------------------------------------------------------- 外来血统漂入
+
+// 孤雌是**自体合并**，杂合度按 (1/2)^t 衰减；漂入是多样性的唯一外部补给。
+// 没有它，缸不会灭绝（闸门已经删了），但会**单调**：颜色趋同、花纹分化消失、
+// 隔代惊喜枯竭（spec §9.2 第 3 条）。判据与实测在 tests/sim.test.js 的漂入组。
+//
+// 漂入物是**一枚来历不明的蛋**，不是成年访客（控制方裁定 §13.2 第 5 条）：
+// 直接漂入一只亚成体会在家谱里凭空造出一个没有母亲的成年个体，
+// 而蛋天然带"来历不明"的叙事，且要孵化才入场 —— 玩家看得见它来。
+function maybeDrift(world) {
+  if (!(world.time >= world.nextDriftAt)) return;
+  // 截止点先推进再决定进不进：满员时这一格可能腾不出来，但绝不能让它
+  // 下一 tick 又立刻到期而每帧重查。
+  world.nextDriftAt += world.driftInterval;
+  if (aliveCreatures(world).length >= world.populationCap) {
+    // 控制方裁定 C（2026-10-20）：满员时不放弃，而是让**最老的老年个体**顺水流漂走，
+    // 给新血统腾出这一格。实测依据：缸一旦跑起来就长期钉在上限（24/24、cap=12 时 12/12），
+    // 原来的"满员就跳过"让 40 个漂入窗口全部落空、开与关的模拟逐字节相同 —— 那等于没有漂入。
+    //
+    // 为什么必须是老年：① spec §4.11 里它本来就不再繁殖，移走它对种群产量影响最小；
+    // ② "挤走一只幼体/成体"读起来是掠食或杀婴，不是"水流带来一位新客人"。
+    // 找不到老年个体就**这一轮放弃** —— 宁可不进，也不悄悄降低标准去搬一只成体。
+    const elder = pickEmigrant(world);
+    if (!elder) return;
+    emigrate(world, elder);
+  }
+
+  const genes = randomGenome(world.rng);
+  const { min, max } = CONFIG.eggSize;
+  world.driftCount += 1;
+  world.eggs.push({
+    id: `e-drift-${world.driftCount}`,
+    genes,
+    age: 0,
+    pos: {
+      x: clampPos(world.rng.range(0.08, 0.92)),
+      y: clampPos(world.rng.range(0.78, 0.97)),
+    },
+    // motherId 为 null 是**特征不是缺陷**：家谱图上这一支就是悬空的起点，
+    // 玩家一眼能看出"这支是外来的"（spec §6.3 家谱那条）。
+    motherId: null,
+    fatherId: null,
+    eggSize: (min + max) / 2,
+    eggTint: eggTintBucket(phenotype('eggTint', genes.eggTint)),
+    viable: true,
+    drift: true,
+  });
+  world.stats.driftIns += 1;
+  world.events.push({ kind: 'drift', id: `e-drift-${world.driftCount}` });
+}
+
+/* 漂入需要 randomGenome / phenotype / eggTintBucket，见文件头 import */
+
+// 满员腾位时挑的是"最老的那只老年个体"，而不是"第一个 elder"：
+// 后者会让种群列表头部的某一只反复被选中（列表顺序由加入顺序决定，与年龄无关）。
+function pickEmigrant(world) {
+  let best = null;
+  for (const c of aliveCreatures(world)) {
+    if (c.stage !== 'elder' || c.sick) continue;
+    if (!best || c.age > best.age) best = c;
+  }
+  return best;
+}
+
+// 漂走 ≠ 死亡：不记 stats.deaths、不发 death 事件、不触发周围个体的哀悼
+// （spec §4.11 的哀悼明确挂在"死亡"上）。dying 直接给到溶解时长，
+// 所以本 tick 末尾的 reapDead 就把它收走，下一 tick 的死亡闸门也不会补跑 onDeath。
+function emigrate(world, c) {
+  c.alive = false;
+  c.emigrated = true;
+  c.dying = CONFIG.dissolveDuration;
+  world.stats.emigrations += 1;
+  world.events.push({ kind: 'emigrate', id: c.id, age: c.age });
+}
+
 function tickEggs(world, dt) {
   for (let i = world.eggs.length - 1; i >= 0; i--) {
     const egg = world.eggs[i];
@@ -856,6 +938,7 @@ export function tickWorld(world, dt) {
     }
   }
 
+  maybeDrift(world);
   tickEggs(world, dt);
   resolve(world, dt);
   reapDead(world, dt);
