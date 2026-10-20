@@ -1,23 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRng } from '../src/rng.js';
+import { CONFIG } from '../src/config.js';
 import {
   ALL_GENES, APPEARANCE_GENES, PERSONALITY_GENES, PATTERNS,
   phenotype, phenotypeAll, randomGenome, gamete, combine, inherit,
-  patternBucket, decode,
+  patternBucket, eggTintBucket, decode,
 } from '../src/genes.js';
 
 test('基因清单完整且无重复', () => {
   assert.equal(ALL_GENES.length, APPEARANCE_GENES.length + PERSONALITY_GENES.length);
   assert.equal(new Set(ALL_GENES).size, ALL_GENES.length);
-  assert.equal(APPEARANCE_GENES.length, 8);
-  assert.equal(PERSONALITY_GENES.length, 6);
+  // 2026-10-20 孤雌与毛绒改造：外观 8 → 10（加 fluff、eggTint），
+  // 性格 6 → 9（libido 改名 broody，再加 activity、talk、intellect）。
+  assert.equal(APPEARANCE_GENES.length, 10);
+  assert.equal(PERSONALITY_GENES.length, 9);
+  assert.equal(ALL_GENES.length, 19);
 });
 
 test('四个导出基因数组都被冻结（就地修改必须抛错，不得静默成功）', () => {
   // 这些数组会被 creature / breeding / sim 导入共享。冻结前实测：
   //   PATTERNS.reverse()          静默成功 → 变成 stars,clouds,rings,spots,none
-  //   ALL_GENES.push('affection') 静默成功 → 长度 14 变 15
+  //   ALL_GENES.push('affection') 静默成功 → 长度 19 变 20
   // 两者都不报错，而后果是全局的：patternBucket(v) 按索引 0..4 映射花纹名，
   // 重排 PATTERNS 会让所有生物的花纹错位；给 ALL_GENES 加一个不存在的基因名
   // 会让 randomGenome / inherit 遍历到它并产出 undefined 等位基因。
@@ -325,4 +329,83 @@ test('decode 的 pattern 一定是 PATTERNS 之一', () => {
 test('phenotypeAll 覆盖全部基因', () => {
   const p = phenotypeAll(randomGenome(createRng(10)));
   assert.deepEqual(Object.keys(p).sort(), [...ALL_GENES].sort());
+});
+
+// ---------------- 2026-10-20 新增位点（fluff / eggTint）与孤雌遗传 ----------------
+
+test('fluff 解码是透传：单位换算留给表现层', () => {
+  const genes = { ...randomGenome(createRng(77)), fluff: [0.3, 0.7] };
+  const d = decode(genes);
+  // dom = 0.5 ⇒ 表现型就是两等位的均值；透传意味着 decode 不做任何区间映射
+  assert.ok(Math.abs(d.fluff - 0.5) < 1e-12, `透传失败，得到 ${d.fluff}`);
+  assert.equal(decode({ ...genes, fluff: [0, 0] }).fluff, 0);
+  assert.equal(decode({ ...genes, fluff: [1, 1] }).fluff, 1);
+});
+
+test('eggTint 按累积边界分段，边界两侧取到相邻两色', () => {
+  // 0.145 是第 1、2 色的分界；0.975 是白与黑（黑蛋稀有度）的分界。
+  // 这两个点必须**各测两侧**，否则把边界挪 0.01 不会有任何症状，
+  // 而黑蛋稀有度恰好就是这条边界给的（spec §11）。
+  assert.equal(eggTintBucket(0.10), 'macaron-pink');
+  assert.equal(eggTintBucket(0.15), 'macaron-blue');
+  assert.equal(eggTintBucket(0.97), 'white');
+  assert.equal(eggTintBucket(0.975), 'black');
+  assert.equal(eggTintBucket(0.98), 'black');
+});
+
+test('eggTint 在 x 恰好为 1 时仍返回最后一色（循环走完的兜底路径）', () => {
+  // 末项边界是 1.0，而 `x < edges[i]` 在 x === 1.0 时全不成立。
+  // 少了兜底那行，表型恰为 1 的个体拿到 undefined，症状是"存档里偶尔出现 null 蛋色"。
+  assert.equal(eggTintBucket(1), 'black');
+  assert.equal(eggTintBucket(2), 'black');   // clamp01 之后同样是 1
+});
+
+test('CONFIG.eggTint 的 edges 严格递增、末项恰为 1.0、与 colors 等长', () => {
+  const { colors, edges } = CONFIG.eggTint;
+  assert.equal(colors.length, edges.length, '长度不等会让 eggTintBucket 抛错');
+  for (let i = 0; i < edges.length; i += 1) {
+    if (i > 0) assert.ok(edges[i] > edges[i - 1], `edges 第 ${i} 项未递增`);
+  }
+  assert.equal(edges[edges.length - 1], 1.0, '末项必须是 1.0，否则有表型取不到色');
+  assert.equal(new Set(colors).size, colors.length, '色名不得重复');
+});
+
+test('DOMINANCE 覆盖全部 19 个位点（漏一个就会在 phenotype 抛"未知基因"）', () => {
+  // 新增位点时最容易漏的就是这张表：漏了不会在 import 时报错，
+  // 只会在第一次 decode 时抛 —— 而那时已经是在跑模拟了。
+  const g = randomGenome(createRng(5));
+  for (const name of ALL_GENES) {
+    const v = phenotype(name, g[name]);
+    assert.ok(Number.isFinite(v) && v >= 0 && v <= 1, `${name} 解码越界: ${v}`);
+  }
+});
+
+test('inherit 覆盖全部 19 个位点，每个都是 [0,1] 二元数组', () => {
+  const mother = randomGenome(createRng(11));
+  // 孤雌：两个实参是同一个对象。这里仍按双实参调用，因为 inherit 本身没改。
+  const child = inherit(createRng(12), mother, mother);
+  assert.deepEqual(Object.keys(child).sort(), [...ALL_GENES].sort());
+  for (const name of ALL_GENES) {
+    assert.equal(child[name].length, 2, `${name} 应为二元等位`);
+    for (const a of child[name]) {
+      assert.ok(Number.isFinite(a) && a >= 0 && a <= 1, `${name} 等位越界: ${a}`);
+    }
+  }
+});
+
+test('六个新位点的 dom 都是 0.5：交换等位顺序必须得到同一结果', () => {
+  // 变异探针实测：把 DOMINANCE 里 eggTint 从 0.5 改成 0.9、或把 intellect 改成 0.9，
+  // 其余 396 条**全部照样绿** —— 因为 fluff 那条只钉了 [0.3,0.7] 一个方向的取值，
+  // 而 eggTint/intellect 根本没有从 decode 侧走过 phenotype。
+  // 这就是这条测试存在的理由：dom 写错不会抛错、不会越界，只会让"这个性状像第一配子"，
+  // 而 spec §4.1 明写新位点一律共显性（性格是公平混合，不偏向任何一方）。
+  const base = randomGenome(createRng(31));
+  for (const name of ['fluff', 'eggTint', 'activity', 'talk', 'intellect', 'broody']) {
+    const [a, b] = base[name];
+    if (a === b) continue;                       // 相同等位时交换无意义，跳过
+    const forward = phenotype(name, [a, b]);
+    const swapped = phenotype(name, [b, a]);
+    assert.ok(Math.abs(forward - swapped) < 1e-12,
+      `${name} 的 dom 不是 0.5：交换等位得到 ${forward} vs ${swapped}`);
+  }
 });
