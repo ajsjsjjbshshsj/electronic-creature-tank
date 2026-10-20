@@ -440,3 +440,17 @@ test('mostUrgent 平局时按 KEYS 顺序取先者（钉住 createNeeds 的键�
 test('mostUrgent 全零时返回 hunger（稳定的默认值，不给 undefined）', () => {
   assert.equal(mostUrgent({ hunger: 0, energy: 0, social: 0, safety: 0 }), 'hunger');
 });
+
+// ---- 2026-10-20 Task A4：好动的把精力掉得更快 ----
+test('energyDrainFactor 让移动/静止时的精力匮乏涨得更快，但不影响休息恢复', () => {
+  const t = { size: 20, personality: { gluttonous: 0, clingy: 0, bold: 0, curious: 0 } };
+  const rise = (drain, resting) => {
+    const n = { hunger: 0, energy: 0, social: 0, safety: 0 };
+    for (let i = 0; i < 60; i++) decay(n, 1 / 60, t, { moving: !resting, resting, companions: 1, drainFactor: drain });
+    return n.energy;
+  };
+  assert.ok(rise(2, false) > rise(1, false), '移动时 drain 越大，energy 匮乏涨得越快');
+  assert.ok(rise(2, true) === rise(1, true), '休息是恢复，不得被 drainFactor 放大');
+  // 不传 drainFactor 时等价于 1 —— 由上面两条的对照组与 sim 的接线覆盖，
+  // 这里不再补一条 `>= 0` 那种恒真的死断言。
+});
