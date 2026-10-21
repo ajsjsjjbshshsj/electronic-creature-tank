@@ -86,7 +86,8 @@ const CONFIG = {
     energyCost: 0.02,                   // 每次落地从 energy 扣
     drainBase: 0.7, drainGain: 1.0,     // energyDrainFactor：好动的把精力掉得更快
     impulseBase: 1.0,                   // 跳起冲量 = base × (0.5 + activity)，表现层用
-    minDurationBase: 0.6,               // 秒；实际 = base / (0.3 + activity)，表现层用
+    minDurationBase: 0.6,               // 秒；实际时长 = base / (floor + activity)
+    minDurationFloor: 0.3,              // 分母里的常数项：activity=0 时也不许把锁定拉到无穷长
   },
   speech: {
     enabled: true,                      // 关掉它，spec §9.2 第 7 条必须仍然全部成立

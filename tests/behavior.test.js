@@ -5,6 +5,7 @@ import { createRng } from '../src/rng.js';
 import { createCreature } from '../src/creature.js';
 import { PLAYER_ID, adjust } from '../src/memory.js';
 import { INTENTS, MIN_DURATION, decide, scoreAll, begEscalation } from '../src/behavior.js';
+import { thresholds } from '../src/personality.js';
 
 let uid = 0;
 const mk = (over = {}) => {
@@ -734,11 +735,14 @@ test('每个意图都恰好有一个分数，且键集与 INTENTS 一致（不�
     assert.ok(v >= 0, `${k} 应为非负: ${v}`);
   }
   // 每个意图的 minDuration 都必须有限（新加候选若忘了写 MIN_DURATION 会在这里现形）
+  // ⚠️ hop 不在表里，见下面那条"为什么 hop 刻意不在 MIN_DURATION 里"。
   for (const kind of INTENTS) {
+    if (kind === 'hop') continue;
     assert.ok(Number.isFinite(MIN_DURATION[kind]), `${kind} 缺少 minDuration`);
   }
   // MIN_DURATION 与 INTENTS 必须一一对应（键集相等，不多不少），且它也被冻结
-  assert.deepEqual(Object.keys(MIN_DURATION).sort(), [...INTENTS].sort());
+  assert.deepEqual(Object.keys(MIN_DURATION).sort(),
+    [...INTENTS].filter((k) => k !== 'hop').sort());
   assert.ok(Object.isFrozen(MIN_DURATION), 'MIN_DURATION 应被冻结');
   assert.throws(() => { MIN_DURATION.eat = 0; }, TypeError, '改锁定时长应抛 TypeError');
   // ⚠️ 每个条目的**量级**必须用硬编码字面量钉住（M = CONFIG.behavior.minIntentDuration = 1.2）。
@@ -758,6 +762,8 @@ test('每个意图都恰好有一个分数，且键集与 INTENTS 一致（不�
   eq('explore', 2.04, 'M×1.7');
   eq('flee', 0.48, 'M×0.4 —— 刻意最短，逃命要能随时改向');
   eq('beg', 1.5, 'M×1.25');
+  // hop 刻意**不在**这张表里（spec §4.7.2 的时长是 0.6/(0.3+activity)，随性格变）。
+  // 它若留在表里就是一个永不消费 yet 有限的条目 —— 无消费者的旋钮要撤。
   eq('protest', 1.2, 'M');
   eq('fight', 1.02, 'M×0.85 —— 略短于基准，打斗是短促爆发');
   eq('mourn', 2.04, 'M×1.7');
@@ -921,4 +927,37 @@ test('第一级的 hop 会把目标点设成手的位置，平时的 hop 没有�
   }
   assert.equal(escalated.kind, 'hop', `升级后应跳到手跟前，实际 ${escalated.kind}`);
   assert.deepEqual(escalated.targetPos, { x: 0.65, y: 0.5 });
+});
+
+test('decide 给 hop 的 minDuration 来自 thresholds.hopMinDuration，且随 activity 缩短', () => {
+  // 这条守的是**接线**：personality 里那个公式算对了、但 decide 仍然发常数 0.84 的话，
+  // 上面所有纯函数测试照过，而"好动的跳得勤"在真实缸里根本不会发生。
+  const mkHop = (activity) => {
+    const c = mk();
+    c.traits.personality.activity = activity;
+    c.thresholds = thresholds(c.traits.personality);
+    c.emotions.joy = 0.95;
+    c.thresholds.hopWeight = 40;          // 让 hop 一定胜出，排除"没选上 hop"的干扰
+    c.needs.energy = 0.1;
+    return c;
+  };
+  const calm = decide(mkHop(0), emptySenses(), createRng(5));
+  const lively = decide(mkHop(1), emptySenses(), createRng(5));
+  assert.equal(calm.kind, 'hop', '前置条件：必须真选中 hop');
+  assert.equal(lively.kind, 'hop', '前置条件：必须真选中 hop');
+  assert.equal(calm.minDuration, 2.0, 'activity=0 ⇒ 0.6/0.3 = 2.0 秒');
+  assert.equal(lively.minDuration, CONFIG.hop.minDurationBase / 1.3, 'activity=1 ⇒ 0.6/1.3');
+  assert.ok(lively.minDuration < calm.minDuration, '好动的每次锁定必须更短');
+});
+
+test('MIN_DURATION 里没有 hop：它的时长是性格量，不能住在共享常数表里', () => {
+  // 记的是**理由**，不是巧合：spec §4.7.2 给的是 0.6/(0.3+activity)。
+  // 把它塞进 MIN_DURATION 会有两种坏法 ——
+  //   ① 留一个"基准值"当摆设，实际由别处算 ⇒ 无消费者的旋钮（本项目撤过多次）；
+  //   ② 让 decide 去查表 ⇒ 所有个体同一个锁定节奏 ⇒ "好动的跳得勤"直接失效。
+  assert.ok(!('hop' in MIN_DURATION), 'hop 不该在 MIN_DURATION 里');
+  assert.ok(Number.isFinite(thresholds({
+    bold: 0.5, clingy: 0.5, irritable: 0.5, gluttonous: 0.5, curious: 0.5, broody: 0.5,
+    activity: 0.5, talk: 0.5, intellect: 0.5,
+  }).hopMinDuration));
 });

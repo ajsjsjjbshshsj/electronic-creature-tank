@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { CONFIG } from '../src/config.js';
 import { thresholds } from '../src/personality.js';
 
 const P = (over = {}) => ({
@@ -19,6 +20,9 @@ const FIELDS = [
   // 2026-10-20 新增六项
   'hopWeight', 'energyDrainFactor', 'speechCooldown',
   'heardCapacity', 'misspeakChance', 'broodInterval',
+  // 2026-10-21 B16b：hop 的锁定长度是性格量（spec §4.7.2），所以住在性格表里
+  // 而不是 behavior.MIN_DURATION 那张共享常数表里。
+  'hopMinDuration',
 ];
 
 test('输出包含全部约定字段且都是有限数', () => {
@@ -38,8 +42,9 @@ test('阈值字段集恰好是 FIELDS —— 不多不少', () => {
   const t = thresholds(P());
   assert.deepEqual(Object.keys(t).sort(), [...FIELDS].sort(),
     '输出键集必须与 FIELDS 完全一致（多一个或少一个都要变红）');
-  assert.equal(FIELDS.length, 14, '阈值恰好 14 个（原 9 个 − 求偶 1 个 + 新增 6 个）');
-  assert.equal(Object.keys(t).length, 14);
+  assert.equal(FIELDS.length, 15,
+    '阈值恰好 15 个（原 9 − 求偶 1 + 2026-10-20 新增 6 + B16b 的 hopMinDuration 1）');
+  assert.equal(Object.keys(t).length, 15);
   assert.ok(!('arousalRate' in t),
     'arousalRate 已被刻意删除（死字段：无消费者，spec 4.9 那行由 Task 4 的 arousal 目标值实现）');
 });
@@ -269,4 +274,20 @@ test('intellect 高 → heardCapacity 大且 misspeakChance 小（两个方向�
 test('broody 高 → broodInterval 短（自产卵间隔）', () => {
   assert.ok(thresholds(P({ broody: 1 })).broodInterval
     < thresholds(P({ broody: 0 })).broodInterval);
+});
+
+test('hopMinDuration = minDurationBase / (minDurationFloor + activity)，三个端点被字面量钉住', () => {
+  // spec §4.7.2：「最小持续时间 = 0.6s / (0.3 + activity) ⇒ 好动的跳得勤」。
+  // 这条与 hopWeight / energyDrainFactor **同向**是刻意的：好动的既更想跳、
+  // 每次锁定又更短，于是"跳得频繁"是两条通道一起出来的，而不是某处写了个 if。
+  const H = CONFIG.hop;
+  const t = (o) => thresholds(P(o));
+  assert.ok(Math.abs(t({ activity: 0 }).hopMinDuration - 2.0) < 1e-12,
+    `activity=0 应是 ${H.minDurationBase}/0.3 = 2.0 秒，实际 ${t({ activity: 0 }).hopMinDuration}`);
+  assert.ok(Math.abs(t({ activity: 1 }).hopMinDuration - 0.46153846153846156) < 1e-12,
+    `activity=1 应是 ${H.minDurationBase}/1.3 ≈ 0.46 秒，实际 ${t({ activity: 1 }).hopMinDuration}`);
+  assert.ok(Math.abs(t({}).hopMinDuration - 0.75) < 1e-12,
+    `中性（activity 0.5）应是 ${H.minDurationBase}/0.8 = 0.75 秒，实际 ${t({}).hopMinDuration}`);
+  assert.ok(t({ activity: 1 }).hopMinDuration < t({ activity: 0 }).hopMinDuration,
+    '方向：好动的每次锁定必须更短（否则"跳得勤"出不来）');
 });

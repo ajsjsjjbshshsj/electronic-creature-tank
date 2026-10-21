@@ -217,8 +217,10 @@ export function sickDesaturate(sat) {
 // 所以"跳起来"需要一条**屏幕竖向偏移**。它不是世界状态：内核只有 intent.kind 与 intentTime
 // 两个读数，竖向轨迹必须由它们**推导**，每帧重算、不入档（spec §7.2）。
 // ⚠️ 轨迹时长读 `intent.minDuration`，不在这里重抄 spec 的 0.6/(0.3+activity)：
-// 内核那一处目前还是常数（MIN_DURATION.hop = 0.84s，已知偏差，另有单独提交处理）。
-// 跟着读数走，将来内核改掉那条公式时本文件一行都不用动，也不会出现"两套时长"。
+// 时长是内核的量（B16b 已把它从常数 0.84s 改成随 activity 的公式）。
+// 当初那句"跟着读数走，将来内核改掉这条公式时本文件一行都不用动"兑现了 ——
+// B16b 改内核时 render.js 的**代码**确实零改动，只有这段注释需要更新。
+// 反过来，在这里各算一遍时长才会出事：那才是"两套时长"。
 export function hopProgress(c) {
   const intent = c.intent;
   if (!intent || intent.kind !== 'hop') return 0;

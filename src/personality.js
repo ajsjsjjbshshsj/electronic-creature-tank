@@ -62,6 +62,12 @@ export function thresholds(p) {
     // 两者一起才让好动的个体自己把蹦跳停掉，而不需要任何硬门控）
     energyDrainFactor: H.drainBase + activity * H.drainGain,
 
+    // activity 高 → 每次蹦跳的锁定更短 ⇒ 重新决策更频繁 ⇒ "好动的跳得勤"（spec §4.7.2）。
+    // 它**必须**住在性格表里而不是 MIN_DURATION 那张共享常数表里：
+    // 后者是"所有个体同一个锁定节奏"的地方，把性格量放进去就只有两种坏法 ——
+    // 留个永不消费的基准值，或者让 decide 查表、于是这条差异直接消失。
+    hopMinDuration: H.minDurationBase / (H.minDurationFloor + activity),
+
     // talk 高 → 出词冷却短（秒）。min 侧给话痨，max 侧给高冷。
     speechCooldown: S.cooldownMax - talk * (S.cooldownMax - S.cooldownMin),
 
