@@ -4,9 +4,12 @@ import { CONFIG } from '../src/config.js';
 import { createRng } from '../src/rng.js';
 import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '../src/memory.js';
 import { createCreature } from '../src/creature.js';
-import { ALL_GENES } from '../src/genes.js';
+import { ALL_GENES, randomGenome } from '../src/genes.js';
+import { MOODS } from '../src/emotions.js';
+import { hear } from '../src/heard.js';
 import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION } from '../src/behavior.js';
+import { thresholds } from '../src/personality.js';
 import {
   createWorld, tickWorld, perceive, addCreature, spawnFood, aliveCreatures, worldStats,
 } from '../src/sim.js';
@@ -1198,4 +1201,340 @@ test('漂入完全确定：同种子两次跑出同样的时刻、数量与基�
   };
   const a = once(), b = once();
   assert.deepEqual(a, b, '漂入必须走 world.rng，否则同种子不可复现');
+});
+
+// ---------------------------------------------------------------- 求关注升级链（spec §4.10，Task A4 尾）
+//
+// 计时器是 `c.begIgnored`（秒）。它**只在手在场且不回应时**累加：
+// 没人在场还越攒越气，读起来是"这只对着空气闹脾气"，是坏的表现。
+// "被理睬"的判定与熟悉度通道**共用同一个谓词**（sim.isPetting）——
+// 两处各自写一遍迟早漂移，所以只允许一个定义点。
+
+const ESC = CONFIG.behavior.begEscalate;
+
+// 一只缸里只有它自己、手一直晃在"看得见但摸不到"的距离上的个体。
+// 手跟着它挪，所以 dist 恒为 0.15：抚摸门是 perceiveRadius × 0.5 = 0.14，
+// 若让它偶尔飘近一点，"被冷落"就变成随机事件，测试会不稳。
+const ignoredTank = (seed) => {
+  const w = createWorld({ seed, initialCreatures: 0 });
+  w.foods.length = 0;                       // 别让觅食/进食的 joy 冲击掺进来
+  const c = createCreature({ id: 'lonely', name: 'L', x: 0.5, y: 0.5, age: 600, rng: createRng(seed) });
+  addCreature(w, c);
+  w.playerHand = { pos: { x: 0.65, y: 0.5 }, speed: 0.01 };
+  return { w, c };
+};
+const hover = (w, c) => { w.playerHand.pos.x = c.pos.x + 0.15; w.playerHand.pos.y = c.pos.y; };
+
+test('手不在场时 begIgnored 不累加（没人在场不该生闷气）', () => {
+  const { w, c } = ignoredTank(60);
+  w.playerHand = null;
+  step(w, 20);
+  assert.equal(c.begIgnored, 0, '没有玩家在场，升级计时必须停在 0');
+});
+
+test('被冷落满 8 秒会发一次 ignored 冲击，而且只发一次', () => {
+  const { w, c } = ignoredTank(61);
+  let crossings = 0;
+  let jump = 0;
+  let prevIgnored = c.begIgnored;
+  let prevAnger = c.emotions.anger;
+  for (let i = 0; i < Math.round(14 * 60); i++) {
+    hover(w, c);
+    tickWorld(w, 1 / 60);
+    if (prevIgnored < ESC.protestAfter && c.begIgnored >= ESC.protestAfter) {
+      crossings += 1;
+      jump = c.emotions.anger - prevAnger;
+    }
+    prevIgnored = c.begIgnored;
+    prevAnger = c.emotions.anger;
+  }
+  assert.equal(crossings, 1, '跨过第二级这个时刻只应发生一次（不是每 tick 都炸一次）');
+  assert.ok(jump > 0.15, `ignored 事件必须让 anger 当场跳起来，实测 ${jump.toFixed(4)}`);
+  assert.ok(c.begIgnored >= ESC.protestAfter, `前置条件：计时应已越过 ${ESC.protestAfter}`);
+});
+
+test('被抚摸后升级计数归零（spec §4.10 的"被理睬"出口）', () => {
+  const { w, c } = ignoredTank(62);
+  // 用 hover 而不是 step：手必须始终停在"看得见摸不到"的那 0.15 上。
+  // 若放手让它自己飘，dist 会随机穿过 0.14 的抚摸门或 0.42 的感知门，
+  // 于是这条测试测的是随机游走而不是归零。
+  for (let i = 0; i < Math.round(6 * 60); i++) { hover(w, c); tickWorld(w, 1 / 60); }
+  assert.ok(c.begIgnored > 3, `前置条件：应先已升到第一级，实测 ${c.begIgnored.toFixed(2)}`);
+  for (let i = 0; i < 60; i++) {
+    w.playerHand.pos.x = c.pos.x;          // 手凑过去，速度仍然温柔 ⇒ 命中 isPetting
+    w.playerHand.pos.y = c.pos.y;
+    tickWorld(w, 1 / 60);
+  }
+  assert.equal(c.begIgnored, 0, '被理睬之后不该继续记着这笔冷落账');
+});
+
+test('升级到第一级后 hop 会带目标点跳向手，升级前的 hop 没有目标点', () => {
+  const { w, c } = ignoredTank(63);
+  let before = 0;
+  let after = 0;
+  for (let i = 0; i < Math.round(12 * 60); i++) {
+    hover(w, c);
+    tickWorld(w, 1 / 60);
+    const it = c.intent;
+    if (it && it.kind === 'hop' && it.targetPos) {
+      if (i / 60 < ESC.hopAfter) before += 1; else after += 1;
+    }
+  }
+  assert.equal(before, 0, '升级前的 hop 是原地蹦，不该追手');
+  assert.ok(after > 0, '升级到第一级后应出现"跳到手跟前"的 hop');
+});
+
+test('一次 hop 只扣一次精力（intent.costed 是承重的）', () => {
+  const w = createWorld({ seed: 64, initialCreatures: 0 });
+  w.foods.length = 0;
+  const c = createCreature({ id: 'h', name: 'H', x: 0.5, y: 0.5, age: 600, rng: createRng(64) });
+  addCreature(w, c);
+  c.needs.energy = 0.1;
+  // 直接把意图钉成一次长 hop，绕开决策 —— 这样"扣费时机"是唯一变量
+  c.intent = { kind: 'hop', minDuration: 999 };
+  const e0 = c.needs.energy;
+  tickWorld(w, 1 / 60);
+  const e1 = c.needs.energy;
+  tickWorld(w, 1 / 60);
+  const e2 = c.needs.energy;
+  assert.ok(e1 - e0 >= CONFIG.hop.energyCost, `第一 tick 应扣到精力：${(e1 - e0).toFixed(6)}`);
+  assert.ok(e2 - e1 < 1e-4, `同一意图的第二 tick 不该再扣：${(e2 - e1).toFixed(6)}`);
+});
+
+test('好动的个体累计 hop 次数更多（"消耗量随 activity 上升"是累计意义上的）', () => {
+  // ⚠️ 单次 hop 的扣费是常量（CONFIG.hop.energyCost），不随 activity 变。
+  // 所以这条测的是**累计**：好动的跳得频繁，自己先把精力耗光，然后必须歇。
+  // 两只只改 activity，其余基因共用同一份 —— 否则测的是随机基因（上一轮踩过两次）。
+  const genes = randomGenome(createRng(65));
+  const run = (activity) => {
+    const w = createWorld({ seed: 66, initialCreatures: 0 });
+    w.foods.length = 0;
+    w.playerHand = null;
+    const c = createCreature({
+      id: 'a', name: 'A', x: 0.5, y: 0.5, age: 600, genes: JSON.parse(JSON.stringify(genes)),
+    });
+    c.traits.personality.activity = activity;
+    c.thresholds = thresholds(c.traits.personality);
+    addCreature(w, c);
+    let hops = 0;
+    let prev = null;
+    for (let i = 0; i < Math.round(120 * 60); i++) {
+      tickWorld(w, 1 / 60);
+      const k = c.intent ? c.intent.kind : null;
+      if (k === 'hop' && prev !== 'hop') hops += 1;
+      prev = k;
+    }
+    return hops;
+  };
+  const lively = run(1);
+  const quiet = run(0);
+  assert.ok(lively > quiet, `好动者应跳得更多：${quiet} vs ${lively}`);
+  assert.ok(lively > 0, '前置条件：好动者确实跳过，否则上面只是不等式空转');
+});
+
+test('同一颗种子下升级链整条可复现（计时、档位与意图序列）', () => {
+  const play = () => {
+    const { w, c } = ignoredTank(67);
+    const seq = [];
+    let maxAnger = 0;
+    for (let i = 0; i < Math.round(15 * 60); i++) {
+      hover(w, c);
+      tickWorld(w, 1 / 60);
+      maxAnger = Math.max(maxAnger, c.emotions.anger);
+      seq.push(`${c.intent ? c.intent.kind : '-'}:${c.begIgnored.toFixed(3)}`);
+    }
+    return { seq, maxAnger, protested: seq.some((s) => s.startsWith('protest:')) };
+  };
+  const a = play();
+  const b = play();
+  assert.deepEqual(a.seq, b.seq, '同种子下意图与计时必须逐步相同');
+  // 读的是**过程中的峰值**而不是末值：ignored 的冲击之后 anger 按惯性平复回去，
+  // 到 15 秒末早就归零了 —— 拿末值断言等于测空气。
+  assert.ok(a.protested, '前置条件：这条链真的走到了第二级（出现过 protest）');
+  assert.ok(a.maxAnger > 0.2, `protest 阶段应出现过怒气，峰值 ${a.maxAnger.toFixed(3)}`);
+});
+
+// ---------------------------------------------------------------- 语言层接线（Task A6）
+
+// 把世界压成一个**不含语言痕迹**的指纹：个体状态、卵、食物、种群统计。
+// 用来证明"关掉文字层之后缸照样跑"不是断言一句空话。
+//
+// ⚠️ 刻意**不含 id**：`eggSeq` / `foodSeq` 是 breeding.js 与 sim.js 的模块级计数器，
+// 同一进程里先跑的那个世界会把后面的编号推高（sim.js 的文件头就写明它"不消费随机数、
+// 也不进任何数值计算"）。把它们读成"世界变了"是误报；
+// 位置对齐由数组下标保证，两个世界的个体是同一批、同一顺序。
+const fingerprint = (w) => ({
+  time: w.time,
+  stats: { ...w.stats, said: 0 },
+  creatures: w.creatures.map((c) => [
+    c.alive, c.stage, c.age.toFixed(6),
+    c.pos.x.toFixed(12), c.pos.y.toFixed(12),
+    c.needs.hunger.toFixed(12), c.needs.energy.toFixed(12),
+    c.needs.social.toFixed(12), c.needs.safety.toFixed(12),
+    c.emotions.joy.toFixed(12), c.emotions.anger.toFixed(12), c.emotions.fear.toFixed(12),
+    (c.intent ? c.intent.kind : '-'), c.begIgnored.toFixed(3),
+    // 口癖是从主流的 fork 抽的，开与关两边都会抽 ⇒ 它必须相同；
+    // 而 speech.nextAt / lastTokens 是语言层私有状态，关掉时本来就是空的。
+    c.catchphrase,
+  ]),
+  eggs: w.eggs.map((e) => [e.age.toFixed(3), e.eggTint, e.viable, e.motherId === null ? 0 : 1]),
+  foods: w.foods.map((f) => [f.kind, f.pos.x.toFixed(9), f.pos.y.toFixed(9)]),
+});
+
+test('真实缸里确实会出词，且每条 say 都带 2–5 个 token 与合法心情档', () => {
+  const w = createWorld({ seed: 70 });
+  const said = [];
+  for (let i = 0; i < Math.round(600 * 60); i++) {
+    tickWorld(w, 1 / 60);
+    for (const ev of w.events) if (ev.kind === 'say') said.push(ev);
+    w.events.length = 0;
+  }
+  assert.ok(said.length >= 20, `600 秒的缸里只出了 ${said.length} 句：语言层大概没接上`);
+  assert.equal(w.stats.said, said.length, 'stats.said 必须与事件数一致（不能一个记了一个没记）');
+  for (const ev of said) {
+    assert.ok(ev.tokens.length >= 2 && ev.tokens.length <= CONFIG.speech.maxTokens,
+      `句长越界：${ev.text}`);
+    assert.ok(MOODS.includes(ev.mood), `say 事件带了非法心情档 ${ev.mood}`);
+    assert.equal(ev.text, ev.tokens.join(' '));
+  }
+  // 五档之外的档位不能是唯一的输出 —— 只出 calm 说明 moodOf 在真实缸里根本没铺开
+  const kinds = new Set(said.map((e) => e.mood));
+  assert.ok(kinds.size >= 2, `真实缸里只出现过 ${[...kinds].join('/')} 一种心情档，桥可能没接通`);
+});
+
+test('关掉文字层之后，缸的其余状态逐位不变（语言层是只读旁路，不是第二条因果链）', () => {
+  // 这条是 spec §4.13.2 第 2 条在**规则档**里的等价保证：那条对 API 档写死了
+  // "不许因为模型返回的内容去改 needs/emotions/behavior/memory"，
+  // 规则档同样必须成立 —— 否则"会说话"就不是一件可关上的事，而是世界的一部分因果。
+  //
+  // 它同时守住实现的一个具体诱惑：把出词抽样接到 world.rng 上。
+  // 那样做每次出词都会平移整条主流，于是开与关的两只缸会长成两个不同的世界，
+  // 而这条测试会变红 —— 且红得说不清，所以 speechRng 必须是独立的一条流。
+  const play = (speechEnabled) => {
+    const w = createWorld({ seed: 71, speechEnabled });
+    for (let i = 0; i < Math.round(420 * 60); i++) {
+      tickWorld(w, 1 / 60);
+      w.events.length = 0;
+    }
+    return { w, fp: fingerprint(w), said: w.stats.said };
+  };
+  const off = play(false);
+  const on = play(true);
+  assert.equal(off.said, 0, '关闭时一句都不该出');
+  assert.ok(on.said > 0, '前置条件：开着必须真的出词，否则下面的逐位相同是不等式空转');
+  assert.deepEqual(off.fp, on.fp, '关掉文字层只该少掉文字，不该改变世界');
+});
+
+test('口癖在出生时抽定一次，跑完整缸仍然是那一个词', () => {
+  // spec §4.13.1：口癖"在出生时抽定一次并固化进个体"。
+  // 反面写法是出词时现抽 —— 那它就不是"这只宠物的口癖"，而是随机字幕。
+  const w = createWorld({ seed: 72 });
+  const born = new Map(aliveCreatures(w).map((c) => [c.id, c.catchphrase]));
+  for (const c of aliveCreatures(w)) assert.ok(c.catchphrase, '初始个体应在建缸时就已有口癖');
+  for (let i = 0; i < Math.round(600 * 60); i++) { tickWorld(w, 1 / 60); w.events.length = 0; }
+  for (const [id, phrase] of born) {
+    const c = w.creatures.find((x) => x.id === id);
+    if (c) assert.equal(c.catchphrase, phrase, `${id} 的口癖变了`);
+  }
+  const hatched = aliveCreatures(w).filter((c) => !born.has(c.id));
+  assert.ok(hatched.length === 0 || hatched.every((c) => c.catchphrase),
+    '新孵化的个体也必须自带口癖（由 hatch 走 createCreature 的 rng）');
+});
+test('world.speechEnabled 是运行时开关，且默认取自 CONFIG.speech.enabled', () => {
+  // spec §4.13.1.1 第 3 条：CONFIG 深冻结，所以"关掉文字层"这件事**不可能**在测试里
+  // 靠改 CONFIG 演出来。开关必须住在 world 上，计划 3 的设置页才有地方写它。
+  // 这条同时钉住两件事：默认值来源，以及 opts 能覆盖它。
+  const w = createWorld({ seed: 1 });
+  assert.equal(w.speechEnabled, CONFIG.speech.enabled);
+  assert.equal(createWorld({ seed: 1, speechEnabled: false }).speechEnabled, false);
+});
+
+test('出词用独立分叉流：speechRng 与 rng 不是同一个对象，且同种子可复现', () => {
+  // spec §4.13.1.1 第 1 条的实现形式。若有人把它换回 world.rng，
+  // sim.test.js 那条"关掉文字层后两缸指纹逐位相同"会红 —— 这里是第二道更直接的闸。
+  const a = createWorld({ seed: 5 });
+  assert.ok(a.speechRng !== a.rng, '必须是 fork 出来的另一条流');
+  assert.equal(typeof a.speechRng.next, 'function');
+  assert.deepEqual(
+    Array.from({ length: 8 }, () => createWorld({ seed: 5 }).speechRng.next()),
+    Array.from({ length: 8 }, () => createWorld({ seed: 5 }).speechRng.next()),
+    '同种子下分叉流必须逐位相同',
+  );
+});
+
+// ---------------------------------------------------------------- 听进去的话（Task A7 接线）
+
+test('玩家对它说的话，会在之后的相关情境里自己冒出来（端到端）', () => {
+  // spec §4.8.1 的例子："存了「吃饭」，在它 hunger 高时说出来 ⇒ 看起来就是
+  // 它记得你说过吃饭，而且它现在想吃"。
+  // 这条把 hear → recall → maybeSay → say 事件整条链钉住：任一环节没接上都会红。
+  const w = createWorld({ seed: 80, initialCreatures: 0 });
+  w.foods.length = 0;
+  const c = createCreature({ id: 'e2e', name: '饿饿', x: 0.5, y: 0.5, age: 600, rng: createRng(80) });
+  c.traits.personality.talk = 0.9;
+  c.thresholds = thresholds(c.traits.personality);
+  addCreature(w, c);
+  c.needs.hunger = 0.9;                       // 听到时就饿，之后仍然饿 ⇒ 需求线索对得上
+  hear(c, '吃饭', createRng(1), w.time, { mood: 'sad', need: 'hunger' });
+  assert.ok(c.heard.length >= 1, `前置条件：词得存进去（分词结果 ${JSON.stringify(c.heard.map((e) => e.token))}）`);
+  const stored = c.heard[0].token;
+
+  const said = [];
+  for (let i = 0; i < Math.round(400 * 60); i++) {
+    c.needs.hunger = Math.max(0.6, c.needs.hunger - 0.001);   // 让它一直是"饿"这个处境
+    tickWorld(w, 1 / 60);
+    for (const ev of w.events) if (ev.kind === 'say') said.push(ev.text);
+    w.events.length = 0;
+  }
+  assert.ok(said.length >= 5, `前置条件：这一路要说够多句，实测 ${said.length}`);
+  assert.ok(said.some((t) => t.includes(stored)),
+    `听过 ${stored} 之后 400 秒里一次都没提过：${said.slice(0, 6).join(' | ')}`);
+});
+
+test('骂过它的词它不再自己提（价格是承重的，不是存档里的装饰）', () => {
+  // 与上一条只差 hear 时的心情档：anger → 价格 -0.8 ≤ suppressBelow → 永不召回。
+  // "有的词它会躲"必须是可观察的行为差异，而不是信息卡上一个没人看的数字。
+  const run = (mood) => {
+    const w = createWorld({ seed: 81, initialCreatures: 0 });
+    w.foods.length = 0;
+    const c = createCreature({ id: 'p', name: '泡泡', x: 0.5, y: 0.5, age: 600, rng: createRng(81) });
+    c.traits.personality.talk = 0.9;
+    c.thresholds = thresholds(c.traits.personality);
+    addCreature(w, c);
+    c.needs.hunger = 0.9;
+    hear(c, '吃饭', createRng(1), w.time, { mood, need: 'hunger' });
+    const token = c.heard[0].token;
+    const texts = [];
+    for (let i = 0; i < Math.round(400 * 60); i++) {
+      c.needs.hunger = Math.max(0.6, c.needs.hunger - 0.001);
+      tickWorld(w, 1 / 60);
+      for (const ev of w.events) if (ev.kind === 'say') texts.push(ev.text);
+      w.events.length = 0;
+    }
+    return { token, n: texts.length, mentioned: texts.filter((t) => t.includes(token)).length };
+  };
+  const happy = run('happy');
+  const angry = run('anger');
+  assert.ok(happy.n >= 5 && angry.n >= 5, `两边都要出够多句（${happy.n}/${angry.n}）`);
+  assert.ok(happy.mentioned > 0, `正价的词该提过（${happy.token}）`);
+  assert.equal(angry.mentioned, 0, `负价的词一次都不该提，实测 ${angry.mentioned} 次（${angry.token}）`);
+});
+
+test('heard 是只读旁路：存了话的缸，关掉文字层之后其余状态仍逐位不变', () => {
+  // A6 那条对照测试的加强版。这里两缸**都**hear 同一段话（hear 是玩家输入，
+  // 与文字层开关无关），差别只有"会不会把话讲出来"。
+  // 若有人让 recall 去改 needs/emotions/memory，这条会当场把他抓出来。
+  const play = (speechEnabled) => {
+    const w = createWorld({ seed: 82, speechEnabled });
+    for (let k = 0; k < 20; k++) {
+      for (const c of aliveCreatures(w)) {
+        hear(c, '宝宝今天也要好好吃饭哦 要摸摸 怕怕 玩 开心', createRng(500 + k), w.time, {
+          mood: 'calm', need: 'hunger',
+        });
+      }
+      step(w, 3);
+    }
+    return fingerprint(w);
+  };
+  assert.deepEqual(play(false), play(true), '听进去的话不该改变世界，只该改变它说出来的话');
 });

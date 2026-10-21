@@ -77,6 +77,14 @@ test('约束扫描确实覆盖到了 src/ 下的模块（防空转）', () => {
   for (const expected of [join('src', 'config.js'), join('src', 'rng.js')]) {
     assert.ok(files.includes(expected), `扫描漏掉了 ${expected}`);
   }
+  // 2026-10-20 之后新加的四个纯逻辑模块也必须确实在扫描范围内。
+  // 为什么单列这一条：上面那句"违规列表为空"在扫描范围意外变空时同样会通过，
+  // 而语言层与存档层恰恰是最容易被"先写在一个大文件里再说"的诱惑绕过守卫的地方 ——
+  // 尤其 speech.js：spec §4.13.2 允许它将来发 fetch，但**只许在 main.js 发**。
+  // 这里把它钉进清单，将来谁想给 speech.js 开浏览器 API 的口子，得先改掉这条。
+  for (const expected of ['speech.js', 'lexicon.js', 'heard.js', 'save.js']) {
+    assert.ok(files.includes(join('src', expected)), `扫描清单里没有 src/${expected}`);
+  }
 });
 
 test('src/ 下没有任何模块调用 Math.random()', () => {

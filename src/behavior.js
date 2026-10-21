@@ -59,6 +59,38 @@ export const INTENTS = Object.freeze([
 export const EAT_DIST = 0.035;
 export const HAND_SPEED_POKE = 0.25;
 
+// ---------------------------------------------------------------- 求关注升级链（spec §4.10）
+//
+// 用户要的是"最喜欢主人，想要主人的关注，会做一些自己认为可以吸引主人注意的事"。
+// 做法**不是**新增 attract 意图（那会让 beg 与 attract 在同一张效用表里互相竞争，
+// 读出"它一边卖萌一边生气"的分裂表现），而是让 beg 这一个动机有三档强度：
+//
+//   0 档  刚被理睬，或玩家不在场           → 正常卖萌
+//   1 档  被冷落满 begEscalate.hopAfter    → 蹦到手的正前方（hop 拿到加成并有了目标点）
+//   2 档  再满 5 秒                        → 抗议：生气、背对手、不理你（并挨一次 ignored 冲击）
+//
+// 计时器 `c.begIgnored` 的生产者只有一处：sim.tickCreature。这里**只读**，
+// 与本模块"纯读"的边界一致（文件头第 2 条）。
+//
+// 两个加成都是 `分数 × CONFIG.behavior.begUrgency` 的形状，不是绝对数值：
+// 这样 begUrgency 一旦重调（它本身就是 ff84886 为真实缸调出来的数），
+// 升级链整体跟着缩放，不会留下两个各自漂移的常数。
+// 这一条由 tests/behavior.test.js 的"源码必须同时引用两个 CONFIG 常数"守着 ——
+// 只断言乘出来的值是不够的：字面量 1.75 与 0.25 × 7.0 相等，但前者让两个旋钮变成死配置。
+export function begEscalation(c) {
+  const E = CONFIG.behavior.begEscalate;
+  const U = CONFIG.behavior.begUrgency;
+  const ignored = c.begIgnored || 0;
+  const level = ignored >= E.protestAfter ? 2 : ignored >= E.hopAfter ? 1 : 0;
+  return {
+    level,
+    // **只有第一级**加 hop。到第二级就放弃讨关注了，再继续蹦就成了"讨好与生气同时满分"，
+    // 读起来是它越被冷落越开心 —— 恰好是 spec §4.10 相反的表现。出口是**替换**的，不是叠加的。
+    hopBonus: level === 1 ? E.hopBonus * U : 0,
+    protestFloor: level >= 2 ? E.protestFloor * U : 0,
+  };
+}
+
 // 与 needs.js / emotions.js / memory.js 同型：两个比较对 NaN 都是 false，
 // 所以 NaN 会**原样穿过**。这里不加逐调用的有限性守卫（60Hz × 24 只的热路径），
 // 跨模块的 NaN 累积由 Task 10 的收尾断言负责（见计划「跨 Task 交接要求」第 1 条）。
@@ -119,6 +151,9 @@ export function scoreAll(c, senses) {
   const playerFamiliarity = familiarityFor(c.memory, PLAYER_ID);
   // 手移动得快 = 戳，慢 = 抚摸（spec 6.1 的核心区分）
   const handIsRough = hand ? hand.speed > HAND_SPEED_POKE : false;
+  // 求关注的档位与加成（spec §4.10）。hand 不在场时第二级不给 protest 保底分：
+  // 对着空气闹脾气读起来是坏的。
+  const esc = begEscalation(c);
 
   const scores = {
     // 觅食：饥饿超过性格阈值才启动；贪吃者阈值低，会更早动身
@@ -148,8 +183,12 @@ export function scoreAll(c, senses) {
     // 累了它自己就掉出竞争，不需要任何一处硬编码"累了不许跳"。
     // 好动的两项都推高它（hopWeight 随 activity 上升、能量掉得也快），
     // 于是"越好动跳得越勤、也越早歇"是同一条因果的两端。
+    //
+    // 升级到第一级再加 esc.hopBonus（= hopBonus × begUrgency）：被冷落够久会
+    // "蹦到手的正前方"来讨关注。**门控仍在**：累到极点时加成打不开这扇门，
+    // "累了会休息"压过闹脾气 —— 由测试专门钉住。
     hop: (e.joy > 0.25 && n.energy < 0.7)
-      ? t.hopWeight * (0.3 + e.joy) * (1 - n.energy)
+      ? t.hopWeight * (0.3 + e.joy) * (1 - n.energy) + esc.hopBonus
       : 0,
 
     // 探索：好奇驱动，且在没有更紧迫的事时才有分量
@@ -185,9 +224,16 @@ export function scoreAll(c, senses) {
     // 抗议：生气但不敢/不想真打。愤怒超过性格阈值才启动。
     // 求关注升级链的第二级（spec §4.10）：beg 被冷落够久就从"卖萌"翻成"抗议"。
     // 加成挂在 begIgnored 上，所以这不是新机制 —— 是同一个被冷落计时的第二个出口。
-    protest:e.anger > t.angerThreshold && provoker
+    //
+    // 两个出口共用一个 kind，但走的是**两条不同的门**：
+    //   常规门  —— 有惹它的邻居且气过了阈值（原来那条）
+    //   冷落门  —— 没有 provoker，但它被玩家冷落到第二级且手还在视野里。
+    //              这里必须有保底分：内核里"被冷落"不会生成 provoker（它不是邻居），
+    //              不加这一支，"背过身不理你"在整个代码里就没有生产者，
+    //              而那是 spec §4.10 第二级唯一的可读表现。
+    protest: (e.anger > t.angerThreshold && provoker)
       ? e.anger * 1.2 * (1 - e.fear)
-      : 0,
+      : (esc.protestFloor > 0 && hand ? esc.protestFloor : 0),
 
     // 争斗：只有打得过才打。体型差是硬门槛，
     // 否则会出现"幼体去撞成体"这种既不可信也不可爱的画面。
@@ -229,6 +275,22 @@ export function scoreAll(c, senses) {
   };
 
   return scores;
+}
+
+// 逃/背到威胁的**反方向**，靠近缸壁时把方向掰向缸中心，否则会一直顶着壁。
+// 抽成函数是因为有两个出口共用这段算术：flee（真的有害）与升级来的 protest
+// （背对手）。各写一遍迟早漂移，而漂移的表现是"它生气时反而往人身上撞"。
+// step 是位移量：flee 用 0.25（逃得远），protest 用同一个数就够 ——
+// 它不是逃跑，只是把身子转过去。
+function awayFrom(c, fromPos, step = 0.25) {
+  let dx = c.pos.x - fromPos.x;
+  let dy = c.pos.y - fromPos.y;
+  const len = Math.hypot(dx, dy) || 1;
+  dx /= len;
+  dy /= len;
+  const cx = c.pos.x < 0.2 || c.pos.x > 0.8 ? (0.5 - c.pos.x) * 0.6 : 0;
+  const cy = c.pos.y < 0.2 || c.pos.y > 0.8 ? (0.5 - c.pos.y) * 0.6 : 0;
+  return { x: clampPos(c.pos.x + dx * step + cx), y: clampPos(c.pos.y + dy * step + cy) };
 }
 
 // 选出最高分候选，并附上目标信息。
@@ -277,35 +339,35 @@ export function decide(c, senses, rng) {
     case 'beg':
       intent.targetPos = { x: senses.playerHand.pos.x, y: senses.playerHand.pos.y };
       break;
+    case 'hop': {
+      // 平时 hop 没有目标点（原地蹦一下）。升级到第一级之后它改成"蹦到手的正前方"
+      // —— 这就是 spec §4.10 要的"会做一些自己认为可以吸引主人注意的事"在内核里的形状。
+      const esc = begEscalation(c);
+      if (esc.level >= 1 && senses.playerHand) {
+        intent.targetPos = { x: senses.playerHand.pos.x, y: senses.playerHand.pos.y };
+      }
+      break;
+    }
     case 'protest':
     case 'fight': {
       const provoker = senses.neighbors.find((x) => x.id === senses.provokerId);
       if (provoker) {
         intent.targetId = provoker.id;
         intent.targetPos = { x: provoker.pos.x, y: provoker.pos.y };
+      } else if (bestKind === 'protest' && senses.playerHand
+                 && begEscalation(c).level >= 2) {
+        // 升级来的抗议没有 provoker（冷落不是邻居），目标是**背对手**。
+        // 不给目标点的话 executeIntent 会立刻 `c.intent = null`，
+        // 于是 protest 每一帧被换掉、决策锁形同虚设 —— 表现是"它抽搐着生气"。
+        intent.targetPos = awayFrom(c, senses.playerHand.pos);
       }
       break;
     }
     case 'flee': {
       // 逃向威胁的反方向；缸壁附近时贴着壁走，避免"逃到墙角卡住"
-      const threat = senses.threats[0]
-        || (senses.playerHand ? { pos: senses.playerHand.pos } : null);
-      if (threat) {
-        let dx = c.pos.x - threat.pos.x;
-        let dy = c.pos.y - threat.pos.y;
-        const len = Math.hypot(dx, dy) || 1;
-        dx /= len;
-        dy /= len;
-        // 靠近边界时把逃离方向掰向缸中心，否则会一直顶着壁
-        const cx = c.pos.x < 0.2 || c.pos.x > 0.8 ? (0.5 - c.pos.x) * 0.6 : 0;
-        const cy = c.pos.y < 0.2 || c.pos.y > 0.8 ? (0.5 - c.pos.y) * 0.6 : 0;
-        intent.targetPos = {
-          x: clampPos(c.pos.x + dx * 0.25 + cx),
-          y: clampPos(c.pos.y + dy * 0.25 + cy),
-        };
-      } else {
-        intent.targetPos = { x: clampPos(0.5), y: clampPos(0.5) };
-      }
+      const threat = senses.threats[0] || senses.playerHand;
+      if (threat) intent.targetPos = awayFrom(c, threat.pos);
+      else intent.targetPos = { x: clampPos(0.5), y: clampPos(0.5) };
       break;
     }
     case 'explore':

@@ -272,7 +272,9 @@ hatch(egg, config) -> Creature   // size 起点 = EGG_SIZE_MIN + (eggSize−MIN)
 
 **为什么第三条必须加**：否则整个语言层可以一行没实现而脚本全绿。这是"脚本不得教错人"的直接推论。
 
-**Expected**：脚本无新增 `test()`（它不是 node:test 文件），但**必须实跑 4 个种子 × 60 分钟**并把输出贴进台账。跑法沿用 harness：`node tests/simulate.mjs --seed 999 --minutes 60`。
+**Expected**：脚本无新增 `test()`（它不是 node:test 文件），但**必须实跑 4 个种子 × 60 分钟**并把输出贴进台账。
+跑法是**位置参数**：`node tests/simulate.mjs 999 60`（本行原写 `--seed/--minutes` 旗标，是错的 ——
+脚本读 `process.argv[2] / [3]`，传旗标会被 `Number('')` 收成默认值，静默跑成另一场模拟。2026-10-21 A9 修正）。
 
 **提交**：`test: 验收脚本加三条判据（多样性、漂入、出词分布）`
 

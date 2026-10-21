@@ -4,6 +4,7 @@ import { createNeeds } from './needs.js';
 import { createEmotions } from './emotions.js';
 import { createMemory } from './memory.js';
 import { thresholds } from './personality.js';
+import { assignCatchphrase } from './speech.js';
 
 // 不含 'egg' —— 卵是独立实体（见 breeding.js），
 // 因为它没有需求、情绪、记忆，硬塞进 Creature 会让所有模块都要判空。
@@ -43,7 +44,7 @@ export function createCreature(opts) {
   }
   const genes = opts.genes || randomGenome(opts.rng);
   const traits = decode(genes);
-  return {
+  const c = {
     id: opts.id,
     name: opts.name,
     customName: opts.customName || false,
@@ -96,6 +97,11 @@ export function createCreature(opts) {
 
     // （原 courtship 状态机字段随孤雌制删除 —— 没有对象就没有"正在和谁仪式"。）
     broodT: 0,       // 憋卵计时（秒），broodScore 读它，产卵结算时归零
+    // 求关注升级计时（秒）。spec §4.10 原写"挂在 memory[PLAYER] 上"，实现改挂在个体上，
+    // 理由见 spec §4.10 的 2026-10-20 补注：记忆条目是被 remember() 校验的**五键磁盘契约**，
+    // 为一个每帧累加的计时器加第六个键，会让所有关系条目和所有存档都长出一个用不上的字段。
+    // 语义等价：它只在"玩家在场且不回应"时累加，被理睬或玩家离场即归零。
+    begIgnored: 0,
     mourn: 0,          // 哀悼剩余秒数（spec 4.11）
 
     lineage: {
@@ -107,7 +113,23 @@ export function createCreature(opts) {
       mates: [],
       offspring: [],
     },
+
+    // ---- 语言层（spec §4.13.1，Task A6）----
+    // 口癖是**出生时抽定一次、终身不变**的个体特征，所以它住在这里而不是表现层。
+    // 走 opts.rng 的**分叉流**：同一家倾向同类口癖但不强制（spec 明文）。
+    // ⚠️ fork() 会消费父流一次抽取，所以本行加下去之后 world.rng 的下游取值整体平移；
+    //    这是可复现性的正常代价（同种子仍逐位相同），不是 bug —— 但验收脚本的读数会变。
+    catchphrase: opts.catchphrase || null,
+    // 语言层的私有状态：下一次最早能开口的时刻 + 上一句（防连发）。
+    // 只有 speech.js 写它，别的模块都不该碰。
+    speech: { nextAt: 0, lastTokens: null },
+    // "听进去的话"（spec §4.8.1）。**刻意与 memory 分开**：记得你说的话 ≠ 记得你，
+    // 混在一个池子里，热闹缸里的对话会把玩家本人从 12 条配额里挤掉。
+    // 只有 heard.js 写它（hear），recall 是纯读的。
+    heard: opts.heard || [],
   };
+  if (opts.rng) assignCatchphrase(c, opts.rng.fork());
+  return c;
 }
 
 export function stageForAge(age) {

@@ -94,8 +94,51 @@ const CONFIG = {
     heardBase: 4, heardGain: 8,         // heardCap = base + round(intellect × gain) = 4..12
     misspeakMax: 0.25,                  // intellect=0 的说错词概率，线性递减到 0
     maxTokens: 5,
+    // ---- A6 实现时补的旋钮（spec §12 授权：按观感定，但两侧取值由测试钉住）----
+    tokensBase: 2, tokensGain: 3,      // tokenBudget = min(maxTokens, base + round(talk × gain)) ⇒ 2..5
+    sayBase: 0.15, sayGain: 0.8,       // 出词概率的"有多想说"一项：0.15 + 0.8 × salience
+    talkFloor: 0.35,                   // talk=0 时意愿只剩 35%，talk=1 时是 100%（性格进第二个地方）
+    cutePoolFloor: 0.5,                // talk × clingy ≥ 该值才有萌系口癖
+    middlePoolFloor: 0.2,              // 再低就是中性词，最低档只剩"哼"
+    needSpeakMin: 0.35,                // 匮乏到这条线才值得把需求词说出口
+    catchphraseChance: 0.6,
+    addressChance: 0.4,                // 叫"主人"的抽样（仍要同时满足 playerNear 与 addressAffMin）
+    addressAffMin: 0.3,
+    otherNameChance: 0.35,
     onscreenMax: 2,                     // 同屏气泡上限（性能 + 审美，spec §5.3）
     bubbleTtl: 3,
+  },
+
+  // ---- 听进去的话（spec §4.8.1，Task A7）----
+  heard: {
+    halfLife: 300,             // 秒：一次都没再听到的词掉到一半要这么久
+    strongUses: 2,             // 听到次数达到它 ⇒ 半衰期加倍（"反复说的记得牢"）
+    strongFactor: 2,
+    retainMin: 0.25,           // 剩余强度低于它就不再冒出来（遗忘是真的）
+    suppressBelow: -0.6,       // 价格低于它 ⇒ 它自己绝不再提这个词（"你骂过的词它会躲"）
+    moodBoost: 0.5,            // 心情对上的候选词在排序里加权
+    takeBase: 1, takeGain: 4,  // 一次听进去几个 = round(base + curious × gain) ⇒ 1..5
+    // 价格表：**听到时**的心情给这个词定的价。calm 是 0（既不奖励也不惩罚）。
+    // 少一档的后果是静默的（undefined 存盘变 null、读回 0），所以键集由测试对齐 MOODS。
+    moodPrice: Object.freeze({
+      anger: -0.8, sad: -0.5, bliss: 0.9, happy: 0.6, calm: 0,
+    }),
+  },
+
+  // ---- 五档心情的阈值（spec §4.5.1，2026-10-20 新增）----
+  // **顺序**在 emotions.moodOf 的 if 链里，不在这里：愤怒必须第一个判，
+  // 否则"又饿又气但 joy 还有惯性残留"的个体会报出"幸福"—— 那是当着玩家的面说谎。
+  // 这八个数是语言层选词的唯一依据，spec 把它们列进 §12 的授权范围（按观感调），
+  // 但两侧取值由 tests/emotions.test.js 逐条钉住，调它们必须是一次有意识的动作。
+  mood: {
+    angerMin: 0.5,          // anger ≥ 该值 → 愤怒
+    sadJoyMax: 0.25,        // joy < 该值 且 fear ≥ sadFearMin → 伤心
+    sadFearMin: 0.4,
+    sadSocialMin: 0.7,      // 社交匮乏 ≥ 该值单独就够 → 伤心
+    happyJoyMin: 0.45,      // joy ≥ 该值 → 快乐
+    blissJoyMin: 0.6,       // 幸福要三样齐全：joy、四条需求、对玩家好感
+    blissNeedMax: 0.25,
+    blissAffMin: 0.6,
   },
 
   // ---- 需求（每秒变化率）----
@@ -130,6 +173,9 @@ const CONFIG = {
           laid:     { joy: 0.6 },   // 2026-10-20：原 mated（求偶成功）随孤雌制改名
       startled: { fear: 0.6 },
       death:    { fear: 0.25, joy: -0.4 },   // 目击同族死亡 → 触发哀悼
+      // 求关注升级到第二级那一刻的冲击（spec §4.10）。
+      // 生产者恰好一处：sim.tickCreature 跨过 begEscalate.protestAfter 时发一次。
+      ignored:  { anger: 0.25, joy: -0.2 },
     },
   },
 
@@ -165,6 +211,19 @@ const CONFIG = {
     // 所以"手一直停着也能一直卖萌"这件事要等有真实输入后再调 ——
     // 合理的下一步是让 beg 的分数随手的**移动**上升，而不是仅凭"手在附近"。
     begUrgency: 7.0,
+    // 求关注升级链（spec §4.10）：**不是新意图**，是 beg 这一个动机的三档强度。
+    // 做成独立 attract 意图的话，beg 与 attract 会在效用评分里互相竞争，
+    // 出现"它一边卖萌一边生气"的分裂表现。
+    // 两个加成一律写成 **begUrgency 的分数**：调 begUrgency 时整条升级链跟着走，
+    // 不会留下两个各自漂移的常数（计划 A4 的陷阱条）。
+    // 取 0.25 / 0.25 而不是 0.3 / 0.3，还有一层实际理由：0.25 × 7 = 1.75 是二进制精确的，
+    // 0.3 × 7 = 2.1000000000000005 会让测试里的字面量断言带上浮点尾巴。
+    begEscalate: {
+      hopAfter: 3,          // 秒：被冷落这么久 → 第一级（蹦到手的正前方、尾巴幅度拉满、出词）
+      protestAfter: 8,      // 秒：第一级之后**再 5 秒** → 第二级（生气、背过身、不理你）
+      hopBonus: 0.25,       // × begUrgency ⇒ 1.75，第一级给 hop 的加成
+      protestFloor: 0.25,   // × begUrgency ⇒ 1.75，第二级给 protest 的保底分（此时没有 provoker）
+    },
     broodUrgency: 1.5,           // 自产卵候选的放大（孤雌，spec §4.10）
     fightUrgency: 1.1,
     fleeUrgency: 2.2,          // 逃避优先于一切，靠高权重而非硬门控实现

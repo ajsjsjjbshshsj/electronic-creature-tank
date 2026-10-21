@@ -31,12 +31,15 @@ import { CONFIG } from './config.js';
 import { createRng } from './rng.js';
 import { randomGenome, phenotype, eggTintBucket } from './genes.js';
 import { decay as decayNeeds, feed as feedNeeds, comfort } from './needs.js';
-import { computeTargets, update as updateEmotions, applyEvent } from './emotions.js';
+import { computeTargets, update as updateEmotions, applyEvent, moodOf } from './emotions.js';
 import {
   adjust as adjustMemory, decay as decayMemory, ensure as ensureMemory,
   PLAYER_ID, KINSHIP,
 } from './memory.js';
 import { createCreature, ageCreature, canBreed, sizeOf } from './creature.js';
+import { maybeSay } from './speech.js';
+import { recall } from './heard.js';
+import { mostUrgent } from './needs.js';
 import {
   kinshipOf, crowdingFactor, layEggs, tickEgg, hatch, registerKinship,
 } from './breeding.js';
@@ -116,7 +119,7 @@ export function createWorld(opts) {
     nextDriftAt: opts.driftInterval ?? CONFIG.drift.interval,
     driftInterval: opts.driftInterval ?? CONFIG.drift.interval,
     driftCount: 0,
-    stats: { births: 0, deaths: 0, hatchFailures: 0, generation: 1, driftIns: 0, emigrations: 0 },
+    stats: { births: 0, deaths: 0, hatchFailures: 0, generation: 1, driftIns: 0, emigrations: 0, said: 0 },
     events: [],
     nameFor: opts.nameFor || defaultNameFor,
   };
@@ -155,6 +158,17 @@ export function createWorld(opts) {
       rng,
     }));
   }
+
+  // 语言层用**自己的一条分叉流**，而不是 world.rng。
+  // 理由不是风格：maybeSay 每次出词要抽 2–6 个随机数，若它走主流，
+  // "关掉文字层"就会让全缸的觅食/产卵/漂入取值整体平移 ——
+  // 那样 spec §9.2 第 7 条想要的对照（关掉文字层、其余逐位不变）根本做不出来，
+  // 而"文字层不碰世界"这件事就只能是注释里的一句愿望。
+  // 分叉放在初始个体投放**之后**：主流的既有取值序列一个都不动。
+  world.speechRng = rng.fork();
+  // 运行时开关（计划 3 的设置页要能改它）。CONFIG.speech.enabled 只是默认值 ——
+  // CONFIG 是深冻结的常量表，不该被当成状态表用。
+  world.speechEnabled = opts.speechEnabled ?? CONFIG.speech.enabled;
 
   return world;
 }
@@ -354,6 +368,17 @@ export function perceive(world, c) {
 
 // ---------------------------------------------------------------- 情绪情境
 
+// "玩家真的理它了"的唯一判定：**温柔的手**且**近到能碰上**。
+// 这个谓词有两个消费者，必须是同一个定义点，否则会出现
+// "熟悉度按 A 距离累积、冷落计时按 B 距离归零"这种自相矛盾：
+//   1. tickCreature 里的熟悉度通道（把手放那儿只买到"认识"，买不到"喜欢"）
+//   2. tickCreature 里的求关注升级计时（spec §4.10）
+// 速度阈值与 behavior 的 handIsRough、emotionCtx 的 threat 共用 HAND_SPEED_POKE。
+function isPetting(senses) {
+  const h = senses.playerHand;
+  return !!h && h.speed <= HAND_SPEED_POKE && h.dist < CONFIG.perceiveRadius * 0.5;
+}
+
 function emotionCtx(c, senses) {
   const hand = senses.playerHand;
   const threat = senses.threats[0];
@@ -469,6 +494,23 @@ function executeIntent(world, c, senses, dt) {
       if (intent.targetPos) moveToward(c, intent.targetPos, dt, speedFactor);
       break;
 
+    case 'hop': {
+      // 一次蹦跳只扣一次精力。标记挂在 **intent** 上而不是 creature 上 ——
+      // 换意图天然就重置了（与 brood 的 intent.laid 同型；上一轮正因为
+      // 把一次性状态挂错地方而踩过坑）。
+      //
+      // 为什么这一扣是承重的：hop 的效用分里有 (1 − energy) 这个乘子，
+      // "越好动 → 跳得越勤 → 自己把精力耗光 → 必须歇"这条闭环原本只靠
+      // energyDrainFactor 的被动消耗。补上主动扣费之后，蹦得越多累得越快，
+      // 累到 energy ≥ 0.7 它自己就退出竞争 —— 全程没有任何硬门控。
+      if (!intent.costed) {
+        intent.costed = true;
+        c.needs.energy = clamp01(c.needs.energy + CONFIG.hop.energyCost);
+      }
+      // 平时原地蹦（无目标点）；升级到第一级后 behavior 会把目标点设成手的位置。
+      if (intent.targetPos) moveToward(c, intent.targetPos, dt, speedFactor);
+      break;
+    }
     case 'brood': {
       // 孵卵不移动：它就在原地趴着。产卵在意图**第一次被执行到**时结算，一次性。
       //
@@ -520,6 +562,37 @@ function moveToward(c, target, dt, speedFactor) {
   c.facing.y = fy / flen;
 }
 
+// ---------------------------------------------------------------- 出词
+
+// 语言层的唯一接线点。它**只读**世界状态，唯一的产物是 world.events 里的一条 say
+// （以及 creature.speech 这个私有状态）。
+//
+// 为什么要有 `world.speechRng` 这条独立流，见 createWorld 末尾的注释：
+// 那才是"关掉文字层之后其余统计逐位不变"能做对照的原因，也就是 spec §4.13.2 第 2 条
+// （语言产出是只读旁路，不许改世界）在规则档里的等价保证。
+function speak(world, c, senses) {
+  const nearest = senses.neighbors.length ? senses.neighbors[0] : null;
+  const otherRef = nearest ? world.creatures.find((x) => x.id === nearest.id) : null;
+  const mood = moodOf(c.emotions, c.needs, c.memory, { adversity: c.mourn > 0 });
+  // 听进去的话只在文字层开着时检索：recall 是纯读的，但它要抽随机数（说错词），
+  // 关掉之后还去抽样就是白白让私有流往前走 —— 不影响世界，只是没必要。
+  const need = mostUrgent(c.needs);
+  const hit = world.speechEnabled ? recall(c, { need, mood }, world.time, world.speechRng) : null;
+  const u = maybeSay(c, {
+    mood,
+    need,
+    heard: hit ? hit.token : null,
+    playerNear: senses.playerHand !== null,
+    other: otherRef ? { id: otherRef.id, name: otherRef.name } : null,
+    speechEnabled: world.speechEnabled,
+  }, world.speechRng, world.time);
+  if (!u) return;
+  world.stats.said += 1;
+  // mood 一起进事件：表现层的气泡样式跟心情走（spec §5.3），
+  // 而它不该为了拿心情再去调 moodOf —— 定义点已经有这里一处了。
+  world.events.push({ kind: 'say', id: c.id, text: u.text, tokens: u.tokens, mood });
+}
+
 // ---------------------------------------------------------------- 单只 tick
 
 function tickCreature(world, c, dt) {
@@ -566,10 +639,32 @@ function tickCreature(world, c, dt) {
   // 刻意只给"认识"不给"喜欢"：喜欢必须由计划 3 的抚摸输入买来。
   // 光是把手放在那儿就能刷好感的话，卖萌会退化成一个挂机计时器，
   // 而 spec 6.1 的整个要点是"温柔与否有区别"。
-  // 速度阈值与 behavior 的 handIsRough、emotionCtx 的 threat 共用 HAND_SPEED_POKE。
-  if (senses.playerHand && senses.playerHand.speed <= HAND_SPEED_POKE
-      && senses.playerHand.dist < CONFIG.perceiveRadius * 0.5) {
+  if (isPetting(senses)) {
     adjustMemory(c.memory, PLAYER_ID, 0, 0.04 * dt);
+  }
+
+  // ---- 求关注升级计时（spec §4.10）----
+  // 放在 executeIntent **之后**：本次 beg 蹭到的那一点好感先结算完，
+  // 再判定"这一 tick 到底算不算被理睬"，否则同一 tick 里既归零又累加，顺序就决定了结果。
+  //
+  // 三种情形：
+  //   被理睬（isPetting）    → 归零。spec 明文"被抚摸后升级计数归零"。
+  //   手不在场               → 归零。没人在场还累加，读起来是"对着空气闹脾气"。
+  //   手在场但没回应         → 累加。粗暴的手**也算没回应**：
+  //     "被理睬"在 spec 里指的是它想要的那种回应（抚摸），不是"玩家碰了我一下"。
+  //     被戳的时候 fear/flee 会接管行为，这条计时只是不被清零，不会让它更黏人。
+  //
+  // 跨过第二级那一刻发**一次** ignored 冲击。用 before/after 比较而不是挂标记：
+  // 计时器本身单调，跨点只会发生一次，加一个 c.ignoredFired 字段反而多一个
+  // 需要归零路径的状态（上一轮在 brood 结算上踩过"一次性标记挂错地方"的坑）。
+  const petting = isPetting(senses);
+  if (petting || !senses.playerHand) {
+    c.begIgnored = 0;
+  } else {
+    const before = c.begIgnored;
+    c.begIgnored = before + dt;
+    const { protestAfter } = CONFIG.behavior.begEscalate;
+    if (before < protestAfter && c.begIgnored >= protestAfter) applyEvent(c.emotions, 'ignored');
   }
 
   decayNeeds(c.needs, dt, c.traits, {
@@ -586,6 +681,11 @@ function tickCreature(world, c, dt) {
   // 那是"双方都要在同一 tick 标记完成才算成功"的配对协议 —— 没有对象就没有协议。
   c.broodT = (c.broodT || 0) + dt;
   if (c.mourn > 0) c.mourn = Math.max(0, c.mourn - dt);
+
+  // 出词（spec §4.13.1）。放在情绪更新与哀悼计时**之后**：moodOf 读的必须是本 tick 的新情绪，
+  // 而 adversity 要读刚减过一次的 mourn —— 否则说的话慢一帧，且会在哀悼结束的那一 tick
+  // 多冒一句"呜呜"。成本有界：maybeSay 在冷却没到期时一次随机数都不抽、也不组装。
+  speak(world, c, senses);
 
   ageCreature(c, dt);
   // 死亡闸门。ageCreature 在判定死亡的那一次调用里把 dying 写成哨兵值（1e-6 > 0），
