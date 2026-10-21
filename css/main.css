@@ -1,0 +1,42 @@
+/* 深水背景由 CSS 承担（spec §3.4-5）：省掉每帧一次全屏填充，
+   也让 render.js 的 'lighter' 混合只在 canvas 内部生效 —— 正是想要的效果。
+   ⚠️ 这三个颜色与 CONFIG.colors.bgTop/bgMid/bgBottom 是同一组值，
+   由 tests/assets.test.js 守着不许漂移。改一边必须改另一边。 */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0B0620;   /* 兜底色：渐变没生效时也是深水而不是刺眼的白 */
+}
+
+body {
+  /* spec §4.3：顶部深水 #0B0620 → 中部 #1A0B2E → 底部 #2D1240。
+     靛紫与粉色在色环上相邻所以和谐，明度差极大所以粉色生物光对比强烈。 */
+  background: linear-gradient(to bottom, #0B0620 0%, #1A0B2E 55%, #2D1240 100%);
+}
+
+#tank {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* touch-action: none 是移动端 Pointer Events 能连续收到 pointermove 的前提。
+     不设它的话浏览器会把触摸解释成滚动/手势，pointermove 中途被 pointercancel 掐断，
+     症状是"抚摸只在刚按下去的一瞬间有效" —— 而抚摸正是 spec §6.1 的核心交互。 */
+  touch-action: none;
+  /* canvas 本身透明，水体渐变由 body 的 background 透出（spec §3.4-5） */
+  background: transparent;
+}
+
+/* iOS 安全区：刘海与底部横条不吃掉画面。
+   计划 2 没有 HUD，所以这里只保证 canvas 不被裁；
+   计划 3 的 HUD 控件要用同一组变量做内边距（spec §6.3 要求 ≥44px 触控目标）。 */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
