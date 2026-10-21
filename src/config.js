@@ -94,6 +94,17 @@ const CONFIG = {
     heardBase: 4, heardGain: 8,         // heardCap = base + round(intellect × gain) = 4..12
     misspeakMax: 0.25,                  // intellect=0 的说错词概率，线性递减到 0
     maxTokens: 5,
+    // ---- A6 实现时补的旋钮（spec §12 授权：按观感定，但两侧取值由测试钉住）----
+    tokensBase: 2, tokensGain: 3,      // tokenBudget = min(maxTokens, base + round(talk × gain)) ⇒ 2..5
+    sayBase: 0.15, sayGain: 0.8,       // 出词概率的"有多想说"一项：0.15 + 0.8 × salience
+    talkFloor: 0.35,                   // talk=0 时意愿只剩 35%，talk=1 时是 100%（性格进第二个地方）
+    cutePoolFloor: 0.5,                // talk × clingy ≥ 该值才有萌系口癖
+    middlePoolFloor: 0.2,              // 再低就是中性词，最低档只剩"哼"
+    needSpeakMin: 0.35,                // 匮乏到这条线才值得把需求词说出口
+    catchphraseChance: 0.6,
+    addressChance: 0.4,                // 叫"主人"的抽样（仍要同时满足 playerNear 与 addressAffMin）
+    addressAffMin: 0.3,
+    otherNameChance: 0.35,
     onscreenMax: 2,                     // 同屏气泡上限（性能 + 审美，spec §5.3）
     bubbleTtl: 3,
   },

@@ -656,6 +656,32 @@ beg 了 3 秒没被理睬 → 升一级：hop 到手的正前方 / 挡在指针�
 
 **显示纪律**：气泡浮在头顶，最多 2 行、字号 ≥14px、3 秒淡出，样式跟 `fluff` 走（浅色描边，像绣在毛上）。**同一时刻屏上最多 2 个气泡**，其余排队 —— 24 只一起说话会变成弹幕，而弹幕是这个项目最该避免的东西。
 
+##### 4.13.1.1 实现裁定（2026-10-21，Task A6）
+
+五条，都是实现时才发现"原设计没说、但必须定"的东西，写在这里是为了让下一轮不必重新推导：
+
+1. **出词走一条独立的分叉随机流 `world.speechRng`，不占 `world.rng`。**
+   理由不是洁癖：若出词用主流，"关掉文字层"就会让全缸的觅食/产卵/漂入取值整体平移，
+   于是 §9.2 第 7 条想要的对照（**关掉文字层，其余状态逐位不变**）根本做不出来，
+   而"语言层是只读旁路"就只能是注释里的一句愿望。
+   现在这句话是一条可跑的测试（`tests/sim.test.js`：开与关两缸指纹 `deepEqual`），
+   而且它已经在探针下被抓过一次（把 `speechRng` 换成 `world.rng` 会当场变红）。
+   分叉发生在初始个体投放之后，所以主流的既有取值序列一个都不动。
+2. **冷却没到期时一次随机数都不抽。** 否则每次调用都消耗抽样，语言层会独占整条随机流。
+   全缸的抽数上界是「个体数 ÷ 冷却秒数」而不是「个体数 × 60」。
+3. **开关是运行时状态，不是常量。** `CONFIG.speech.enabled` 只给默认值，
+   真正的开关是 `world.speechEnabled`（由计划 3 的设置页写），`maybeSay` 从 `ctx.speechEnabled` 读覆盖。
+   原设计写成"`CONFIG.speech.enabled = false`"是**测不了的**：CONFIG 是深冻结的常量表（这是对的），
+   测试无法把它改成 false 再改回来。契约不变，只是载体从常量表移到了世界状态。
+4. **`talk` 进三个地方**：出词间隔（cooldown）、出词意愿（概率乘子）、候选词宽度（token 预算）。
+   只进间隔的话 `talk=0.1` 与 `0.9` 的出词数之比只有 2.3，人眼看不出差别；
+   拉进意愿之后才到 5 上下。**断言必须是比值而不是绝对值** —— 断言绝对值的人一调 COOLDOWN 就全线红。
+   宽度也要单独钉：只断言"句长 ≤ 5"抓不到任何与 talk 有关的错误（探针实测如此）。
+5. **句子组装：必填是心情词（+够紧的需求词），修饰是口癖/称呼/对方名字。**
+   超预算时**从修饰的队尾砍起，绝不砍心情词** —— 宁少说一句口癖，不少说"它此刻的感受"。
+   凑不到 2 个 token 就是"真的没什么可说"，返回沉默（安静又满足的个体走的就是这条路）。
+
+
 #### 4.13.2 可选 API 档（默认关闭）
 
 设置页可填一个 OpenAI 兼容端点 + model + key。填了之后，出词改由模型生成，但喂给它的不是原始向量，而是**结构化状态摘要**（心情、最紧的需求、性格三行、刚听进去的话、对玩家好感）。
@@ -1076,6 +1102,20 @@ SPEECH_BUBBLE_TTL    = 3            // 秒
 HEARD_BASE_CAP       = 4            // intellect=0 时"听进去的词"条数
 HEARD_INTELLECT_GAIN = 8            // 上限 = BASE + round(intellect × GAIN) = 4..12
 SAY_MISSPEAK_MAX     = 0.25         // intellect=0 的说错词概率，线性递减到 0
+// ---- A6 实现时补的语言层旋钮（spec §12 授权；两侧取值由 tests/speech.test.js 钉住）----
+SPEECH_TOKENS_BASE   = 2            // tokenBudget = min(MAX_TOKENS, BASE + round(talk × GAIN)) ⇒ 2..5
+SPEECH_TOKENS_GAIN   = 3
+SPEECH_SAY_BASE      = 0.15         // 出词概率 = (BASE + GAIN × salience) × 意愿项
+SPEECH_SAY_GAIN      = 0.8
+SPEECH_TALK_FLOOR    = 0.35         // talk=0 时意愿只剩 35%（talk 进**第二个**地方的那一项）
+CUTE_POOL_FLOOR      = 0.5          // talk × clingy ≥ 该值才有萌系口癖；再低是中性词；最低只剩"哼"
+MIDDLE_POOL_FLOOR    = 0.2
+NEED_SPEAK_MIN       = 0.35         // 匮乏到这条线才把需求词说出口
+CATCHPHRASE_CHANCE   = 0.6
+ADDRESS_CHANCE       = 0.4          // 叫"主人"（还要同时满足 playerNear 与 ADDRESS_AFF_MIN）
+ADDRESS_AFF_MIN      = 0.3
+OTHER_NAME_CHANCE    = 0.35
+SPEECH_ENABLED       // ⚠️ 只是**默认值**；运行时开关住在 world.speechEnabled（见 §4.13.1.1 第 3 条）
 
 // 心情五档（§4.5.1；表里的顺序就是判据顺序，阈值属 §12 授权，靠观感调）
 MOOD_ANGER_MIN       = 0.5

@@ -4,6 +4,7 @@ import { createNeeds } from './needs.js';
 import { createEmotions } from './emotions.js';
 import { createMemory } from './memory.js';
 import { thresholds } from './personality.js';
+import { assignCatchphrase } from './speech.js';
 
 // 不含 'egg' —— 卵是独立实体（见 breeding.js），
 // 因为它没有需求、情绪、记忆，硬塞进 Creature 会让所有模块都要判空。
@@ -43,7 +44,7 @@ export function createCreature(opts) {
   }
   const genes = opts.genes || randomGenome(opts.rng);
   const traits = decode(genes);
-  return {
+  const c = {
     id: opts.id,
     name: opts.name,
     customName: opts.customName || false,
@@ -112,7 +113,19 @@ export function createCreature(opts) {
       mates: [],
       offspring: [],
     },
+
+    // ---- 语言层（spec §4.13.1，Task A6）----
+    // 口癖是**出生时抽定一次、终身不变**的个体特征，所以它住在这里而不是表现层。
+    // 走 opts.rng 的**分叉流**：同一家倾向同类口癖但不强制（spec 明文）。
+    // ⚠️ fork() 会消费父流一次抽取，所以本行加下去之后 world.rng 的下游取值整体平移；
+    //    这是可复现性的正常代价（同种子仍逐位相同），不是 bug —— 但验收脚本的读数会变。
+    catchphrase: opts.catchphrase || null,
+    // 语言层的私有状态：下一次最早能开口的时刻 + 上一句（防连发）。
+    // 只有 speech.js 写它，别的模块都不该碰。
+    speech: { nextAt: 0, lastTokens: null },
   };
+  if (opts.rng) assignCatchphrase(c, opts.rng.fork());
+  return c;
 }
 
 export function stageForAge(age) {

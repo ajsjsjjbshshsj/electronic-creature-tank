@@ -209,3 +209,32 @@ test('五档心情的八个阈值被字面量钉住（两侧取值由 emotions.t
   assert.ok(m.blissJoyMin > m.happyJoyMin, '幸福必须比快乐要求更高的 joy');
   assert.ok(m.sadSocialMin > m.blissNeedMax, '社交匮乏线必须远高于"需求已满足"线');
 });
+
+test('语言层的十二个旋钮被字面量钉住（行为两侧由 speech.test.js 负责）', () => {
+  // 分工同 §4.5.1 那组：这里钉**数值本身**，speech.test.js 钉它造成的比值与宽度差。
+  // 只钉行为的话，把 sayGain 从 0.8 调到 0.08 会让整缸几乎不出词而没有任何一条测试报警；
+  // 只钉数值的话，改公式形状（比如把 talk 从概率里拿掉）不会报警 —— 所以两边都要有。
+  const s = CONFIG.speech;
+  assert.equal(s.enabled, true, '默认必须开着：关掉是设置页的动作，不是出厂状态');
+  assert.equal(s.cooldownMin, 6);
+  assert.equal(s.cooldownMax, 18);
+  assert.deepEqual([s.tokensBase, s.tokensGain], [2, 3]);
+  assert.deepEqual([s.sayBase, s.sayGain], [0.15, 0.8]);
+  assert.equal(s.talkFloor, 0.35);
+  assert.deepEqual([s.cutePoolFloor, s.middlePoolFloor], [0.5, 0.2]);
+  assert.equal(s.needSpeakMin, 0.35);
+  assert.deepEqual([s.catchphraseChance, s.addressChance, s.otherNameChance], [0.6, 0.4, 0.35]);
+  assert.equal(s.addressAffMin, 0.3);
+  assert.equal(s.heardBase, 4);
+  assert.equal(s.heardGain, 8);
+  assert.equal(s.misspeakMax, 0.25);
+  assert.equal(s.maxTokens, 5);
+  assert.equal(s.onscreenMax, 2);
+  assert.equal(s.bubbleTtl, 3);
+  // 结构性关系（写错方向不会有症状，只会有手感）
+  assert.ok(s.tokensBase + s.tokensGain <= s.maxTokens, 'token 预算的上限就是硬上限，不许越过');
+  assert.ok(s.sayBase + s.sayGain <= 1, '概率的分子项之和不得超过 1（clamp 之前就该成立）');
+  assert.ok(s.talkFloor > 0 && s.talkFloor < 1, 'talkFloor 是分数，不是概率');
+  assert.ok(s.cutePoolFloor > s.middlePoolFloor, '萌系候选集的门槛必须比中性的高');
+});
+

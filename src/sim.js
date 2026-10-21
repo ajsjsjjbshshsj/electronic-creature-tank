@@ -31,12 +31,13 @@ import { CONFIG } from './config.js';
 import { createRng } from './rng.js';
 import { randomGenome, phenotype, eggTintBucket } from './genes.js';
 import { decay as decayNeeds, feed as feedNeeds, comfort } from './needs.js';
-import { computeTargets, update as updateEmotions, applyEvent } from './emotions.js';
+import { computeTargets, update as updateEmotions, applyEvent, moodOf } from './emotions.js';
 import {
   adjust as adjustMemory, decay as decayMemory, ensure as ensureMemory,
   PLAYER_ID, KINSHIP,
 } from './memory.js';
 import { createCreature, ageCreature, canBreed, sizeOf } from './creature.js';
+import { maybeSay } from './speech.js';
 import {
   kinshipOf, crowdingFactor, layEggs, tickEgg, hatch, registerKinship,
 } from './breeding.js';
@@ -116,7 +117,7 @@ export function createWorld(opts) {
     nextDriftAt: opts.driftInterval ?? CONFIG.drift.interval,
     driftInterval: opts.driftInterval ?? CONFIG.drift.interval,
     driftCount: 0,
-    stats: { births: 0, deaths: 0, hatchFailures: 0, generation: 1, driftIns: 0, emigrations: 0 },
+    stats: { births: 0, deaths: 0, hatchFailures: 0, generation: 1, driftIns: 0, emigrations: 0, said: 0 },
     events: [],
     nameFor: opts.nameFor || defaultNameFor,
   };
@@ -155,6 +156,17 @@ export function createWorld(opts) {
       rng,
     }));
   }
+
+  // 语言层用**自己的一条分叉流**，而不是 world.rng。
+  // 理由不是风格：maybeSay 每次出词要抽 2–6 个随机数，若它走主流，
+  // "关掉文字层"就会让全缸的觅食/产卵/漂入取值整体平移 ——
+  // 那样 spec §9.2 第 7 条想要的对照（关掉文字层、其余逐位不变）根本做不出来，
+  // 而"文字层不碰世界"这件事就只能是注释里的一句愿望。
+  // 分叉放在初始个体投放**之后**：主流的既有取值序列一个都不动。
+  world.speechRng = rng.fork();
+  // 运行时开关（计划 3 的设置页要能改它）。CONFIG.speech.enabled 只是默认值 ——
+  // CONFIG 是深冻结的常量表，不该被当成状态表用。
+  world.speechEnabled = opts.speechEnabled ?? CONFIG.speech.enabled;
 
   return world;
 }
@@ -548,6 +560,31 @@ function moveToward(c, target, dt, speedFactor) {
   c.facing.y = fy / flen;
 }
 
+// ---------------------------------------------------------------- 出词
+
+// 语言层的唯一接线点。它**只读**世界状态，唯一的产物是 world.events 里的一条 say
+// （以及 creature.speech 这个私有状态）。
+//
+// 为什么要有 `world.speechRng` 这条独立流，见 createWorld 末尾的注释：
+// 那才是"关掉文字层之后其余统计逐位不变"能做对照的原因，也就是 spec §4.13.2 第 2 条
+// （语言产出是只读旁路，不许改世界）在规则档里的等价保证。
+function speak(world, c, senses) {
+  const nearest = senses.neighbors.length ? senses.neighbors[0] : null;
+  const otherRef = nearest ? world.creatures.find((x) => x.id === nearest.id) : null;
+  const mood = moodOf(c.emotions, c.needs, c.memory, { adversity: c.mourn > 0 });
+  const u = maybeSay(c, {
+    mood,
+    playerNear: senses.playerHand !== null,
+    other: otherRef ? { id: otherRef.id, name: otherRef.name } : null,
+    speechEnabled: world.speechEnabled,
+  }, world.speechRng, world.time);
+  if (!u) return;
+  world.stats.said += 1;
+  // mood 一起进事件：表现层的气泡样式跟心情走（spec §5.3），
+  // 而它不该为了拿心情再去调 moodOf —— 定义点已经有这里一处了。
+  world.events.push({ kind: 'say', id: c.id, text: u.text, tokens: u.tokens, mood });
+}
+
 // ---------------------------------------------------------------- 单只 tick
 
 function tickCreature(world, c, dt) {
@@ -636,6 +673,11 @@ function tickCreature(world, c, dt) {
   // 那是"双方都要在同一 tick 标记完成才算成功"的配对协议 —— 没有对象就没有协议。
   c.broodT = (c.broodT || 0) + dt;
   if (c.mourn > 0) c.mourn = Math.max(0, c.mourn - dt);
+
+  // 出词（spec §4.13.1）。放在情绪更新与哀悼计时**之后**：moodOf 读的必须是本 tick 的新情绪，
+  // 而 adversity 要读刚减过一次的 mourn —— 否则说的话慢一帧，且会在哀悼结束的那一 tick
+  // 多冒一句"呜呜"。成本有界：maybeSay 在冷却没到期时一次随机数都不抽、也不组装。
+  speak(world, c, senses);
 
   ageCreature(c, dt);
   // 死亡闸门。ageCreature 在判定死亡的那一次调用里把 dying 写成哨兵值（1e-6 > 0），

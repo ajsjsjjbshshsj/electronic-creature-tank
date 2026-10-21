@@ -5,6 +5,7 @@ import { createRng } from '../src/rng.js';
 import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '../src/memory.js';
 import { createCreature } from '../src/creature.js';
 import { ALL_GENES, randomGenome } from '../src/genes.js';
+import { MOODS } from '../src/emotions.js';
 import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION } from '../src/behavior.js';
 import { thresholds } from '../src/personality.js';
@@ -1350,4 +1351,112 @@ test('同一颗种子下升级链整条可复现（计时、档位与意图序�
   // 到 15 秒末早就归零了 —— 拿末值断言等于测空气。
   assert.ok(a.protested, '前置条件：这条链真的走到了第二级（出现过 protest）');
   assert.ok(a.maxAnger > 0.2, `protest 阶段应出现过怒气，峰值 ${a.maxAnger.toFixed(3)}`);
+});
+
+// ---------------------------------------------------------------- 语言层接线（Task A6）
+
+// 把世界压成一个**不含语言痕迹**的指纹：个体状态、卵、食物、种群统计。
+// 用来证明"关掉文字层之后缸照样跑"不是断言一句空话。
+//
+// ⚠️ 刻意**不含 id**：`eggSeq` / `foodSeq` 是 breeding.js 与 sim.js 的模块级计数器，
+// 同一进程里先跑的那个世界会把后面的编号推高（sim.js 的文件头就写明它"不消费随机数、
+// 也不进任何数值计算"）。把它们读成"世界变了"是误报；
+// 位置对齐由数组下标保证，两个世界的个体是同一批、同一顺序。
+const fingerprint = (w) => ({
+  time: w.time,
+  stats: { ...w.stats, said: 0 },
+  creatures: w.creatures.map((c) => [
+    c.alive, c.stage, c.age.toFixed(6),
+    c.pos.x.toFixed(12), c.pos.y.toFixed(12),
+    c.needs.hunger.toFixed(12), c.needs.energy.toFixed(12),
+    c.needs.social.toFixed(12), c.needs.safety.toFixed(12),
+    c.emotions.joy.toFixed(12), c.emotions.anger.toFixed(12), c.emotions.fear.toFixed(12),
+    (c.intent ? c.intent.kind : '-'), c.begIgnored.toFixed(3),
+    // 口癖是从主流的 fork 抽的，开与关两边都会抽 ⇒ 它必须相同；
+    // 而 speech.nextAt / lastTokens 是语言层私有状态，关掉时本来就是空的。
+    c.catchphrase,
+  ]),
+  eggs: w.eggs.map((e) => [e.age.toFixed(3), e.eggTint, e.viable, e.motherId === null ? 0 : 1]),
+  foods: w.foods.map((f) => [f.kind, f.pos.x.toFixed(9), f.pos.y.toFixed(9)]),
+});
+
+test('真实缸里确实会出词，且每条 say 都带 2–5 个 token 与合法心情档', () => {
+  const w = createWorld({ seed: 70 });
+  const said = [];
+  for (let i = 0; i < Math.round(600 * 60); i++) {
+    tickWorld(w, 1 / 60);
+    for (const ev of w.events) if (ev.kind === 'say') said.push(ev);
+    w.events.length = 0;
+  }
+  assert.ok(said.length >= 20, `600 秒的缸里只出了 ${said.length} 句：语言层大概没接上`);
+  assert.equal(w.stats.said, said.length, 'stats.said 必须与事件数一致（不能一个记了一个没记）');
+  for (const ev of said) {
+    assert.ok(ev.tokens.length >= 2 && ev.tokens.length <= CONFIG.speech.maxTokens,
+      `句长越界：${ev.text}`);
+    assert.ok(MOODS.includes(ev.mood), `say 事件带了非法心情档 ${ev.mood}`);
+    assert.equal(ev.text, ev.tokens.join(' '));
+  }
+  // 五档之外的档位不能是唯一的输出 —— 只出 calm 说明 moodOf 在真实缸里根本没铺开
+  const kinds = new Set(said.map((e) => e.mood));
+  assert.ok(kinds.size >= 2, `真实缸里只出现过 ${[...kinds].join('/')} 一种心情档，桥可能没接通`);
+});
+
+test('关掉文字层之后，缸的其余状态逐位不变（语言层是只读旁路，不是第二条因果链）', () => {
+  // 这条是 spec §4.13.2 第 2 条在**规则档**里的等价保证：那条对 API 档写死了
+  // "不许因为模型返回的内容去改 needs/emotions/behavior/memory"，
+  // 规则档同样必须成立 —— 否则"会说话"就不是一件可关上的事，而是世界的一部分因果。
+  //
+  // 它同时守住实现的一个具体诱惑：把出词抽样接到 world.rng 上。
+  // 那样做每次出词都会平移整条主流，于是开与关的两只缸会长成两个不同的世界，
+  // 而这条测试会变红 —— 且红得说不清，所以 speechRng 必须是独立的一条流。
+  const play = (speechEnabled) => {
+    const w = createWorld({ seed: 71, speechEnabled });
+    for (let i = 0; i < Math.round(420 * 60); i++) {
+      tickWorld(w, 1 / 60);
+      w.events.length = 0;
+    }
+    return { w, fp: fingerprint(w), said: w.stats.said };
+  };
+  const off = play(false);
+  const on = play(true);
+  assert.equal(off.said, 0, '关闭时一句都不该出');
+  assert.ok(on.said > 0, '前置条件：开着必须真的出词，否则下面的逐位相同是不等式空转');
+  assert.deepEqual(off.fp, on.fp, '关掉文字层只该少掉文字，不该改变世界');
+});
+
+test('口癖在出生时抽定一次，跑完整缸仍然是那一个词', () => {
+  // spec §4.13.1：口癖"在出生时抽定一次并固化进个体"。
+  // 反面写法是出词时现抽 —— 那它就不是"这只宠物的口癖"，而是随机字幕。
+  const w = createWorld({ seed: 72 });
+  const born = new Map(aliveCreatures(w).map((c) => [c.id, c.catchphrase]));
+  for (const c of aliveCreatures(w)) assert.ok(c.catchphrase, '初始个体应在建缸时就已有口癖');
+  for (let i = 0; i < Math.round(600 * 60); i++) { tickWorld(w, 1 / 60); w.events.length = 0; }
+  for (const [id, phrase] of born) {
+    const c = w.creatures.find((x) => x.id === id);
+    if (c) assert.equal(c.catchphrase, phrase, `${id} 的口癖变了`);
+  }
+  const hatched = aliveCreatures(w).filter((c) => !born.has(c.id));
+  assert.ok(hatched.length === 0 || hatched.every((c) => c.catchphrase),
+    '新孵化的个体也必须自带口癖（由 hatch 走 createCreature 的 rng）');
+});
+test('world.speechEnabled 是运行时开关，且默认取自 CONFIG.speech.enabled', () => {
+  // spec §4.13.1.1 第 3 条：CONFIG 深冻结，所以"关掉文字层"这件事**不可能**在测试里
+  // 靠改 CONFIG 演出来。开关必须住在 world 上，计划 3 的设置页才有地方写它。
+  // 这条同时钉住两件事：默认值来源，以及 opts 能覆盖它。
+  const w = createWorld({ seed: 1 });
+  assert.equal(w.speechEnabled, CONFIG.speech.enabled);
+  assert.equal(createWorld({ seed: 1, speechEnabled: false }).speechEnabled, false);
+});
+
+test('出词用独立分叉流：speechRng 与 rng 不是同一个对象，且同种子可复现', () => {
+  // spec §4.13.1.1 第 1 条的实现形式。若有人把它换回 world.rng，
+  // sim.test.js 那条"关掉文字层后两缸指纹逐位相同"会红 —— 这里是第二道更直接的闸。
+  const a = createWorld({ seed: 5 });
+  assert.ok(a.speechRng !== a.rng, '必须是 fork 出来的另一条流');
+  assert.equal(typeof a.speechRng.next, 'function');
+  assert.deepEqual(
+    Array.from({ length: 8 }, () => createWorld({ seed: 5 }).speechRng.next()),
+    Array.from({ length: 8 }, () => createWorld({ seed: 5 }).speechRng.next()),
+    '同种子下分叉流必须逐位相同',
+  );
 });
