@@ -36,15 +36,32 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   assert.deepEqual(unfrozen, [], 'deepFreeze 漏掉了下列节点');
 
   // 防空转：遍历自身写错（一个节点都没走到）时，上面的 deepEqual 会空着通过。
-  // 用节点数下限 + 关键路径点名，把"确实走遍了整棵树"钉住。
-  // 21 是当前 CONFIG 的全部对象/数组节点数；后续 Task 往 CONFIG 里加东西只会让它变大，
-  // 所以这里用 >= 而不是 ==，免得每次加常量都要回来改测试。
-  assert.ok(visited.length >= 21, `只遍历到 ${visited.length} 个节点，少于已知的 21 个`);
+  //
+  // ⚠️ 这里原来是 `visited.length >= 21`，是台账里挂了很久的一条 Minor：
+  // 用下限的话，**删掉一整段 CONFIG 也不会报警**（21 个节点的下限在 39 个的现实下永远满足），
+  // 而"遍历没走到某个子树"恰恰就是这种删除的症状。下限防不住它想防的东西。
+  // 改成**精确相等**：往 CONFIG 里加常量会让这条变红 —— 那是**想要的摩擦**，
+  // 加常量的人必须顺手把这里和下面的段名一起更新，正如 MAGNITUDES 那张表要求
+  // 新增情绪事件的人同步更新测试一样。"每次加常量都要回来改测试"不是缺点，是守卫的代价。
+  assert.equal(visited.length, 39, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
+  assert.deepEqual(Object.keys(CONFIG).sort(), [
+    'affectionDecay', 'affectionDecayKin', 'behavior', 'bodyPoints', 'broody', 'colors',
+    'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize', 'eggTint',
+    'eggsPerClutch', 'emotions', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt', 'food',
+    'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hueRange',
+    'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
+    'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
+    'populationCap', 'speech', 'stage', 'timeScales',
+  ], 'CONFIG 顶层键名（41 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 41);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
     'CONFIG.emotions.eventMagnitude.poked',                       // 第三层
     'CONFIG.timeScales', 'CONFIG.hueRange', 'CONFIG.eggsPerClutch', // 数组节点
+    'CONFIG.mood', 'CONFIG.heard', 'CONFIG.speech', 'CONFIG.hop',   // 2026-10-20 之后新增的四段
+    'CONFIG.heard.moodPrice', 'CONFIG.behavior.begEscalate',        // 第三层的新增项
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
