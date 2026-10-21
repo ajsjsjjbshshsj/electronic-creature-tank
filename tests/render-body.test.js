@@ -8,6 +8,7 @@ import { createBody, updateBody, starRadius } from '../src/body.js';
 import { randomGenome, decode } from '../src/genes.js';
 import { dominant, EMOTION_KEYS } from '../src/emotions.js';
 import { INTENTS } from '../src/behavior.js';
+import { remember, PLAYER_ID } from '../src/memory.js';
 import { createViewport, boot } from '../src/main.js';
 import {
   createRenderer, hueBucket, screenX, screenY, radiusPx,
@@ -124,6 +125,11 @@ const makeRenderer = (world, viewport, isMobile, created) => createRenderer({
 const DI_PER_CREATURE = 7;
 // 身体轮廓：每点一段 Catmull-Rom 贝塞尔（spec §5.1"绘制 = Catmull-Rom 平滑闭合曲线"）。
 const BEZIER_PER_CREATURE = CONFIG.bodyPoints;
+// 第 6 层（B15 眼睛与腮红）每只的**固定路径账单**：眼白 1 + 瞳孔 1 + 高光 1 + 眼睑 1 + 腮红 1 = 5。
+// ⚠️ 它是 5 条**路径**而不是 5 次贴图：这一层零 drawImage、零 clip、零 globalCompositeOperation，
+//    所以上面那个 7 与下面那两条"每只只裁一次 / 混合模式写 3 次"的精确守卫**一个数字都没改**。
+//    这是 B15 的架构决定（render.js 的层注释写了为什么），本文件下面那条眼睛账单测试把它钉住。
+const EYE_PATHS = 5;
 
 // ============================================================ 第 1 层：光晕
 
@@ -335,7 +341,8 @@ test('花纹 alpha 压在 0.35 一档，且 pattern=none 时那一层整个跳�
   const spots = mk('spots');
   assert.equal(spots.count('globalAlpha'), none.count('globalAlpha') + 1,
     'pattern=none 时必须少一次 globalAlpha 写入（那一层被跳过，而不是画成透明）');
-  assert.equal(none.count('beginPath'), 1, 'none 的个体只该有身体轮廓那一条路径');
+  assert.equal(none.count('beginPath'), 1 + EYE_PATHS,
+    'none 的个体只该有身体轮廓 + 第 6 层那 5 条路径（B15 起；花纹那一层仍然一条都不加）');
   assert.ok(spots.count('beginPath') > 1, 'spots 的花纹要留下路径痕迹，否则"花纹"两个字是空的');
   world.creatures[0].traits.pattern = 'spots';
 });
@@ -518,9 +525,11 @@ test('性能上限二：主 ctx 每帧的贝塞尔段数只等于身体轮廓，
   assert.equal(ctx.count('bezierCurveTo'), n * BEZIER_PER_CREATURE,
     `贝塞尔段数必须恰为 每只 bodyPoints（Catmull-Rom 轮廓）。实测 ${ctx.count('bezierCurveTo')} / ${n} 只`);
   assert.ok(ctx.count('quadraticCurveTo') === 0, '身体层不许出现二段贝塞尔（毛如果按 quadratic 画，这里立刻红）');
-  // beginPath 的上界 = 每只 1 条轮廓 + 花纹斑点（最多的那一型 9 个），毛一个都不加
-  assert.ok(ctx.count('beginPath') <= n * (1 + 9),
-    `beginPath ${ctx.count('beginPath')} 超过 ${n}×10（轮廓 + 花纹斑点的上界）—— 有人给毛开了路径`);
+  // beginPath 的上界 = 每只 1 条轮廓 + 花纹斑点（最多的那一型 9 个）+ 第 6 层那 5 条，
+  // 毛一个都不加。B15 之前这个上界是 1+9；眼睛是**第一批**合法新增路径的层，
+  // 所以上界跟着加 5 —— 这条守卫的原意（"有人给毛开了路径"）一个字都没松。
+  assert.ok(ctx.count('beginPath') <= n * (1 + 9 + EYE_PATHS),
+    `beginPath ${ctx.count('beginPath')} 超过 ${n}×${1 + 9 + EYE_PATHS}（轮廓 + 花纹斑点 + 眼睛的上界）—— 有人给毛开了路径`);
 });
 
 test('性能上限三：连续 100 帧不新建任何离屏画布（sprite 只在首次/分档变化时构建）', () => {
@@ -757,4 +766,196 @@ test('七项旧设计里被这次改动牺牲掉的那条：不再有半透明 g
   assert.equal(R.coreAlpha, undefined, '"发光核"已经改成"透过毛看到的一片柔和亮区"（第 4 处改动）');
   assert.ok(R.innerAlpha > 0, '新的亮区旋钮必须存在');
   assert.ok(screenX(0.5, DESKTOP) === DESKTOP.width / 2);
+});
+
+// ==================================================== 第 6 层：眼睛与腮红（B15）
+//
+// ⚠️ 记录型桩测不到的东西（诚实边界）：眯弧弯得够不够、星星眼在屏上像不像一只星、
+// 含泪高光看不看得见、腮红位置对不对、瞳孔有没有真的朝手看过去。
+// 那些全在手工清单里。这里断言的只有**层序、深度、路径/贴图的次数账单，
+// 以及"四角星走几个顶点"这一半可数的东西**。
+// 四参数与十行表的数值本身由 tests/eyes.test.js 直接打纯函数，不经过这里。
+
+// 取 (from, to) 之间的操作计数
+const opsWithin = (ctx, from, to) => {
+  const out = {};
+  for (let i = from + 1; i < to; i++) {
+    const op = ctx.ops[i].op;
+    out[op] = (out[op] || 0) + 1;
+  }
+  return out;
+};
+
+// **第 6 层自己的**操作窗口。⚠️ 不能简单地取"尾巴最后一次贴图 → 碎边那次贴图"之间：
+// 那一段里还夹着尾巴层的收尾 restore 与碎边层的起笔 save（含它的 'lighter' 写入），
+// 照那个边界数出来的账单会把邻层的操作算到眼睛头上。
+// 所以边界取"尾巴那一层的 restore 之后"到"碎边那一层的 save 之前"。
+const eyeWindow = (ctx) => {
+  const di = ctx.indicesOf('drawImage');
+  assert.equal(di.length, DI_PER_CREATURE, '先确认六层贴图都在，否则下面的边界没有意义');
+  let from = di[5];
+  while (ctx.ops[from].op !== 'restore') from += 1;
+  let to = di[6];
+  while (ctx.ops[to].op !== 'save') to -= 1;
+  assert.ok(to > from, '找不到第 6 层的边界（尾巴与碎边之间被压成零长了？）');
+  return { from, to, di, counts: opsWithin(ctx, from, to) };
+};
+
+// 让某只个体进入 幸福 那一格：心情档由 emotions / needs / memory / mourn 共同决定，
+// 所以"造一个人设"就是改这四样（与 tests/eyes.test.js 的夹具同一套思路）。
+const makeBlissful = (c) => {
+  c.alive = true;
+  c.mourn = 0;
+  c.emotions.joy = 0.85;
+  c.emotions.anger = 0;
+  c.emotions.fear = 0;
+  c.emotions.sleepy = 0;
+  c.emotions.arousal = 0.5;
+  for (const k of Object.keys(c.needs)) c.needs[k] = 0.1;
+  remember(c.memory, { id: PLAYER_ID, familiarity: 1, affection: 0.9, kinship: 0, role: null });
+};
+
+test('第 6 层的层序：眼睛在尾巴之后、毛尖碎边之前，且与尾巴一样在 clip 之外（spec §5.1 的 5→6→7）', () => {
+  const world = makeWorld(11);
+  const bodies = makeBodies(world);
+  const r = makeRenderer(world, DESKTOP, false);
+  const c = world.creatures[0];
+  const ctx = createLogCtx();
+  drawCreature(ctx, r, c, bodies.get(c.id), DESKTOP);
+  const clipIdx = ctx.indexOf('clip');
+  const win0 = eyeWindow(ctx);
+  assert.ok(win0.to > win0.from + 1, '尾巴与碎边之间必须有东西 —— 那就是第 6 层');
+  const win = win0.counts;
+  assert.ok(win.beginPath > 0 && win.fill > 0, `眼睛窗口里必须真有路径与填充：${JSON.stringify(win)}`);
+  assert.equal(win.drawImage, undefined, '眼睛不许贴图（新增 sprite 会撕掉 B14 那三条精确守卫）');
+  assert.equal(win.clip, undefined, '眼睛不许 clip：半闭的瞳孔靠几何收进去，不靠裁剪');
+  assert.equal(win.globalCompositeOperation, undefined, '混合模式那三次写入属于身体三层，眼睛不掺');
+  for (let i = win0.from + 1; i < win0.to; i++) {
+    assert.ok(ctx.ops[i].depth >= 2, `第 6 层的操作必须都在 save 括号里（第 ${i} 个深度 ${ctx.ops[i].depth}）`);
+  }
+  assert.ok(clipIdx < win0.from, 'clip 属于本体那一层，第 6 层整层在轮廓之外');
+  const st = ctx.indicesOf('setTransform');
+  assert.equal(ctx.ops[st[st.length - 1] + 1].op, 'drawImage',
+    '碎边仍然是最后一次矩阵变换 + 贴图 —— 眼睛若去抢 setTransform 就破坏它的层序证据');
+  assert.equal(ctx.count('bezierCurveTo'), BEZIER_PER_CREATURE,
+    '贝塞尔段数仍然只等于身体轮廓：眼睛用 arc/ellipse，一段贝塞尔都不加');
+  assert.equal(ctx.count('quadraticCurveTo'), 0);
+});
+
+test('眼睛层的固定路径账单：眼白 / 瞳孔 / 高光 / 眼睑 + 腮红 = 5 条路径，闭眼时整层跳过', () => {
+  const world = makeWorld(11);
+  const bodies = makeBodies(world);
+  const r = makeRenderer(world, DESKTOP, false);
+  const c = world.creatures[0];
+  c.traits.pattern = 'none';
+  const ctx = createLogCtx();
+  drawCreature(ctx, r, c, bodies.get(c.id), DESKTOP);
+  const win = eyeWindow(ctx).counts;
+  assert.equal(win.beginPath, EYE_PATHS, `第 6 层每只应当恰好 ${EYE_PATHS} 条路径，实测 ${win.beginPath}`);
+  assert.equal(win.fill, EYE_PATHS - 1, '5 条路径里 4 条填充、1 条描边（眼睑线只描不填）');
+  assert.equal(win.stroke, 1, '描边恰好一次：那是上眼睑 / ^^ 那一笔');
+  assert.equal(win.save, 2, '两个括号：眼睛一个、腮红一个');
+  assert.equal(win.restore, 2, 'save/restore 必须成对，否则 globalAlpha 会漏给第 7 层');
+  assert.equal(win.strokeStyle, 1, '只有眼睑线用描边');
+  assert.equal(win.fillStyle, 4, '眼白 / 瞳孔 / 高光 / 腮红 各一次取色');
+  assert.equal(win.lineTo || 0, 0, '常态瞳孔是椭圆，一次 lineTo 都不该有');
+  assert.equal(ctx.count('clip'), 1, '每只仍然只裁一次（本体那一刀），眼睛没有第二刀');
+
+  // 闭眼（死亡）时整层跳过：窗口里一次绘制都不剩，而尾巴与碎边照常。
+  const dead = createLogCtx();
+  c.alive = false;
+  c.dying = CONFIG.eye.deathCloseSeconds * 2;
+  drawCreature(dead, r, c, bodies.get(c.id), DESKTOP);
+  const ddi = dead.indicesOf('drawImage');
+  assert.equal(ddi.length, DI_PER_CREATURE, '闭眼不省贴图（身体那 7 次一次不少）');
+  const dwin = eyeWindow(dead).counts;
+  assert.equal(dwin.beginPath || 0, 0, `闭眼之后那一格不该留下路径：${JSON.stringify(dwin)}`);
+  assert.equal(dwin.fill || 0, 0, '尸体也不该泛腮红（blushFor 的 alive 门）');
+  c.alive = true;
+  c.dying = 0;
+});
+
+test('星星眼的瞳孔走四角星：每只 2×starPoints 个顶点；快乐那一格一次 lineTo 都不加', () => {
+  const world = makeWorld(11);
+  const bodies = makeBodies(world);
+  const r = makeRenderer(world, DESKTOP, false);
+  const c = world.creatures[0];
+  c.traits.pattern = 'none';
+  c.emotions.joy = 0.9;
+  const happy = createLogCtx();
+  drawCreature(happy, r, c, bodies.get(c.id), DESKTOP);
+  const hwin = eyeWindow(happy).counts;
+  assert.equal(hwin.lineTo || 0, 0, '快乐是眯弧 + 椭圆瞳孔，不许有星形顶点');
+  assert.ok(hwin.arc > 0, '眼睑那一格要用 arc 画出上弯的 ^^');
+
+  makeBlissful(c);
+  const bliss = createLogCtx();
+  drawCreature(bliss, r, c, bodies.get(c.id), DESKTOP);
+  const bwin = eyeWindow(bliss).counts;
+  const verts = 2 * CONFIG.eye.starPoints;
+  assert.equal(bwin.moveTo, 2, `两只星各一次起笔（每只 ${verts} 个顶点），实测 ${bwin.moveTo}`);
+  assert.equal(bwin.lineTo, 2 * (verts - 1),
+    `四角星瞳孔：每只 ${verts} 个顶点 ⇒ 2×(${verts}−1) = ${2 * (verts - 1)} 次 lineTo，实测 ${bwin.lineTo}`);
+  assert.equal(bwin.closePath, 2, '两只星各自闭合（第三条 closePath 是身体轮廓，在窗口之外）');
+  assert.equal(bwin.beginPath, EYE_PATHS, '换画法不许改变路径条数，否则 B14 那条上界失去意义');
+});
+
+test('render.js 的第 6 层只从 eyes.js 拿数：眼睛那几行里没有颜色与比例的第二个定义点', () => {
+  const src = readFileSync(fileURLToPath(new URL('../src/render.js', import.meta.url)), 'utf8');
+  const stripped = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const from = stripped.indexOf('function drawEyeLayer');
+  const to = stripped.indexOf('export function drawCreature');
+  assert.ok(from > 0 && to > from, '找不到第 6 层的实现（drawEyeLayer 被改名或搬走了？）');
+  const eye = stripped.slice(from, to);
+  assert.ok(/pupilColor\(\)/.test(eye), '瞳孔颜色必须走 eyes.js 导出的 pupilColor()（唯一来源 CONFIG.colors.pupil）');
+  assert.ok(/eyeWhiteColor\(\)/.test(eye) && /eyeHighlightColor\(\)/.test(eye));
+  assert.ok(/blushColor\(\)/.test(eye), '腮红颜色必须走 blushColor()');
+  assert.ok(!/#2D1240/.test(eye), '第 6 层里抄了一份瞳孔色号 —— spec §4.6 裁定 3 的定义点分家了');
+  assert.ok(!/0\.28/.test(eye), '第 6 层里抄了眼睛比例的 28%；那是 CONFIG.eyeWidthRatio，只能有一处');
+  assert.ok(!/0\.30|0\.55|0\.95/.test(eye), '十行表的读数只能出现在 eyes.js 的返回值里，不许在画的那一侧各写一份');
+  assert.ok(/eyeParamsInto\(/.test(eye) && /eyeAnchorsInto\(/.test(eye),
+    '四参数与锚点必须来自 eyes.js；在 render.js 里重算一份就是"测的与跑的不是同一个函数"');
+});
+
+test('draw() 只读 world.playerHand：搬进 renderer.hand，不改世界状态（表现层边界）', () => {
+  const world = makeWorld(11);
+  const bodies = makeBodies(world);
+  const r = makeRenderer(world, DESKTOP, false);
+  const ctx = createLogCtx();
+  world.playerHand = { pos: { x: 0.4, y: 0.5 }, speed: 0.01 };
+  const snap = JSON.stringify({ pos: world.playerHand.pos, speed: world.playerHand.speed });
+  r.draw(ctx, world, bodies, DESKTOP, CONFIG.fixedDt);
+  assert.equal(r.hand, world.playerHand, '第 6 层的瞳孔朝向与 slow blink 读的就是这个引用');
+  assert.equal(JSON.stringify({ pos: world.playerHand.pos, speed: world.playerHand.speed }), snap,
+    '表现层不许改写 playerHand（写它是 input 层的职责，spec §4.6 的那半句 facing 更不许动）');
+  for (const c of world.creatures) assert.equal(c.mood, undefined, '心情不许被写成个体状态（spec §4.5.1）');
+  world.playerHand = null;
+  r.draw(ctx, world, bodies, DESKTOP, CONFIG.fixedDt);
+  assert.equal(r.hand, null, '手离场后必须把引用清掉，否则眼睛会永远斜视着一只不存在的手');
+});
+
+test('第 6 层不向 rng 取任何一个数、不新建任何离屏画布（眨眼相位由 id 哈希给出）', () => {
+  const created = [];
+  const world = makeWorld(11);
+  const bodies = makeBodies(world);
+  makeRenderer(world, DESKTOP, false, created);
+  const baseRng = world.rng.fork();
+  let calls = 0;
+  const counting = {
+    next() { calls += 1; return baseRng.next(); },
+    range(a, b) { calls += 1; return baseRng.range(a, b); },
+    int(a, b) { calls += 1; return baseRng.int(a, b); },
+    chance(p) { calls += 1; return baseRng.chance(p); },
+    gaussian() { calls += 1; return baseRng.gaussian(); },
+    pick(arr) { calls += 1; return baseRng.pick(arr); },
+    fork() { return counting; },
+  };
+  const r2 = createRenderer({ makeCanvas: makeCanvasStub(created), rng: counting, viewport: DESKTOP, isMobile: false });
+  const built = calls;
+  const ctx = createLogCtx();
+  for (let i = 0; i < 60; i++) r2.draw(ctx, world, bodies, DESKTOP, CONFIG.fixedDt);
+  assert.equal(calls, built, `第 6 层取了 ${calls - built} 个随机数 —— 随机流属于内核，表现层一帧都不该动它`);
+  const before = created.length;
+  for (let i = 0; i < 60; i++) r2.draw(ctx, world, bodies, DESKTOP, CONFIG.fixedDt);
+  assert.equal(created.length, before, '眼睛不许新建 sprite：眼白是扁平填充，这是"不改 B14 精确账单"的代价与决定');
 });

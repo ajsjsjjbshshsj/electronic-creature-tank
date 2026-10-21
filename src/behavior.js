@@ -115,7 +115,8 @@ const M = CONFIG.behavior.minIntentDuration;
 export const MIN_DURATION = Object.freeze({
   forage: M * 1.25, eat: M, rest: M * 2.5, socialize: M * 1.7,
   brood: M * 2.0, explore: M * 1.7, flee: M * 0.4, beg: M * 1.25,
-  hop: M * 0.7,
+  // hop **刻意不在这里**：spec §4.7.2 给的是 0.6 / (0.3 + activity)，是性格量而非共享常数。
+  // 它的值在 personality.thresholds().hopMinDuration，由 decide 单独取用（见那里的注释）。
   protest: M, fight: M * 0.85, mourn: M * 1.7, idle: M * 1.25,
 });
 
@@ -321,7 +322,11 @@ export function decide(c, senses, rng) {
   // 从而改变它"纯粹是 Record<string, number>"的接口）。
   const nearestFood = senses.foods.length ? senses.foods[0] : null;
   const nearestNeighbor = senses.neighbors.length ? senses.neighbors[0] : null;
-  const intent = { kind: bestKind, minDuration: MIN_DURATION[bestKind] };
+  const intent = {
+    kind: bestKind,
+    // hop 的锁定长度随性格变（spec §4.7.2「好动的跳得勤」），其余 12 项查共享常数表。
+    minDuration: bestKind === 'hop' ? c.thresholds.hopMinDuration : MIN_DURATION[bestKind],
+  };
 
   switch (bestKind) {
     case 'forage':

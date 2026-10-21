@@ -34,7 +34,7 @@
 import { CONFIG } from './config.js';
 import { createWorld, tickWorld } from './sim.js';
 import { updateBodies, reconcileBodies } from './body.js';
-import { createRenderer } from './render.js';
+import { createRenderer, consumeEvents } from './render.js';
 
 // ---------------------------------------------------------------- 纯逻辑（可在 Node 测）
 
@@ -203,10 +203,16 @@ export function boot(opts) {
     const simDt = loop.steps * CONFIG.fixedDt;
     if (renderer) renderer.draw(ctx, world, bodies, viewport, simDt);
 
-    // 事件消费（B16 接溶散动画、B18 接叫声、B19 接气泡）。
+    // 事件消费（B16 接溶散粒子、B18 接叫声、B19 接气泡）。
     // ⚠️ 必须每帧清空：world.events 是**无界增长**的（sim.js 只写不读、不代为清理），
     // 开一小时的标签页会把它涨到几十万条，然后每帧遍历它。
-    if (audio && world.events.length > 0) audio.consume(world.events, world);
+    // ⚠️ 清空由**这里**做、消费方一律不清空：renderer 与 audio 读同一批事件，
+    // 谁先清空谁就把事件从另一个人手里抢走了（render.js 的 consumeEvents 顶部那条）。
+    // 这就是 B16 已经在接、而 audio 要到 B18 才存在也不能改成"audio 自己清"的原因。
+    if (world.events.length > 0) {
+      if (renderer) consumeEvents(renderer, world.events);
+      if (audio) audio.consume(world.events, world);
+    }
     world.events.length = 0;
   };
 

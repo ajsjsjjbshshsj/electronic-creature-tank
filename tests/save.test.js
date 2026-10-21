@@ -134,8 +134,8 @@ test('traits 与 thresholds 由 genes 重建，而不是从旧档读', () => {
     assert.ok(c.thresholds && Number.isFinite(c.thresholds.hopWeight), 'thresholds 必须由性格算出');
     assert.deepEqual(Object.keys(c.thresholds).sort(), [
       'angerDuration', 'angerThreshold', 'broodInterval', 'energyDrainFactor', 'exploreRadius',
-      'fearThreshold', 'heardCapacity', 'hopWeight', 'hungerTrigger', 'misspeakChance',
-      'playerApproach', 'socialTrigger', 'speechCooldown', 'turnRate',
+      'fearThreshold', 'heardCapacity', 'hopMinDuration', 'hopWeight', 'hungerTrigger',
+      'misspeakChance', 'playerApproach', 'socialTrigger', 'speechCooldown', 'turnRate',
     ], '阈值表必须与 personality.thresholds 的当前形状一致');
     assert.ok(Array.isArray(c.lineage.mates), 'lineage.mates 缺失时补空数组（layEggs 会 push 它）');
   }

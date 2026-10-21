@@ -86,7 +86,8 @@ const CONFIG = {
     energyCost: 0.02,                   // 每次落地从 energy 扣
     drainBase: 0.7, drainGain: 1.0,     // energyDrainFactor：好动的把精力掉得更快
     impulseBase: 1.0,                   // 跳起冲量 = base × (0.5 + activity)，表现层用
-    minDurationBase: 0.6,               // 秒；实际 = base / (0.3 + activity)，表现层用
+    minDurationBase: 0.6,               // 秒；实际时长 = base / (floor + activity)
+    minDurationFloor: 0.3,              // 分母里的常数项：activity=0 时也不许把锁定拉到无穷长
   },
   speech: {
     enabled: true,                      // 关掉它，spec §9.2 第 7 条必须仍然全部成立
@@ -210,6 +211,13 @@ const CONFIG = {
     // 而本模块只按 `speed > HAND_SPEED_POKE` 区分粗暴/温柔，不区分静止与划动。
     // 所以"手一直停着也能一直卖萌"这件事要等有真实输入后再调 ——
     // 合理的下一步是让 beg 的分数随手的**移动**上升，而不是仅凭"手在附近"。
+    // 它在看着你（spec §4.6 末段）。facing 的松弛目标由好感决定：
+    // 高好感转过去、负好感转开、**中间地带什么都不做**（否则就成了"有手就盯着"）。
+    // 速率是 turnRate 的一个分数 —— 这是一次 glance，不是瞬间掉头；
+    // turnRate 本身由 bold 调制，所以"胆大的敢直视、胆小的瞥一眼就躲"是涌现的。
+    lookTowardAffection: 0.2,
+    lookAwayAffection: 0,
+    lookRateFactor: 0.35,
     begUrgency: 7.0,
     // 求关注升级链（spec §4.10）：**不是新意图**，是 beg 这一个动机的三档强度。
     // 做成独立 attract 意图的话，beg 与 attract 会在效用评分里互相竞争，
@@ -329,10 +337,110 @@ const CONFIG = {
     waveLag: 0.7,              // 相邻段的相位差（弧度）：波从根部往尖端传，不是整条一起摆
     followRate: 16,            // 每秒向目标位置松弛的系数（显式积分 ⇒ 必须跑在固定步长里）
     dragRate: 8,               // Verlet 阻尼（每秒，换算成 exp(-rate×dt) 而非每步常数）
+    // 求关注升级链的第三条读出通道（spec §4.10："升一级：… 尾巴幅度拉满"）。
+    // 档位判定读 CONFIG.behavior.begEscalate 的两个秒数，**不在这里另写阈值**。
+    ampBeg: 0.34,              // 第一档给摆幅的加数（拉满；到第二档就**撤掉**，见下面那条）
+    begRateGain: 0.9,          // 第二档（protest，背对手生气）给摆速的增益：急促前后抽
   },
   blink: {
     intervalBase: 4.0,         // BLINK_INTERVAL_BASE：秒；实际 = BASE / (0.4 + activity)
     activityFloor: 0.4,        // 同一条 spec §4.6 公式里的地板常数，与尾巴的 activity 同源
+  },
+
+  // ---- 眼睛（spec §4.6 的十行表，2026-10-21 B15）----
+  // 分工与 mood / tail / blink 三组一样：**数在这里，映射在 src/eyes.js**。
+  // eyes.js 里不许出现数值字面量（由 tests/eyes.test.js 的源码扫描钉住，先例是
+  // body.test.js 对 body.js 那条），所以十行表每一格的读数都只能从这一段取。
+  // 注释里标了"spec 逐字"的那些是 §4.6 表里写死的数值，改它们要先改 spec；
+  // 其余属 §12 授权"实现阶段按观感直接定"的范围，改它们只需要一次有意识的动作
+  // （tests/eyes.test.js 里那一格的行为断言会跟着红，这是想要的摩擦）。
+  eye: {
+    // 四参数的基准值（spec §4.6：pupilSize / lidOpen / eyeSpacing / eyeOffset）
+    neutralPupil: 0.42,        // 中性瞳孔半径 / 眼睛半径
+    spacing: 0.42,             // 两眼圆心间距 / 体直径；单只眼 0.28 ⇒ 边缘几乎相触
+    forward: 0.15,             // 眼睛整体沿 facing 前移 / 体直径（脸长在前半侧）
+    pupilMin: 0.12,            // 瞳孔下限：再小就在屏幕上塌成一个点
+    pupilMax: 0.95,            // 瞳孔上限 = 卖萌那一格（spec 逐字 0.95），婴儿式
+    eyeSizeMin: 0.45,          // 害怕收缩的下限（0 半径的路径在 canvas 上是无效绘制）
+    leakGain: 0.22,            // 次要情绪的泄漏幅度（spec §4.5："次要情绪会泄漏出来"）
+    phaseModulus: 997,         // 眨眼相位的取模质数：由 id 哈希来，不许用随机数也不许用下标
+
+    // 第 1 行 joy 快乐 = ^^ 眯弧
+    happyLid: 0.30,            // spec 逐字："眯成两道上弯弧 ^^，lidOpen ≈ 0.3"
+    happyPupil: 0.62,          // 开心时瞳孔比中性放大（spec 只说"放大"，数属 §12）
+
+    // 第 2 行 幸福 = 星星眼（2026-10-20 裁定 1：稀有才是奖赏）
+    blissPupil: 0.80,          // spec 逐字："pupilSize ≈ 0.8"
+    blissLid: 0.92,            // 星星眼要睁着才看得见（不许同时是 ^^）
+    starPoints: 4,             // spec 逐字："瞳孔画成**四角星**"
+    starSpinMax: 0.22,         // "随 arousal 轻微旋转"的最大弧度（"轻微"有上界）
+    starScaleMax: 0.18,        // "随 arousal 轻微缩放"的最大幅度（± 此值）
+    starSpinPeriod: 2.6,       // 秒：星慢慢转一圈的周期
+
+    // 第 3 行 伤心 = 委屈眼（2026-10-20 裁定 2：独立形态，不是 fear 的复用）
+    sadLid: 0.55,              // spec 逐字："lidOpen ≈ 0.55"
+    sadLowerLid: 0.42,         // spec 逐字："**下眼睑上抬**（不是上眼睑下垂）"
+    sadPupil: 0.72,            // "瞳孔放大"（spec 只给方向，数属 §12）
+    sadSpacing: 0.10,          // "eyeSpacing 外扩"
+    sadOffset: -0.18,          // "整只后移"（沿 facing 的负偏移）
+    sadHighlightY: 0.45,       // "高光偏到眼睛下缘"（+y = 屏幕向下 ⇒ 含泪感）
+
+    // 第 4 行 anger
+    angerPupil: 0.25,          // spec 逐字："pupilSize ≈ 0.25"
+    angerTopLid: 0.42,         // "瞪圆但**上眼睑压低**"
+    angerSpacing: -0.10,       // "eyeSpacing 内收"（挤在一起 ⇒ 皱眉感）
+    angerLid: 0.95,            // 瞪圆：开合几乎不动，压低的活交给 angerTopLid
+
+    // 第 5 行 fear
+    fearPupil: 0.15,           // spec 逐字："pupilSize ≈ 0.15"
+    fearLid: 1.00,             // "瞪到最大"
+    fearOffset: -0.22,         // "eyeOffset 沿 facing 后移"
+    fearShrink: 0.22,          // 裁定 2 里害怕的"整只收缩"（委屈没有这一项）
+
+    // 第 6 行 curiosity
+    curiosityAsym: 0.55,       // "一只眼睁大一只微眯"：左右 lidOpen 的差
+    curiosityPupil: 0.62,      // "瞳孔放大"
+    curiosityOffset: 0.14,     // "eyeOffset 前倾"
+
+    // 第 7 行 sleepy
+    sleepyLid: 0.40,           // "半闭"
+    sleepyBlinkStretch: 2.4,   // "极缓慢地眨"：眨眼周期 × 此值（> 1 才是"缓慢"）
+
+    // 第 8 行 卖萌
+    begPupil: 0.95,            // spec 逐字："瞳孔放到最大 ≈ 0.95（婴儿式）"
+    begLid: 0.96,              // 卖萌要睁大眼睛（不许被 sleepy 压成半闭）
+    begLiftY: 0.20,            // "叠加一个向上的垂直偏移"（微微上望）
+
+    // 第 9 行 信任玩家（猫的 slow blink）
+    trustBlinkStretch: 1.8,    // "缓慢眨一次眼"：周期 × 此值
+    trustAffectionMin: 0.5,    // 好感低于此不慢眨：陌生人不欠你一个 slow blink
+
+    // 第 10 行 死亡
+    deathCloseSeconds: 1.2,    // "眼睛**缓缓**闭合"：从断气到 lidOpen → 0 的秒数
+
+    // 眨眼的波形（三角波：快闭快开、中间有停顿；正弦波看起来像在抽搐）
+    blinkWaveFrac: 0.24,       // 一次眨眼占整个周期的比例（其余时间是睁着的）
+    arousalPupil: 0.08,        // 兴奋对瞳孔的额外放大（叠加层，不改任何一格的名义值）
+
+    // "看着玩家的手"（spec §4.6 里**瞳孔**那半；facing 那半内核还做不到）
+    lookMax: 0.22,             // 瞳孔朝手最多偏移这么多（× 眼睛半径）
+    lookTrustMin: 0.35,        // 好感 0 时只看 35% 的幅度（好感低会"转开"）
+    handNearRadius: 0.16,      // 归一化距离：手在这个半径内才算"在附近"
+
+    // 瞳孔高光（"有神"的那一笔；常态在左上，委屈那一格被推到下缘）
+    highlightX: -0.34,         // × 瞳孔半径，负 = 朝屏幕左
+    highlightY: -0.38,         // × 瞳孔半径，负 = 朝屏幕上
+    highlightRadius: 0.26,     // × 瞳孔半径
+
+    // 腮红（spec §5.1 第 6 层"眼睛 → 腮红"的后半；§4.5 的卖萌行"腮红泛开"）
+    blushAlpha: 0.30,
+    blushJoyBoost: 0.35,       // joy=1 时再加这么多
+    blushBegBoost: 0.45,       // 卖萌时最明显（spec §4.5 的卖萌行）
+    blushMax: 0.85,            // 上限：再红就不是毛绒而是猴屁股
+    blushOffsetX: 0.34,        // 沿垂直 facing 方向，两侧各一个 / 体直径
+    blushOffsetY: 0.22,        // 沿 facing 方向压到眼睛下方 / 体直径
+    blushRadius: 0.16,         // × 体直径
+    blushAlong: 0.10,          // 沿 facing 的前移量 / 体直径
   },
 
   // ---- 渲染（spec §3.4-2 的缩放、§5.2 的水体）----
@@ -390,6 +498,43 @@ const CONFIG = {
     tailTaper: 0.20,           // 第 5 层：段间递减（根粗尖细），3 段之后仍 > 0
     tailLiftFactor: 0.30,      // 第 5 层：屏幕空间的"高举"量 × 摆幅（§4.7.1 表里幸福那一档）
     fluffSpriteSize: 160,      // 第 7 层碎边 sprite 边长（px）；**总共只有 CONFIG.fluff.sprites 张**
+
+    // ---- B16（2026-10-21）：死亡溶散 / sick / 哀悼 / 卵 / 食物 / 蹦跳 ----
+    // 这一段的分工与上面几段一致：数在这里，**行为**由 tests/render-fx.test.js 钉。
+    // 死亡溶散（spec §4.11 那一行："停止运动 → 光慢慢熄灭 → 身体溶散成微粒上升消散"）。
+    // ⚠️ 时长**不在这里**：它用内核的 CONFIG.dissolveDuration（4 秒），因为 reapDead
+    // 就是按 dying >= dissolveDuration 把个体 splice 掉的（sim.js 的 reapDead）。
+    // 表现层另计一套时钟必然漂移，症状是"动画没播完生物就没了"或反过来。
+    dissolveExpand: 1.9,       // 结束时体型放大到 1.9 倍：**散开**而不是缩没
+    dissolveLift: 0.035,       // 同时向上漂移的归一化距离（"溶进水里"）
+    dissolveAlphaPow: 2,       // 身体 alpha = (1−t)^此值：末尾"化掉"而不是线性淡出
+    dissolveGlowPow: 3,        // 光晕 alpha = (1−t)^此值：**幂更大 ⇒ 光比身体先熄灭**（spec 那句话的顺序）
+    dissolveParticles: 14,     // 每只死亡时爆发的微粒数
+    burstPool: 240,            // 粒子对象池容量。**刻意小于** 24×14=336：池满就环形覆盖最老的粒子，
+                               // 而同帧 24 只全死在实际模拟里不会发生（死亡是稀疏事件）。
+                               // 环形覆盖保证永不扩容 ⇒ 永不分配（spec §5.3）。
+    // sick（spec §7.7："单只生物 tick 抛异常 → 隔离这一只、标 sick"；sim.js 把
+    // "画成变暗、静止，而不是无声地少一只"这条义务点名交给了表现层）
+    sickDim: 0.35,             // 亮度乘数：暗到明显异常，但仍看得清是什么
+    sickDesat: 0.55,           // 去饱和比例。**换档而不是加滤镜**：ctx.filter 在部分移动端
+                               // 浏览器上不支持或极慢，而 spec §5.3 的预算是按手机算的。
+    // 哀悼（spec §4.11："死亡时附近的个体会停顿、变暗一小会儿"；时长 = CONFIG.mournDuration）
+    mournDim: 0.72,            // 比 sick 轻：哀悼是情绪、不是故障，不该看起来像坏了
+    // 卵（spec §4.11 / §4.12 第 6 条）
+    eggRadius: 12,             // 世界单位半径（× viewport.scale × eggSize），eggSize 的两端是 0.6/1.4
+    eggGlowPulse: 0.30,        // 可孵化卵的脉动幅度（"缸底微光脉动"）
+    eggFailFadeTime: 22,       // 不可孵化卵的光在多少个 **egg.age 秒**内熄灭（同一条时间轴）
+    eggFailMinGlow: 0.06,      // 熄灭后的残光：彻底消失就又变成一条**静默的禁令**了
+    eggRevealAt: 0.60,         // 孵化进度到这一档才开始"壳内透出轮廓"（spec §4.11 卵那一行）
+    // 食物（spec §6.2 的三种外观）
+    foodRadius: 7,             // 世界单位基准半径（× viewport.scale × amount 项）
+    // 蹦跳（spec §4.7.2 落地那半句 + §4.7 的 squash & overshoot）
+    // ⚠️ 竖向偏移**不是世界状态**：它每帧由 intent.kind === 'hop' 与 intentTime 重算，
+    // 不入档（spec §7.2"表现层的身体状态一律不入档"），时长读 intent.minDuration。
+    hopLiftRatio: 0.55,        // 最高点 = 该值 × 身体半径 × 冲量（冲量见 CONFIG.hop.impulseBase）
+    hopLandAt: 0.72,           // 落地落在 hop 窗口的这一进度上，**留出后面的过冲段**
+    hopSquashMin: 0.62,        // 落地那一刻的竖向尺度（压扁 38%）
+    hopStretchAir: 1.10,       // 滞空中点的竖向尺度（拉长 10%；与压扁共用一条 sin 弧）
   },
 
   // ---- 世界 ----
@@ -428,6 +573,10 @@ const CONFIG = {
     mote: '#FFD9E8',
     pupil: '#2D1240',
     blush: '#FF6B9D',
+    // B15 眼睛（spec §4.6）。eyeWhite 不是纯白而是带回粉的白：
+    // 纯白的眼白贴在粉色卷毛上会读成"贴纸"，而 spec §4.2 那条"不用纯黑"是同一个理由的两端。
+    eyeWhite: '#FFF2F8',
+    eyeHighlight: '#FFFFFF',   // 瞳孔高光那一笔是纯白：它要的就是"湿"的反光
     sakura: '#FFC8DE',
     peach: '#FF9EB5',
     coral: '#FF8FA3',
@@ -443,6 +592,31 @@ const CONFIG = {
     sediment: '#170A22',
     sedimentLight: '#3A1850',   // 堆叠形状的受光面，制造体积感
     shaft: '#6A4A8A',           // 光束：偏冷的紫，用 'lighter' 叠上去后接近水的散射色
+    // 三种食物的颜色（spec §6.2）。
+    // ⚠️ **刻意全部避开粉色**：spec §6.2 的原话是三种食物"避开粉色系（青绿 / 琥珀 / 淡蓝），
+    // 这样它们在粉紫色的世界里一眼可辨，不会被误认为生物"。所以这里出现青绿/琥珀/淡蓝
+    // 不是配色失误，是设计要求 —— 改这三个颜色会直接违反 spec §6.2，
+    // 由 tests/render-fx.test.js 的"三种食物刻意避开粉色系"用色相并集判定拦住。
+    algae: '#7FE3B0',           // 青绿光藻：基础食物，会自然再生（初始缸里就有 12 份）
+    nectar: '#FFC46B',          // 琥珀金珠：高能量，争抢的主要来源（色相 36°，恰在粉色区外）
+    crystal: '#A8D8FF',         // 淡蓝结晶：安抚，玩家的"灭火器"
+    // 蛋色（spec §11 EGG_TINTS 的八色：**键集必须与 CONFIG.eggTint.colors 同一份**）。
+    // 具体色值属 §12 授权（按观感定），但 spec §11 留了两条硬要求：
+    //   ① 在深靛紫底（#2D1240）上全部可读 ⇒ 黑蛋不能真是 #000000（那样在缸底彻底看不见），
+    //      它是八色里最暗的一档但仍抬到对比度下限之上；
+    //   ② 不与 PUPIL_COLOR（#2D1240）撞色。
+    // 两条都由 tests/render-fx.test.js 用独立实现的相对亮度算子核对（不在 src/ 里，
+    // 因为表现层不得自己再解码一次颜色空间）。
+    eggTints: Object.freeze({
+      'macaron-pink': '#FFB3D1',
+      'macaron-blue': '#A8CFFF',
+      'macaron-mint': '#A6E9C8',
+      'macaron-lilac': '#D8BEFF',
+      'macaron-cream': '#FFEFC2',
+      'macaron-peach': '#FFC9A3',
+      'white': '#F6F1F8',       // 不是纯白：纯白贴在深紫上会读成"贴纸"（B15 眼白那条同理由）
+      'black': '#4A4458',       // 抬亮的炭灰：可读性下限要求的唯一一处妥协，见上面 ①
+    }),
   },
 };
 
