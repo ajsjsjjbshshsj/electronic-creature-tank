@@ -218,6 +218,13 @@ const CONFIG = {
     lookTowardAffection: 0.2,
     lookAwayAffection: 0,
     lookRateFactor: 0.35,
+    // 抚摸买到好感（spec §6.1 的"抚摸 → affection+ / joy+"，2026-10-21 落地）。
+    // 三条通道的分工：手在附近且温柔 ⇒ familiarity（认识）；手**贴着身体**且温柔 ⇒
+    // affection（喜欢）+ 一次 petted 事件；它自己 beg 蹭上来 ⇒ affection（原有通道）。
+    // 接触半径用 sizeOf(c)/1000 —— 与 resolve() 里"两只身体的接触距离"同一口径，
+    // 不另立第二个体型→世界坐标的换算，否则两处会漂。
+    petContactRatio: 1.15,      // × 身体世界半径；留 15% 余量，指尖"擦到毛边"就算摸到
+    petAffectionRate: 0.06,     // 每秒好感：摸 10 秒 +0.6，而半衰期 34.7s ⇒ 不摸就很快还回去
     begUrgency: 7.0,
     // 求关注升级链（spec §4.10）：**不是新意图**，是 beg 这一个动机的三档强度。
     // 做成独立 attract 意图的话，beg 与 attract 会在效用评分里互相竞争，

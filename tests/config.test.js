@@ -684,3 +684,20 @@ test('「它在看着你」的三个阈值被字面量钉住，且中间地带�
   assert.ok(2 * b.lookRateFactor < 1 && 6 * b.lookRateFactor > 0.5,
     '一秒内既不能转不完 90°，也不能快到像瞬移');
 });
+
+test('抚摸通道的两个旋钮被字面量钉住，且好感速率与淡忘速率是同一量级', () => {
+  // 分工同前：这里钉数值，sim.test.js 钉"贴着才买好感 / 靠近只买熟悉度 / 戳什么都不买"。
+  const b = CONFIG.behavior;
+  assert.equal(b.petContactRatio, 1.15);
+  assert.equal(b.petAffectionRate, 0.06);
+  assert.ok(b.petContactRatio > 1 && b.petContactRatio < 1.5,
+    '接触半径必须略大于身体半径（擦到毛边就算摸到），但不能大到"隔着一段距离也算贴上来"');
+  // 量级关系：摸 10 秒 +0.6，而好感半衰期 34.657s ⇒ 不摸了会很快还回去。
+  // 这条断言防的是"把速率调成 6.0"那种让抚摸一次就永久封顶的改法。
+  const tenSeconds = 10 * b.petAffectionRate;
+  assert.ok(tenSeconds > 0.3 && tenSeconds < 0.9,
+    `摸十秒买到的好感应在 (0.3, 0.9)，实测 ${tenSeconds}`);
+  const halfLife = Math.log(2) / CONFIG.affectionDecay;
+  assert.ok(tenSeconds / halfLife < 0.03,
+    '十秒的收获量级必须远小于"半衰期秒数"，否则好感会只进不出、攒成永久封顶');
+});

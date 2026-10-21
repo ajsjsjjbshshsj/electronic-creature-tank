@@ -379,6 +379,16 @@ function isPetting(senses) {
   return !!h && h.speed <= HAND_SPEED_POKE && h.dist < CONFIG.perceiveRadius * 0.5;
 }
 
+// 抚摸的第二层判定：在 isPetting（温柔 + 够近）之上还要求**贴上身体**。
+// 接触半径读 sizeOf(c)/1000 —— 与 resolve() 里两只身体的接触距离同一口径。
+// 刻意不写成 `dist < 某个固定常数`：幼体与成体的"贴上去"差着一个数量级，
+// 固定数会让"摸一只幼体"变成必须把手插进它身体里才算。
+function isBeingPetted(c, senses) {
+  const h = senses.playerHand;
+  if (!h || h.speed > HAND_SPEED_POKE) return false;
+  return h.dist <= (sizeOf(c) / 1000) * CONFIG.behavior.petContactRatio;
+}
+
 function emotionCtx(c, senses) {
   const hand = senses.playerHand;
   const threat = senses.threats[0];
@@ -703,6 +713,20 @@ function tickCreature(world, c, dt) {
   // 跨过第二级那一刻发**一次** ignored 冲击。用 before/after 比较而不是挂标记：
   // 计时器本身单调，跨点只会发生一次，加一个 c.ignoredFired 字段反而多一个
   // 需要归零路径的状态（上一轮在 brood 结算上踩过"一次性标记挂错地方"的坑）。
+  // ---- 抚摸（spec §6.1）----
+  // 温柔的手**贴着身体**才算摸：贴着才买好感，靠近只买熟悉度。
+  // 这条分工是 spec §6.1 的全部要点（"温柔与否有区别"），也是"挂机刷好感"
+  // 不会被实现的原因 —— 合并成一条通道的话，把手放在屏幕边上就能喂满好感度。
+  if (isBeingPetted(c, senses)) {
+    adjustMemory(c.memory, PLAYER_ID, CONFIG.behavior.petAffectionRate * dt, 0);
+    if (!c.beingPetted) {
+      c.beingPetted = true;
+      applyEvent(c.emotions, 'petted');   // 上升沿一次：petted 从计划 1 起就没有生产者
+    }
+  } else {
+    c.beingPetted = false;
+  }
+
   const petting = isPetting(senses);
   if (petting || !senses.playerHand) {
     c.begIgnored = 0;

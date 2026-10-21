@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { CONFIG } from '../src/config.js';
 import { createRng } from '../src/rng.js';
 import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '../src/memory.js';
-import { createCreature } from '../src/creature.js';
+import { createCreature, sizeOf } from '../src/creature.js';
 import { ALL_GENES, randomGenome } from '../src/genes.js';
 import { MOODS } from '../src/emotions.js';
 import { hear } from '../src/heard.js';
@@ -1694,6 +1694,156 @@ test('同种子下整条转向可复现', () => {
     for (let i = 0; i < Math.round(5 * 60); i++) {
       tickWorld(w, 1 / 60);
       seq.push(`${c.facing.x.toFixed(9)},${c.facing.y.toFixed(9)}`);
+    }
+    return seq;
+  };
+  assert.deepEqual(play(), play());
+});
+
+// ---------------------------------------------------------------- 抚摸买到好感（spec §6.1，Task B17b）
+//
+// 这条补的是**两个**洞：
+//   ① spec §6.1 的表写着"抚摸 → affection+ / joy+"，而内核里 affection 只有 beg 会累积 ——
+//     温柔的手只买得到 familiarity（"认识"）。
+//   ② `CONFIG.emotions.eventMagnitude.petted` 从计划 1 起就**没有任何生产者**
+//     （grep 全 src/ 只有定义处）。一个永远不会被 applyEvent 到的事件种类，
+//     就是 Task 9 复查抓过的"无生产者的字段"。
+// 两条一起补：真的贴上去摸，才买好感，并且那一刻才发 petted。
+//
+// ⚠️ 这里的"发一次 petted"指的是 `applyEvent(c.emotions, 'petted')` ——
+// 它是**情绪冲击**（joy +0.4 / fear −0.2 那种一次性跳变），**不是** world.events 里的一条。
+// 第一版按"世界事件"去数，数到 0 还以为功能没接上。两者在 sim.js 里是完全不同的东西：
+// 前者改情绪向量，后者是给表现层的一次性通知（say / death / laid …）。
+// 数"跳变次数"的办法是可靠的：惯性的单步最多把 joy 推 (target−joy)×min(1,1.6/60) ≈ 0.027，
+// 所以一 tick 内 joy 跳 > 0.2 只可能来自 applyEvent。
+
+// 三条通道的分工必须清楚，否则"挂机就能刷好感"会毁掉 spec §6.1 的全部要点：
+//   手在附近且温柔        → familiarity（认识你）
+//   手**贴着身体**且温柔  → affection（喜欢你）+ petted 事件（一次抚摸只发一次）
+//   它主动 beg 蹭上来     → affection（原有通道，不变）
+
+const petTank = (seed) => {
+  const w = createWorld({ seed, initialCreatures: 0 });
+  w.foods.length = 0;
+  const c = createCreature({ id: 'pt', name: 'P', x: 0.5, y: 0.5, age: 960, rng: createRng(seed) });
+  addCreature(w, c);
+  c.needs.hunger = 0.02; c.needs.energy = 0.02; c.needs.social = 0.02; c.needs.safety = 0;
+  ensure(c.memory, PLAYER_ID);
+  const e = get(c.memory, PLAYER_ID);
+  e.familiarity = 0.5; e.affection = 0;
+  c.thresholds.playerApproach = 0;      // 关掉 beg 那条通道，让好感**只可能**来自抚摸
+  // 钉成 idle：不然它会自己游走，而手是固定的，接触就会一会儿断一会儿 ——
+  // 于是"petted 恰好发一次"测的是随机游走而不是抚摸语义。
+  c.intent = { kind: 'idle', minDuration: 1e9 };
+  return { w, c };
+};
+// 世界坐标下的"贴在身上"：半径 ≈ sizeOf/1000（与 resolve 的接触距离同一口径）
+const touchDist = (c) => sizeOf(c) / 1000;
+
+test('温柔地贴着它 → affection 上升，且 petted 事件恰好发一次', () => {
+  const { w, c } = petTank(920);
+  w.playerHand = { pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.01 };
+  let jumps = 0;
+  let pettedApplied = 0;
+  let prevJoy = c.emotions.joy;
+  for (let i = 0; i < Math.round(6 * 60); i++) {
+    tickWorld(w, 1 / 60);
+    if (c.emotions.joy - prevJoy > 0.2) jumps += 1;
+    prevJoy = c.emotions.joy;
+    if (c.beingPetted) pettedApplied += 1;
+    w.events.length = 0;
+  }
+  assert.ok(pettedApplied > 300, `前置条件：这六秒必须真的处于抚摸中，实测 ${pettedApplied} tick`);
+  assert.equal(jumps, 1, '一次抚摸只发一次 petted 冲击（每 tick 都发的话 joy 会被瞬间推到顶）');
+  assert.ok(affectionFor(c.memory, PLAYER_ID) > 0.1,
+    `贴着摸六秒应买到明显好感，实测 ${affectionFor(c.memory, PLAYER_ID).toFixed(3)}`);
+});
+
+test('手离开再回来算**第二次**抚摸（episode 边界，不是永久一次性）', () => {
+  const { w, c } = petTank(921);
+  const touch = () => { w.playerHand = { pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.01 }; };
+  const leave = () => { w.playerHand = { pos: { x: 0.5 + touchDist(c) * 6, y: 0.5 }, speed: 0.01 }; };
+  const countPetted = (seconds) => {
+    let n = 0;
+    let prev = c.emotions.joy;
+    for (let i = 0; i < Math.round(seconds * 60); i++) {
+      tickWorld(w, 1 / 60);
+      if (c.emotions.joy - prev > 0.2) n += 1;
+      prev = c.emotions.joy;
+      w.events.length = 0;
+    }
+    return n;
+  };
+  touch();
+  assert.equal(countPetted(2), 1, '第一次抚摸');
+  leave();
+  assert.equal(countPetted(2), 0, '离开期间不该再发');
+  assert.equal(c.beingPetted, false, '离开后必须落回"没在被摸"');
+  touch();
+  assert.equal(countPetted(2), 1, '再贴回来必须算第二次 —— 否则第二次起就永远静默');
+});
+
+test('粗暴地贴着不算抚摸：不发 petted、不买好感', () => {
+  const { w, c } = petTank(922);
+  w.playerHand = { pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.9 };   // > HAND_SPEED_POKE
+  let petted = 0;
+  let prevJoy = c.emotions.joy;
+  for (let i = 0; i < Math.round(6 * 60); i++) {
+    tickWorld(w, 1 / 60);
+    if (c.emotions.joy - prevJoy > 0.2) petted += 1;
+    prevJoy = c.emotions.joy;
+    w.events.length = 0;
+  }
+  assert.equal(petted, 0, '戳不是抚摸');
+  assert.ok(affectionFor(c.memory, PLAYER_ID) <= 0,
+    `戳不该买到好感，实测 ${affectionFor(c.memory, PLAYER_ID).toFixed(4)}`);
+});
+
+test('近但**没贴上**：只买 familiarity，不买 affection（两条通道的分工仍然成立）', () => {
+  const { w, c } = petTank(923);
+  // 放在 isPetting 的门内（< perceiveRadius×0.5）、接触半径之外
+  const d = (touchDist(c) * 1.6 + CONFIG.perceiveRadius * 0.5) / 2;
+  assert.ok(d > touchDist(c) * CONFIG.behavior.petContactRatio,
+    `前置条件：这个距离必须落在接触半径之外：${d.toFixed(4)}`);
+  assert.ok(d < CONFIG.perceiveRadius * 0.5, `前置条件：又必须在抚摸门之内：${d.toFixed(4)}`);
+  w.playerHand = { pos: { x: 0.5 + d, y: 0.5 }, speed: 0.01 };
+  let petted = 0;
+  let prevJoy = c.emotions.joy;
+  for (let i = 0; i < Math.round(6 * 60); i++) {
+    tickWorld(w, 1 / 60);
+    if (c.emotions.joy - prevJoy > 0.2) petted += 1;
+    prevJoy = c.emotions.joy;
+    w.events.length = 0;
+  }
+  assert.equal(petted, 0, '没贴上就不该有 petted 冲击');
+  assert.equal(affectionFor(c.memory, PLAYER_ID), 0, '光是把手放在那儿不能刷好感');
+  assert.ok(familiarityFor(c.memory, PLAYER_ID) > 0.5, '但熟悉度照涨（"认识"）');
+});
+
+test('抚摸买到的好感**照常淡忘**（spec §4.8 的裁定不许开后门）', () => {
+  const { w, c } = petTank(924);
+  w.playerHand = { pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.01 };
+  step(w, 5);
+  const peak = affectionFor(c.memory, PLAYER_ID);
+  assert.ok(peak > 0.1, `前置条件：先摸出一点好感，实测 ${peak.toFixed(3)}`);
+  w.playerHand = null;
+  step(w, 60);
+  const after = affectionFor(c.memory, PLAYER_ID);
+  assert.ok(after < peak * 0.5,
+    `停手 60 秒后好感必须明显淡下去（半衰期 34.7s）：${peak.toFixed(3)} → ${after.toFixed(3)}`);
+  assert.ok(familiarityFor(c.memory, PLAYER_ID) > 0.5, '而"认识你"这条仍然豁免衰减');
+});
+
+test('抚摸整条链在同一种子下可复现', () => {
+  const play = () => {
+    const { w, c } = petTank(925);
+    const seq = [];
+    for (let i = 0; i < Math.round(8 * 60); i++) {
+      const d = touchDist(c) * (0.3 + 0.05 * Math.sin(i / 30));   // 缓慢划动，速度仍温柔
+      w.playerHand = { pos: { x: 0.5 + d, y: 0.5 }, speed: 0.02 };
+      tickWorld(w, 1 / 60);
+      seq.push(`${affectionFor(c.memory, PLAYER_ID).toFixed(9)}|${c.beingPetted ? 1 : 0}|${c.emotions.joy.toFixed(9)}`);
+      w.events.length = 0;
     }
     return seq;
   };

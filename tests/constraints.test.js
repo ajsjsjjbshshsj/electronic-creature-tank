@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CONFIG } from '../src/config.js';
 
 // 架构约束的自动化守卫。
 //
@@ -179,4 +180,43 @@ test('依赖方向：任何纯模块都不得 import 浏览器模块', () => {
     }
   }
   assert.deepEqual(hits, [], '纯逻辑模块不得依赖浏览器模块');
+});
+
+test('每一种情绪事件种类都真的有生产者（不许留无人发出的事件种类）', () => {
+  // 起因：`petted` 从计划 1 起就只有 CONFIG 里的定义，全 src/ 没有任何一处 applyEvent 它。
+  // 一个永远不会被发出的事件种类，症状是"调了它没反应"——
+  // 玩家以为摸它有用，实际那 0.4 的 joy 从来没加过。
+  // 与 Task 9 复查撤掉 `rejected`、以及"无生产者的旋钮要撤"是同一条纪律，
+  // 只是这次发生在事件表上。
+  //
+  // 写法上刻意用**源码扫描**而不是"跑一缸看出现过哪些"：后者会因某条路径在验收种子上
+  // 恰好不走到而误报（mourn 只在有死亡时发、laid 只在憋满时发），
+  // 而"代码里有没有这一行"是确定的、不需要运气的判据。
+  // 逐行扫（而不是拼正则）：上一版把 `\\(` 写进 bash heredoc 时被吞成一个反斜杠，
+  // 于是 new RegExp 收到未闭合的分组、测试直接 SyntaxError。
+  // 判据本身不需要正则：注释已剥掉，剩下"这一行既调了 applyEvent 又带着这个字面量"就够了。
+  // 已知的**待补生产者**清单。每条都必须写清"谁将来发它"，且这个清单只许变短、不许变长 ——
+  // 新增一个没有任何生产者、也没写归属的事件种类，这条测试就是为拦它而存在。
+  // （B17c 会实现"戳"的输入通道，届时 poked / startled 从这里删掉。）
+  const PENDING_PRODUCERS = {
+    poked: 'B17c：spec §6.1 的"戳"（快速点击），由 input.js 的 press + sim 结算',
+    startled: 'B17c：突然出现在它身边的手；needs.startle 目前也因此没有消费者',
+  };
+  const lines = [];
+  for (const f of listSrcFiles(SRC_DIR)) {
+    for (const line of stripComments(readFileSync(f, 'utf8')).split('\n')) lines.push(line);
+  }
+  const missing = [];
+  const stale = [];
+  for (const kind of Object.keys(CONFIG.emotions.eventMagnitude)) {
+    const produced = lines.some((l) => l.includes('applyEvent(')
+      && (l.includes(`'${kind}'`) || l.includes(`"${kind}"`)));
+    if (!produced && !PENDING_PRODUCERS[kind]) missing.push(kind);
+    if (produced && PENDING_PRODUCERS[kind]) stale.push(kind);
+  }
+  assert.deepEqual(missing, [], `下列情绪事件没有任何生产者：${missing.join(', ')}`);
+  assert.deepEqual(stale, [],
+    `这些事件已经有生产者了，请把 PENDING_PRODUCERS 里的条目删掉：${stale.join(', ')}`);
+  // 反向确认：petted 以前是死字段（只有定义、没人发），现在必须**不在**待补清单里
+  assert.ok(!('petted' in PENDING_PRODUCERS), 'petted 已由 B17b 接上生产者');
 });
