@@ -101,6 +101,17 @@ test('约束扫描确实覆盖到了 src/ 下的模块（防空转）', () => {
   for (const expected of ['speech.js', 'lexicon.js', 'heard.js', 'save.js']) {
     assert.ok(files.includes(join('src', expected)), `扫描清单里没有 src/${expected}`);
   }
+  // B13（2026-10-21）：渲染层**必须**留在这条扫描的覆盖范围内。
+  // 旧计划 Task 4 Step 7 写的是"把 'render.js' 加回可 import 性那条的 ['body.js'] 数组"，
+  // 但本文件的覆盖方式是 listSrcFiles 全量扫 src/，没有那样的白名单数组可改
+  // —— 那条的字面要求在这里不存在，所以按**意图**落地：把 render.js 与 body.js
+  // 钉进"确实被扫到"的清单。它们靠依赖注入拿 ctx / makeCanvas，源码里根本不出现
+  // 那七个名字，因此不需要豁免；哪天有人给它们开白名单，这条会先红。
+  for (const expected of ['body.js', 'render.js']) {
+    assert.ok(files.includes(join('src', expected)), `纯度守卫没有覆盖 src/${expected}`);
+    assert.ok(!BROWSER_MODULES.includes(join('src', expected)),
+      `src/${expected} 不该在浏览器模块白名单里（它靠注入，Node 里可单测）`);
+  }
 });
 
 test('src/ 下没有任何模块调用 Math.random()', () => {
