@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CONFIG } from '../src/config.js';
+import { ALL_GENES } from '../src/genes.js';
 import { MOODS } from '../src/emotions.js';
 import { NEED_KEYS } from '../src/needs.js';
 import { NEED_WORDS, STOPWORDS, WORD_POOL, tokenize } from '../src/lexicon.js';
@@ -38,23 +39,29 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   // 防空转：遍历自身写错（一个节点都没走到）时，上面的 deepEqual 会空着通过。
   //
   // ⚠️ 这里原来是 `visited.length >= 21`，是台账里挂了很久的一条 Minor：
-  // 用下限的话，**删掉一整段 CONFIG 也不会报警**（21 个节点的下限在 39 个的现实下永远满足），
+  // 用下限的话，**删掉一整段 CONFIG 也不会报警**（21 个节点的下限在 44 个的现实下永远满足），
   // 而"遍历没走到某个子树"恰恰就是这种删除的症状。下限防不住它想防的东西。
   // 改成**精确相等**：往 CONFIG 里加常量会让这条变红 —— 那是**想要的摩擦**，
   // 加常量的人必须顺手把这里和下面的段名一起更新，正如 MAGNITUDES 那张表要求
   // 新增情绪事件的人同步更新测试一样。"每次加常量都要回来改测试"不是缺点，是守卫的代价。
-  assert.equal(visited.length, 39, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  //
+  // ⚠️ 39 → 44、41 → 46：B12（2026-10-21）加了 body / star / fluff / tail / blink 五段，
+  // 每段一个节点。两个新数都是**用 node 数出来的**，不是估的：
+  //   node -e "import('./src/config.js').then(({CONFIG})=>{let n=0;const w=x=>{if(x===null\
+  //   ||typeof x!=='object')return;n++;for(const k of Object.keys(x))w(x[k])};w(CONFIG);\
+  //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 44 keys 46
+  assert.equal(visited.length, 44, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
-    'affectionDecay', 'affectionDecayKin', 'behavior', 'bodyPoints', 'broody', 'colors',
-    'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize', 'eggTint',
-    'eggsPerClutch', 'emotions', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt', 'food',
-    'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hueRange',
+    'affectionDecay', 'affectionDecayKin', 'behavior', 'blink', 'body', 'bodyPoints', 'broody',
+    'colors', 'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize', 'eggTint',
+    'eggsPerClutch', 'emotions', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt', 'fluff',
+    'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hueRange',
     'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
     'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
-    'populationCap', 'speech', 'stage', 'timeScales',
-  ], 'CONFIG 顶层键名（41 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 41);
+    'populationCap', 'speech', 'stage', 'star', 'tail', 'timeScales',
+  ], 'CONFIG 顶层键名（46 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 46);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -62,6 +69,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.timeScales', 'CONFIG.hueRange', 'CONFIG.eggsPerClutch', // 数组节点
     'CONFIG.mood', 'CONFIG.heard', 'CONFIG.speech', 'CONFIG.hop',   // 2026-10-20 之后新增的四段
     'CONFIG.heard.moodPrice', 'CONFIG.behavior.begEscalate',        // 第三层的新增项
+    'CONFIG.body', 'CONFIG.star', 'CONFIG.fluff', 'CONFIG.tail', 'CONFIG.blink',   // B12 新增五段
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -280,6 +288,121 @@ test('听进去的话的九个常量与价格表齐备，价格表键集与 MOOD
     'sad 不能落到抑制线以下 —— 饿的时候听到"吃饭"通常就是带着难过听的，被抑制就等于这个例子失效');
   assert.ok(h.moodPrice.bliss > 0 && h.moodPrice.happy > 0);
   assert.ok(Object.isFrozen(h.moodPrice), '价格表应被冻结');
+});
+
+// ---- B12（2026-10-21）：造型四组 + 软体弹簧，全部钉数值本身 ----
+// 分工与上面三组同构：这里钉**数值**，tests/body.test.js 钉它造成的**行为差异**
+// （形状是不是五角星、尾巴摆速随不随 activity、毛长随不随 fluff 基因）。
+// 只钉行为的话，把 STAR_INNER_RATIO 从 0.62 改成 0.95 会让星形悄悄塌成圆而没有任何报警；
+// 只钉数值的话，把摆速公式里的 (1 + arousal) 改成 (1 + fear) 也不会报警 —— 所以两边都要有。
+
+test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（行为两侧由 body.test.js 负责）', () => {
+  // 八个数逐字取自 spec §11（2026-10-20 那一版），不是估的：
+  //   STAR_OUTER_RATIO=1.0  STAR_INNER_RATIO=0.62  FLUFF_LEN_RATIO=0.18  FLUFF_SPRITES=2
+  //   TAIL_SEGS=3  TAIL_LEN_RATIO=0.5  TAIL_SWING_BASE=1.2  BLINK_INTERVAL_BASE=4.0
+  assert.deepEqual(Object.keys(CONFIG.star).sort(), ['corners', 'innerRatio', 'outerRatio']);
+  assert.equal(CONFIG.star.corners, 5, '五角星的"五"：spec §11 没单列，但 body.js 不许有字面量');
+  assert.equal(CONFIG.star.outerRatio, 1.0);
+  assert.equal(CONFIG.star.innerRatio, 0.62, '0.62 是照片那只的比例，改它必须是一次有意识的动作');
+  assert.ok(CONFIG.star.innerRatio > 0 && CONFIG.star.innerRatio < CONFIG.star.outerRatio,
+    '内凹必须严格小于外角，否则"不是星形就是圆"');
+
+  assert.deepEqual(Object.keys(CONFIG.fluff).sort(), ['lenRatio', 'sprites']);
+  assert.equal(CONFIG.fluff.lenRatio, 0.18);
+  // sprites = 2 是 spec §4.7 那条性能生死线的读数：
+  // 只画"毛尖浅色碎边"才只需要 2 张；按"每根毛有自己的颜色"要 32 色相桶 × 8 蓬松档 = 256 张。
+  assert.equal(CONFIG.fluff.sprites, 2);
+
+  assert.equal(CONFIG.tail.segs, 3);
+  assert.equal(CONFIG.tail.lenRatio, 0.5, '链长 = 0.5 × 身体半径，**由体型派生、不新增基因**');
+  assert.equal(CONFIG.tail.swingBase, 1.2);
+  // 这两个数是 spec §4.7.1 那条公式**自身**的两个常数（搬进 CONFIG 只为了让 body.js 无字面量）
+  assert.equal(CONFIG.tail.swingActivityFloor, 0.4);
+  assert.equal(CONFIG.tail.swingArousalGain, 1);
+  assert.deepEqual(Object.keys(CONFIG.tail).sort(), [
+    'ampAnger', 'ampArousal', 'ampJoy', 'ampQuiet', 'angerRateGain', 'curlQuiet', 'dragRate',
+    'fearTuck', 'followRate', 'lenRatio', 'segs', 'swingActivityFloor', 'swingArousalGain',
+    'swingBase', 'waveLag',
+  ], '尾巴的十五个旋钮，不多不少（spec 只给了前三个数与后十个的**排序**，数值属 §12 授权）');
+  assert.ok(CONFIG.tail.ampQuiet > 0, '安静档也必须还在摆（spec §4.7.1 表："低频慢摆"，不是"不动"）');
+  assert.ok(CONFIG.tail.fearTuck > 0 && CONFIG.tail.fearTuck <= 1, 'fearTuck 是收缩分数');
+
+  assert.deepEqual(Object.keys(CONFIG.blink).sort(), ['activityFloor', 'intervalBase']);
+  assert.equal(CONFIG.blink.intervalBase, 4.0);
+  assert.equal(CONFIG.blink.activityFloor, 0.4,
+    '眨眼与蹦跳同源的证据：两条公式用的是同一个 activity 地板');
+});
+
+test('尾巴与眨眼都不许新增基因位点，且 activity 地板两处必须相等', () => {
+  // spec §4.7.1 明文"不新增基因（性状已经够多了，加位点要付测试代价）"。
+  // 反向确认：真长出 tail/star/blink 位点的话，genes.test.js 的槽位数断言也会红，
+  // 但那条只数数量、不看名字 —— 这里补上名字这一半。
+  const banned = /tail|star|blink|curl/i;
+  assert.ok(!ALL_GENES.some((g) => banned.test(g)), '造型相关的不许成为基因位点');
+  assert.equal(CONFIG.tail.swingActivityFloor, CONFIG.blink.activityFloor,
+    'spec §4.6：眨眼频率与 §4.7.2 蹦跳同源，都由 activity 驱动 —— 地板分家就是假设分家');
+});
+
+test('软体弹簧的二十八个常量齐备，且两端都欠阻尼（spec §4.7 过冲要求的数值前提）', () => {
+  const B = CONFIG.body;
+  assert.deepEqual(Object.keys(B).sort(), [
+    'angerFlatten', 'angerSharpen', 'arousalExpand', 'curiosityElongate', 'dentDecay', 'dentMax',
+    'dyingCalm', 'dyingCollapse', 'fearShrink', 'impactEps', 'impactFullDent', 'joyExpand',
+    'maxStretchSpeed', 'pulseAmpArousal', 'pulseAmpBase', 'pulseAmpJoy', 'pulseAmpSleepy',
+    'pulseRateArousal', 'pulseRateBase', 'pulseRateFloor', 'pulseRateSleepy',
+    'sickCalm', 'sleepyCalm', 'stiffnessAtFullWobble', 'stiffnessAtZeroWobble',
+    'stretchK', 'zetaAtFullWobble', 'zetaAtZeroWobble',
+  ], '软体弹簧的旋钮集，不多不少');
+  assert.equal(B.stiffnessAtZeroWobble, 220);
+  assert.equal(B.stiffnessAtFullWobble, 80);
+  assert.equal(B.zetaAtZeroWobble, 0.70);
+  assert.equal(B.zetaAtFullWobble, 0.35);
+  // 两端都必须 < 1：spec §4.7"形变必须带过冲回弹"在数值层的前提。
+  // 行为那一半在 body.test.js 的过冲测量里，这里守的是"没人把 1.2 写进来"。
+  assert.ok(B.zetaAtZeroWobble < 1 && B.zetaAtFullWobble < 1, '过阻尼 = 不过冲 = 违反 §4.7');
+  // 过冲量 exp(-πζ/√(1-ζ²))：4.6% → 30.9%，两端差 6.7 倍 —— 这是"挺 / Q"肉眼可辨的数值依据
+  const overshoot = (zeta) => Math.exp(-Math.PI * zeta / Math.sqrt(1 - zeta * zeta));
+  assert.ok(overshoot(B.zetaAtZeroWobble) < 0.05);
+  assert.ok(overshoot(B.zetaAtFullWobble) > 0.30);
+  assert.ok(overshoot(B.zetaAtFullWobble) / overshoot(B.zetaAtZeroWobble) > 6);
+
+  assert.equal(B.stretchK, 0.18);
+  assert.equal(B.maxStretchSpeed, 2.5);
+  assert.ok(B.maxStretchSpeed > CONFIG.motion.fleeFactor, '上限必须留余量，否则逃命时饱和');
+
+  assert.equal(B.joyExpand, 0.16);
+  assert.equal(B.fearShrink, 0.25);
+  assert.equal(B.arousalExpand, 0.12);
+  assert.equal(B.angerFlatten, 0.22);
+  assert.equal(B.angerSharpen, 0.35);
+  assert.equal(B.curiosityElongate, 0.20);
+  assert.equal(B.sleepyCalm, 0.70);
+  assert.ok(B.sleepyCalm > 0 && B.sleepyCalm < 1, 'sleepyCalm 是"压到剩下多少"的系数');
+
+  assert.equal(B.pulseRateBase, 0.9);
+  assert.equal(B.pulseRateArousal, 2.6);
+  assert.equal(B.pulseRateSleepy, -0.6);
+  assert.equal(B.pulseRateFloor, 0.05);
+  assert.equal(B.pulseAmpBase, 0.03);
+  assert.equal(B.pulseAmpJoy, 0.05);
+  assert.equal(B.pulseAmpArousal, 0.09);
+  assert.equal(B.pulseAmpSleepy, 0.02);
+  assert.ok(B.pulseRateSleepy < 0, 'sleepy 必须把脉率往下推（spec §4.5"慢到几乎停止"）');
+
+  assert.equal(B.sickCalm, 0.15);
+  assert.equal(B.dyingCalm, 0.6);
+  assert.equal(B.dyingCollapse, 0.55);
+  assert.ok(B.sickCalm < B.sleepyCalm, '生病必须比困倦更静止');
+  assert.ok(B.dyingCollapse < 1, '溶散塌陷必须是**部分**的：塌到 1 会让半径归零、render 的渐变退化');
+
+  assert.equal(B.impactEps, 0.0012);
+  assert.equal(B.impactFullDent, 0.0040);
+  assert.equal(B.dentMax, 0.34);
+  assert.equal(B.dentDecay, 6.0);
+  // 阈值必须高于单步平滑位移（baseSpeed × fixedDt = 0.000917），否则"匀速游动"会被当成一直在撞
+  assert.ok(B.impactEps > CONFIG.motion.baseSpeed * CONFIG.fixedDt,
+    'impactEps 必须高于匀速单步位移，否则平滑游动会被判成连续冲击');
+  assert.ok(B.impactFullDent > B.impactEps);
 });
 
 test('NEED_WORDS 的键与 needs 的四条匮乏度是同一份键表（不是各抄一遍）', () => {

@@ -13,14 +13,21 @@
 // 不会执行任何 DOM 代码。tests/loop.test.js 依赖这一点来测 advanceLoop。
 //
 // 相对旧计划 Task 3 的删减（2026-10-21 B11 落地时，均有台账记录）：
-//   · createViewport / CONFIG.render：config.test.js 用精确相等钉住 CONFIG 键集
-//     （41 键 / 39 节点），B11 不许动它 ⇒ 视口缩放段随渲染层（B13）一起加。
-//   · reconcileBodies / 软体子步进：src/body.js 是 B12 的交付物，还不存在。
-//     B12 接弹簧时，updateBody 必须放进下面的子步循环（固定步长），不是渲染帧率。
+//   · createViewport / CONFIG.render：config.test.js 用精确相等钉住 CONFIG 的键集
+//     （当时 41 键 / 39 节点），B11 不许动它 ⇒ 视口缩放段随渲染层（B13）一起加。
+//     B12 已经把 body / star / fluff / tail / blink 五段加进去了（46 键 / 44 节点，
+//     数出来的），但 CONFIG.render 仍然没有 —— 它属 B13。
 //   · 临时调试圆点：B11 不画任何东西，页面此时就是 CSS 渐变空缸（预期状态）。
+//
+// B12（2026-10-21）接上的部分：软体子步进。
+//   updateBodies 被放进下面的子步循环，喂 CONFIG.fixedDt 而不是 frameDt ——
+//   弹簧积分与尾巴松弛都是显式积分，**不具**步长无关性，放在渲染帧率下会让
+//   高刷屏上的身体更硬、低刷屏上更软。这条纪律由 tests/body.test.js 的
+//   「main.js 把 updateBodies 放进子步循环」与「一个 1 秒大步 ≠ 六十个小步」两条一起守。
 
 import { CONFIG } from './config.js';
 import { createWorld, tickWorld } from './sim.js';
+import { updateBodies, reconcileBodies } from './body.js';
 
 // ---------------------------------------------------------------- 纯逻辑（可在 Node 测）
 
@@ -92,6 +99,9 @@ export function boot(opts) {
   // 它依赖的 CONFIG.render 因 config.test.js 的键集快照无法在本 Task 加入。
   const viewport = { width: 0, height: 0, dpr: 1 };
   const loop = { acc: 0, steps: 0 };
+  // Body 表：id → 软体状态（视状态，不进存档）。一次创建、终身复用同一个 Map，
+  // 里面只在出生时增长 —— 见 body.js 的 updateBodies / reconcileBodies 注释。
+  const bodies = new Map();
   const state = { frame: 0, timeScale: 1, lastT: -1, rafId: 0, running: true };
 
   // 渲染层与音频在 B12–B18 接进来；本 Task 刻意不画任何东西（空渐变是预期状态）。
@@ -127,7 +137,11 @@ export function boot(opts) {
     const steps = advanceLoop(loop, frameDt, state.timeScale);
     for (let i = 0; i < steps; i++) {
       tickWorld(world, CONFIG.fixedDt);
+      updateBodies(bodies, world, CONFIG.fixedDt);
     }
+    // 清扫放在子步循环**之外**：增员由 updateBodies 就地完成（卵可能在一个子步中间孵化，
+    // 等下一帧就晚了一帧），只有减员需要按世界成员身份扫一遍，而它是每帧一次的事。
+    if (steps > 0) reconcileBodies(bodies, world);
 
     state.frame += 1;
 
@@ -147,6 +161,7 @@ export function boot(opts) {
   const controller = {
     world,
     viewport,
+    bodies,
     get frame() { return state.frame; },
     setTimeScale(scale) {
       // 只接受 CONFIG.timeScales 里的值：随手写个 3 或 10 会让子步进数暴涨，
