@@ -107,7 +107,10 @@ test('约束扫描确实覆盖到了 src/ 下的模块（防空转）', () => {
   // —— 那条的字面要求在这里不存在，所以按**意图**落地：把 render.js 与 body.js
   // 钉进"确实被扫到"的清单。它们靠依赖注入拿 ctx / makeCanvas，源码里根本不出现
   // 那七个名字，因此不需要豁免；哪天有人给它们开白名单，这条会先红。
-  for (const expected of ['body.js', 'render.js']) {
+  // B17（2026-10-21）同一条按意图扩展到 input.js：监听目标由 attachInput 的**形参**传入，
+  // Pointer Events 的 API 名（addEventListener / pointerdown / pointerId / setPointerCapture）
+  // 不在这七个禁用名里，所以它既绑得到真元素，又不需要 document 也不需要 window。
+  for (const expected of ['body.js', 'render.js', 'input.js']) {
     assert.ok(files.includes(join('src', expected)), `纯度守卫没有覆盖 src/${expected}`);
     assert.ok(!BROWSER_MODULES.includes(join('src', expected)),
       `src/${expected} 不该在浏览器模块白名单里（它靠注入，Node 里可单测）`);
