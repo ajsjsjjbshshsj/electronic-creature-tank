@@ -234,6 +234,107 @@ const CONFIG = {
   eyeWidthRatio: 0.28,
   glowHueBuckets: 32,
 
+  // 软体弹簧与形变（spec §5.1、§4.7）。这一节是计划 2R 从旧计划 Task 2 搬来的：
+  // 它们的"实测"是 tests/visual-checklist.md 的手工核对，不是无头模拟的统计量 ——
+  // 形变好不好看没法在 Node 里量，能量的部分（过冲、体积守恒、方向）都进了 tests/body.test.js。
+  // ⚠️ body.js 里不许出现任何数值字面量（由 tests/body.test.js 的源码扫描钉住，
+  //    先例是 A5 的 moodOf 那条），所以旧计划代码里散在函数体中的那几个魔法数
+  //    （脉动幅度的四项、sick 的 0.15、溶散的两项）也一并搬进来了。
+  body: {
+    // 弹簧刚度：wobble 0 → 220（硬、挺），wobble 1 → 80（软、晃得久）。
+    // 用刚度而不是"晃动幅度"当旋钮，是因为幅度会随时间累积失真，
+    // 而刚度直接决定回复力，物理上更稳。
+    stiffnessAtZeroWobble: 220,
+    stiffnessAtFullWobble: 80,
+
+    // 阻尼比 zeta：1 = 临界阻尼（回到静止位且**不过冲**），<1 = 欠阻尼（冲过头再荡回来）。
+    // spec §4.7 要求"形变必须带过冲回弹"，所以两端都**必须** < 1；
+    // 而"有的孩子天生更 Q，有的更挺"要求两端差得足够明显。
+    // 取 0.70 → 0.35，对应的阶跃过冲量是 exp(-πζ/√(1-ζ²)) = 4.6% → 30.9%：
+    // 都过冲（满足 spec），但差 6.7 倍（肉眼可辨"挺"与"Q"）。
+    zetaAtZeroWobble: 0.70,
+    zetaAtFullWobble: 0.35,
+
+    // 运动挤压：沿速度轴拉长 (1 + stretchK×归一化速度)，垂直轴按 1/(…) 压扁，
+    // 两者相乘恒为 1 ⇒ **体积守恒**（tests/body.test.js 用多边形面积钉住）。
+    stretchK: 0.18,
+    maxStretchSpeed: 2.5,      // 归一化速度上限；fleeFactor = 2.2，留一点余量
+
+    // 情绪 → 形变（spec §4.5 表：喜→膨胀、惧→收缩、怒→压扁且前端变尖、好奇→朝目标伸长）
+    joyExpand: 0.16,
+    fearShrink: 0.25,
+    arousalExpand: 0.12,
+    angerFlatten: 0.22,        // 垂直 facing 方向压扁的比例
+    angerSharpen: 0.35,        // facing 正前方（cos a > 0 的那半边）被推远的比例
+    curiosityElongate: 0.20,
+    sleepyCalm: 0.70,          // sleepy=1 时把上面所有情绪形变压到 30%（"形变幅度极小"）
+
+    // 脉动（发光核与整体呼吸的节奏；spec §4.5：arousal"全场最亮"、sleepy"脉动慢到几乎停止"）
+    pulseRateBase: 0.9,
+    pulseRateArousal: 2.6,
+    pulseRateSleepy: -0.6,
+    pulseRateFloor: 0.05,
+    // 脉动**幅度**的四项（旧计划把它们写成了函数体里的字面量，与"数值只在 CONFIG"这条纪律冲突）
+    pulseAmpBase: 0.03,
+    pulseAmpJoy: 0.05,
+    pulseAmpArousal: 0.09,
+    pulseAmpSleepy: 0.02,
+
+    // sick 与溶散这两条"把一切都压小"的通道（旧计划同样是函数体字面量，已搬进来）
+    sickCalm: 0.15,            // sim 要求 sick 个体被画成"变暗、静止"
+    dyingCalm: 0.6,            // 溶散末段把残余形变再压六成
+    dyingCollapse: 0.55,       // 溶散到结束时目标半径缩到 45%（**不等于 0**：0 半径会让 render 退化）
+
+    // 冲击检测（碰撞局部凹陷，spec §5.1）。
+    // 用的是**位置的二阶差分**，不是速度差 —— 理由见 src/body.js 里 detectImpact 的注释：
+    // moveToward 撞墙时只 clamp 位置、不改 vel，所以 vel 在墙上没有任何信号。
+    impactEps: 0.0012,         // 约 1.3 倍单步位移（baseSpeed×dt = 0.000917），低于它算平滑游动
+    impactFullDent: 0.0040,    // 二阶差分达到这个量级时凹陷打满
+    dentMax: 0.34,             // 最大凹陷深度（局部单位圆空间）
+    dentDecay: 6.0,            // 每秒衰减系数（指数）
+  },
+
+  // ---- 造型四组（计划 2R B12 新增；spec §4.6 / §4.7 / §4.7.1 / §5.1 / §11）----
+  // 参考物是用户那张粉色卷毛五角星抱枕的照片。数值逐字取自 spec §11，
+  // 行为两侧由 tests/body.test.js 负责（这里只钉数值本身，与 mood / heard / speech 同构）。
+  star: {
+    corners: 5,                // 五角星的"五"。spec §11 没单列这个数（它是造型定义本身），
+                               // 但 body.js 不许有字面量 ⇒ 结构常数也得进 CONFIG。
+    outerRatio: 1.0,           // STAR_OUTER_RATIO：外角半径 / 身体半径
+    innerRatio: 0.62,          // STAR_INNER_RATIO：0.62 是照片那只的比例，靠观感调
+  },
+  fluff: {
+    lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型
+    sprites: 2,                // FLUFF_SPRITES：常态 / 炸开。§4.7"只画毛尖碎边"换来的便宜
+                               // （按"每根毛有自己的颜色"做要 256 张 sprite，或每帧 2880 段贝塞尔）
+  },
+  tail: {
+    segs: 3,                   // TAIL_SEGS
+    lenRatio: 0.5,             // TAIL_LEN_RATIO：× 身体半径。**由体型派生，不新增基因**
+    swingBase: 1.2,            // TAIL_SWING_BASE：弧度/秒 × (0.4 + activity) × (1 + arousal)
+    // 下面两个是上面那条 spec 公式**自身**的两个常数（§4.7.1 明文写在公式里），
+    // 搬进 CONFIG 只是为了让 body.js 保持无字面量。
+    swingActivityFloor: 0.4,
+    swingArousalGain: 1,
+    // 以下七项属 spec §12 授权（"实现时按观感定，两侧取值由测试钉住"）：
+    // §4.7.1 只给了幅度的**排序**（幸福 > 快乐 > 安静 > 伤心）与 fear 夹起来、anger 急促，
+    // 没给数，所以数在这里，排序在 tests/body.test.js 的四档断言里。
+    ampQuiet: 0.12,            // 弧度：安静态的基础摆幅（安静 ≠ 不动，只是幅度小、频率低）
+    ampJoy: 0.5,               // 摆幅排序主要由这一项撑起：幸福(1,1) > 快乐(0.6,0.4) > 安静
+    ampArousal: 0.18,
+    ampAnger: 0.1,
+    angerRateGain: 0.8,        // anger=1 ⇒ 摆速 ×1.8（"急促前后抽"）
+    fearTuck: 0.85,            // fear=1 ⇒ 摆幅与链长同时收缩 85%（"夹起来"）
+    curlQuiet: 0.3,            // 低 joy 时尾尖的静态卷角（"垂着不动，尖端轻微卷"）
+    waveLag: 0.7,              // 相邻段的相位差（弧度）：波从根部往尖端传，不是整条一起摆
+    followRate: 16,            // 每秒向目标位置松弛的系数（显式积分 ⇒ 必须跑在固定步长里）
+    dragRate: 8,               // Verlet 阻尼（每秒，换算成 exp(-rate×dt) 而非每步常数）
+  },
+  blink: {
+    intervalBase: 4.0,         // BLINK_INTERVAL_BASE：秒；实际 = BASE / (0.4 + activity)
+    activityFloor: 0.4,        // 同一条 spec §4.6 公式里的地板常数，与尾巴的 activity 同源
+  },
+
   // ---- 世界 ----
   particles: { desktop: 120, mobile: 60 },
   foodMax: 40,
