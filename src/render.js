@@ -28,6 +28,12 @@
 // ⚠️ 绘制**不可重入**：逐点屏幕坐标写进 renderer 上的复用数组（spec §5.3 运行时零分配）。
 // 单线程顺序绘制天然满足；计划 3 若想加"缩略图预览"之类的并发绘制，必须先改掉这一点。
 //
+// ⚠️ B16（2026-10-21）之后，本文件的交付面是：水体（B13）+ 生物八层里的 1–7 层（B14/B15）
+// + **缸底与水中的场景层**：食物、卵、溶散微粒（B16）。仍然只剩第 8 层语言气泡（B19）。
+// 溶散 / sick / 哀悼 / hop 的竖向偏移全部是**每帧从 creature 读数重算的纯函数**
+// （dissolveT / dimFactorFor / hopProgress + 三条曲线）， creature 上一个字段都不写 ——
+// spec §7.2 那句"表现层的身体状态一律不入档"由 tests/render-fx.test.js 的快照断言守住。
+//
 // ⚠️ 桩 ctx 只数调用次数（因此"高光朝向"这类只能进手工清单）。
 // 本文件里凡属于"只有真实渲染才看得出来"的东西 —— 渐变的朝向、颜色的观感、
 // 光束够不够柔、沉积带厚不厚 —— 都由 tests/visual-checklist 手工核对，
@@ -36,6 +42,11 @@
 import { CONFIG } from './config.js';
 import { renderSizeOf, starRadius } from './body.js';
 import { dominant } from './emotions.js';
+// 卵要显示它**将来**的色相（spec §4.11"壳内透出轮廓"），所以这里要解码一次基因组；
+// 孵化时长则**必须**问内核要（breeding.eggDuration），因为"快孵化时脉动加快"这件事
+// 的唯一权威是那条 eggSize → 时长 的映射，在表现层重抄一遍就会分家。
+import { decode } from './genes.js';
+import { eggDuration } from './breeding.js';
 // 第 6 层（B15）：四参数与十行表的**计算全在 eyes.js**（纯函数、Node 里全测），
 // 本文件只负责把它们画出来 —— 这是本 Task 的架构裁定，不是顺手拆分。
 import {
@@ -124,13 +135,197 @@ export const screenY = (wy, viewport) => wy * viewport.height;
 // B12 把那条导出的理由写明了——"让『体型随年龄变化』这件事只有一个实现"。
 export const radiusPx = (c, viewport) => renderSizeOf(c) * viewport.scale * 0.5;
 
+// ---------------------------------------------------------------- 纯函数（B16）
+//
+// 溶散 / sick / 哀悼 / 蹦跳竖向偏移 / 卵 / 食物的**全部算术**都写在这一节。
+// 三个理由让它们必须是纯函数而不是绘制代码里的顺手几行：
+//   1. 记录型桩 ctx 记不到参数值，所以"亮度乘了多少""抬升了多少像素"这类必须在
+//      Node 里断言的东西**只能**靠纯函数拿到证据（桩那一侧只有次数与顺序）。
+//   2. spec §7.2："表现层的身体状态一律不入档" ⇒ 这些量必须是每帧重算的确定性函数，
+//      而不是存在 creature / renderer 上的计时器。写成纯函数是这件事**结构上**的证明：
+//      没有地方可以存。旧计划 Task 7 的变异探针 (b) 说的就是这份回报。
+//   3. 返回值一律是**标量**而不是对象：drawCreature 每只每帧都要用其中四五个，
+//      返回字面量就是 spec §5.3 禁止的运行时分配（screenX/screenY 同例）。
+// 于是 drawCreature 只干一件事：把标量填进 renderer.fx 那个复用容器（见下）。
+
+const clamp01 = (v) => (Number.isFinite(v) ? (v < 0 ? 0 : v > 1 ? 1 : v) : 0);
+
+// globalAlpha 的**唯一**写入点。B16 的 sick 变暗与死亡溶散 alpha 全部乘在这一处，
+// 所以"变暗会不会漏掉某一层"这件事不需要逐层断言 —— 结构上漏不掉，
+// 由 tests/render-fx.test.js 的一条源码扫描（赋值点恰好一处）守住。
+// ⚠️ 为什么不能"在最外层 save 里写一次 globalAlpha"就完事：
+// Canvas 的 globalAlpha **不是嵌套相乘**的，层内任何一次赋值都会**覆盖**外层那个值，
+// 而第 2 层本体**必须**显式写 alpha=1（"毛绒不透明"那条证据就走在那一层）。
+// 所以变暗只能乘进每一次写入。
+// NaN 落到 0（不是"忽略赋值"）：脏值若写成 NaN，Canvas 会**保留上一只**的亮度，
+// 症状是"这只生物顶着隔壁的透明度"且全程不报错。
+const ga = (ctx, value, k) => {
+  ctx.globalAlpha = Math.min(1, Math.max(0, Number.isFinite(value * k) ? value * k : 0));
+};
+
+// ---- 死亡溶散（spec §4.11："停止运动 → 光慢慢熄灭 → 身体溶散成微粒上升消散"）----
+//
+// ⚠️ 时长**直接读 c.dying**，绝不自建时钟：reapDead 就是按 `dying >= dissolveDuration`
+// 把个体从 creatures 里 splice 掉的（sim.js）。两套时钟必然漂移，症状是
+// "动画播到一半生物突然消失"或"生物没了但动画还在原地播"。
+export function dissolveT(c) {
+  if (c.alive) return 0;
+  return clamp01(c.dying / CONFIG.dissolveDuration);
+}
+// 身体：平方衰减 ⇒ 末尾"化掉"而不是线性淡出（淡出读起来像"关灯"，不像"溶进水里"）。
+export function dissolveAlphaOf(t) {
+  const k = 1 - clamp01(t);
+  return Math.pow(k, R.dissolveAlphaPow);
+}
+// 光晕：幂**更大** ⇒ 同一条进度上比身体更暗 ⇒ spec 那句话里"光先熄灭、身体后散"的顺序。
+export function dissolveGlowOf(t) {
+  const k = 1 - clamp01(t);
+  return Math.pow(k, R.dissolveGlowPow);
+}
+export function dissolveExpandOf(t) {
+  return 1 + (R.dissolveExpand - 1) * clamp01(t);      // 散开，不是缩没
+}
+export function dissolveLiftOf(t) {
+  return R.dissolveLift * clamp01(t);                  // 逐渐上浮（"溶进水里"）
+}
+
+// ---- 亮度乘数：sick 与哀悼都会让生物变暗，但**幅度不同** ----
+// sick 是故障（sim.js 点名要求"变暗、静止"，好让问题对用户可见，spec §7.7"绝不静默"），
+// 哀悼是情绪（spec §4.11"停顿、变暗一小会儿"），不该看起来像坏了。
+// ⚠️ 尸体那一侧**返回 1**：它的 alpha 归 dissolveAlphaOf 管，两头相乘就成了双倍暗。
+export function dimFactorFor(c) {
+  if (!c.alive) return 1;
+  if (c.sick) return R.sickDim;
+  const left = Number.isFinite(c.mourn) && c.mourn > 0 ? c.mourn : 0;
+  if (left === 0) return 1;
+  const k = clamp01(left / CONFIG.mournDuration);      // 剩余时间 ⇒ 线性回到正常，不到点突然变亮
+  return 1 - (1 - R.mournDim) * k;
+}
+
+// sick 的**去饱和**。⚠️ 不用 ctx.filter = 'saturate(…)'：它在部分移动端浏览器上不支持或
+// 极慢，而 spec §5.3 的性能预算是按手机算的。这里的做法是把饱和度落到**已有的**低饱和档
+// sprite 上（本体 sprite 本来就按色相桶 × 饱和档 × 明度档分档缓存），
+// 于是"掉色"这件事一次贴图都不多花、一张离屏画布都不新建。
+// 色相**一个数字都不动**：spec §5.1 那条"不跨色相"的纪律在这里同样成立。
+export function sickDesaturate(sat) {
+  return clamp01(sat) * (1 - R.sickDesat);
+}
+
+// ---- 蹦跳（spec §4.7.2 跳起那半句 + §4.7 的 squash & overshoot）----
+//
+// 身体模型是 2D 的（body.points 在 facing 对齐的平面上，"上下"由渲染层决定），
+// 所以"跳起来"需要一条**屏幕竖向偏移**。它不是世界状态：内核只有 intent.kind 与 intentTime
+// 两个读数，竖向轨迹必须由它们**推导**，每帧重算、不入档（spec §7.2）。
+// ⚠️ 轨迹时长读 `intent.minDuration`，不在这里重抄 spec 的 0.6/(0.3+activity)：
+// 内核那一处目前还是常数（MIN_DURATION.hop = 0.84s，已知偏差，另有单独提交处理）。
+// 跟着读数走，将来内核改掉那条公式时本文件一行都不用动，也不会出现"两套时长"。
+export function hopProgress(c) {
+  const intent = c.intent;
+  if (!intent || intent.kind !== 'hop') return 0;
+  const dur = intent.minDuration;
+  if (!Number.isFinite(dur) || dur <= 0) return 0;
+  const t = Number.isFinite(c.intentTime) ? c.intentTime : 0;
+  return clamp01(t / dur);
+}
+
+// spec §4.7.2 逐字：跳起冲量 = base × (0.5 + activity) ⇒ 好动的跳得高。
+// 这是 CONFIG.hop.impulseBase 的**第一个消费者**（内核只用它决策，不用它算轨迹）。
+export function hopImpulse(activity) {
+  return CONFIG.hop.impulseBase * (0.5 + clamp01(activity));
+}
+
+// 抬升量（**身体半径的倍数**，所以与视口无关、可单测）。
+// 抛物线 4q(1−q)：起跳 0 → 滞空顶点在窗口中点 → 落地归零；落地之后保持 0（人已经在地上）。
+export function hopLiftAt(p, impulse) {
+  const k = clamp01(p);
+  const land = R.hopLandAt;
+  if (k >= land) return 0;
+  const q = k / land;
+  return impulse * R.hopLiftRatio * 4 * q * (1 - q);
+}
+
+// 竖向尺度：滞空拉长（>1）→ 落地**压扁**（<1）→ 过冲**超过**原尺寸一点点 → 收敛回 1。
+// 落地那一刻压到底是有意的：spec §5.1 那句"蹦跳落地（§4.7.2 的一次性冲量 → 竖向压扁 +
+// 过冲回弹）"说的就是一冲量，不是缓慢下压。过冲项与压扁共用一条 cos × (1−q)² 包络，
+// 所以"过冲量必然小于压扁量"（spec §4.7："超过原尺寸**一点点**再收敛"）是结构性的，
+// 不需要第二个旋钮去拦。
+export function hopSquashAt(p) {
+  const k = clamp01(p);
+  const land = R.hopLandAt;
+  if (k <= 0 || k >= 1) return 1;                     // 起跳前与恢复后都是恒等
+  if (k < land) return 1 + (R.hopStretchAir - 1) * Math.sin(Math.PI * (k / land));
+  const q = (k - land) / (1 - land);
+  const left = 1 - q;
+  return 1 - (1 - R.hopSquashMin) * Math.cos(q * TAU) * left * left;
+}
+
+// ---- 卵（spec §4.11 的"缸底微光脉动 / 快孵化时脉动加快 / 壳内透出轮廓"）----
+//
+// ⚠️ 卵的时间轴只有 `egg.age` 一条（breeding.tickEgg 对所有卵都推进它，不论可否孵化）。
+// 不可孵化的卵**不另起倒计时**：它走的仍是这条 age，只是被读成"光慢慢熄灭"。
+export function eggGlowFor(egg) {
+  if (egg.viable) return 1;                            // 可孵化的卵一直亮着，直到孵化
+  const t = Number.isFinite(egg.age) && egg.age > 0 ? egg.age : 0;
+  const k = clamp01(t / R.eggFailFadeTime);
+  const left = 1 - k;
+  // 平方：先快后慢，像光在熄灭而不是一路调暗。残光不归零 —— 彻底消失的话玩家
+  // 只会以为"根本没产卵"，那又变回一条**静默的禁令**（spec §4.12 第 6 条要避免的就是它）。
+  return R.eggFailMinGlow + (1 - R.eggFailMinGlow) * left * left;
+}
+
+// 孵化进度（时长问内核要，不重抄公式）。
+function eggProgress(egg) {
+  const dur = eggDuration(egg);
+  if (!Number.isFinite(dur) || dur <= 0) return 0;
+  const age = Number.isFinite(egg.age) && egg.age > 0 ? egg.age : 0;
+  return clamp01(age / dur);
+}
+
+// "壳内透出轮廓"那一项：后段才出现，且线性推到 1。
+// 它同时被当成脉动加快的系数（spec §4.11"快孵化时脉动加快"）⇒ 一个读数两处用，不留第二个旋钮。
+export function eggShellRevealFor(egg) {
+  const p = eggProgress(egg);
+  if (p <= R.eggRevealAt) return 0;
+  return clamp01((p - R.eggRevealAt) / (1 - R.eggRevealAt));
+}
+
+// 蛋的屏幕半径：直接读 eggSize（0.6–1.4 的相对值），所以"喂得好，蛋就大"这件事
+// 在画面上成立（spec §4.11 明说这条因果比数值本身重要）。
+// 走 viewport.scale 而不是 viewport.width：蛋是**世界里的东西**，
+// 与生物同一条换算（spec §3.4-2），否则手机上蛋会跟着视口宽度而不是短边缩。
+export function eggRadiusPx(egg, viewport) {
+  const { min, max } = CONFIG.eggSize;
+  const s = Number.isFinite(egg.eggSize) ? egg.eggSize : (min + max) / 2;
+  return R.eggRadius * s * viewport.scale * 0.5;
+}
+
+// 蛋色：名字（遗传位点给的八色之一）→ 色值。**键集与 CONFIG.eggTint.colors 同一份**，
+// 由 tests/render-fx.test.js 逐键比对；未知名字退回第一色而不是 undefined
+// （undefined 会让 fillStyle 静默保持上一颗卵的颜色 —— 症状是"同窝有两颗颜色一样"）。
+export function eggTintHex(name) {
+  const tints = CONFIG.colors.eggTints;
+  return Object.hasOwn(tints, name) ? tints[name] : tints[CONFIG.eggTint.colors[0]];
+}
+
+// ---- 食物（spec §6.2 的三种外观）----
+export function foodColorFor(kind) {
+  // 原型键名（'toString' / 'valueOf'）经原型链解析成 truthy 的函数，
+  // 所以这里用 hasOwn 而不是 `CONFIG.colors[kind] || 藻色`（sim.spawnFood 记过同一个坑）。
+  return Object.hasOwn(CONFIG.colors, kind) && kind !== 'eggTints'
+    ? CONFIG.colors[kind] : CONFIG.colors.algae;
+}
+export function foodRadiusPx(food, viewport) {
+  const a = clamp01(Number.isFinite(food.amount) ? food.amount : 1);
+  // 下限 1px：吃到只剩一点的食物仍然要看得见（看不见＝"它凭空少了"，又是一条静默）。
+  return Math.max(1, R.foodRadius * (0.6 + 0.4 * a) * viewport.scale * 0.5);
+}
+
+
 // ---------------------------------------------------------------- 颜色与 alpha 的纯函数
 //
 // 这一节是 B14 唯一能把"颜色语义"钉进自动化的地方：桩 ctx 记不到参数，
 // 所以凡是必须被证明的东西（本体不透明、色相不跨、花纹压到 0.35）都写成**返回字符串/数字的
 // 纯函数**，由建 sprite 的与绘制的那一侧唯一地调用它们。测试打的是同一个实现，不是旁证。
-
-const clamp01 = (v) => (Number.isFinite(v) ? (v < 0 ? 0 : v > 1 ? 1 : v) : 0);
 
 // ⚠️ hue 在这里**只被打印**，永远不参与算术：hsla() 的 H 分量从进来到出去是同一个数。
 // spec §5.1 第 2 层要的是"同色相渐变"，而跨 0° 的粉色区间（[315,360]∪[0,25]）
@@ -183,8 +378,9 @@ export function patternAlphaFor(pattern) {
 // 为什么单独写成一个函数而不是在赋值处写死 `globalAlpha = 1`：桩 ctx 不记参数，
 // 所以"本体不透明"这条 spec §5.1 第 1 处改动**只有**在纯函数这一侧才可能被自动化守住
 // —— tests/render-body.test.js 断言它对任何一只个体都返回 1。
-// 它同时是 B16 的挂载点：sick 变暗与死亡溶散的 dim 系数要乘在这里（以及最外层的 save 里），
-// 而不是乘在 sprite 的色标 alpha 上（那些 alpha 是"毛绒不透明"这件事本身的证据）。
+// ⚠️ B16 的变暗**不乘在这里**（那会毁掉上面这条证据，也会被 clip 之内的花纹与亮区覆盖）：
+// 它乘在 ga() 那一个唯一写入点的第三个参数上，所以"本体不透明"与"这只 sick 了"两件事
+// 各有一条自己的机器证据。
 export function peltAlphaFor() {
   return 1;
 }
@@ -267,7 +463,18 @@ export function peltKey(hue, sat, lum) {
 // ⚠️ 不需要 atan2：c.facing 已经是单位向量（sim.js 插值后重新归一化过），
 // cos(θ) 就是 facing.x、sin(θ) 就是 facing.y，直接拿来用。
 // 顺带在同一次遍历里量出当前 squash（毛边与体内亮区都要用它，spec §4.7"毛必须跟着形变走"）。
-export function writeBodyScreen(renderer, body, cx, cy, r, facing) {
+//
+// 第七个参数 squashV 是 **B16 蹦跳那条屏幕竖向尺度**（spec §4.7.2 落地那半句）。
+// 三个必须写清楚的理由：
+//   · 它乘在**屏幕轴**上，不是 facing 局部轴上：身体怎么扭是 body.js 的事（那部分由
+//     writeBodyScreen 量出来进 squashAlong/squashPerp），而"跳起来压扁"是全局竖向的，
+//     与朝向无关 —— 所以量出的 squash 仍然只反映身体自身的形变，**不掺**这一项。
+//   · 横向同时按 **1/squashV** 补偿：spec §4.7 的 squash & stretch 要体积守恒，
+//     只压竖向会让它在落地那一刻凭空变小（tests/render-fx.test.js 逐点断言这一对倍数）。
+//   · 默认 1 ⇒ B14/B15 已有的那些坐标断言一个数字都没改（它传六个参数）。
+export function writeBodyScreen(renderer, body, cx, cy, r, facing, squashV) {
+  const vy = Number.isFinite(squashV) && squashV > 0 ? squashV : 1;
+  const hx = 1 / vy;                       // 体积守恒的横向补偿
   const ca = facing.x, sa = facing.y;
   const pts = body.points;
   const sx = renderer.sx, sy = renderer.sy;
@@ -276,8 +483,8 @@ export function writeBodyScreen(renderer, body, cx, cy, r, facing) {
     const p = pts[i];
     const la = p.x * ca - p.y * sa;
     const lp = p.x * sa + p.y * ca;
-    sx[i] = cx + la * r;
-    sy[i] = cy + lp * r;
+    sx[i] = cx + la * r * hx;
+    sy[i] = cy + lp * r * vy;
     const ra = p.rx * ca - p.ry * sa;
     const rp = p.rx * sa + p.ry * ca;
     const aa = Math.abs(la), ap = Math.abs(lp), ar = Math.abs(ra), arp = Math.abs(rp);
@@ -305,7 +512,8 @@ const squashRatio = (now, rest) => {
 // 除以 6 是 Catmull-Rom（张力 0）到贝塞尔的标准换算，不是调出来的经验值。
 // 直接用 lineTo 连 24 个点会得到一个明显的二十四边形（50px 半径上每条边约 13px，棱角肉眼可见）。
 export function buildBodyPath(ctx, renderer, c, body, cx, cy, r) {
-  writeBodyScreen(renderer, body, cx, cy, r, c.facing);
+  // 第七参是那一只**当前**的蹦跳竖向尺度（renderer.fx 的复用容器，见 drawCreature）。
+  writeBodyScreen(renderer, body, cx, cy, r, c.facing, renderer.fx.squashV);
   const sx = renderer.sx, sy = renderer.sy;
   const n = sx.length;
   ctx.beginPath();
@@ -377,7 +585,9 @@ function drawGlowLayer(ctx, renderer, c, r, cx, cy, breathe) {
   const gr = r * R.glowRadiusFactor * breathe;
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = glowAlphaFor(c.traits.glow);
+  // 溶散那一侧走 fx.glow（幂更高 ⇒ 光比身体先熄灭，spec §4.11 那句话的顺序），
+  // sick / 哀悼那一侧与 fx.alpha 同值（变暗是整只一起暗，没有"光先灭"这一说）。
+  ga(ctx, glowAlphaFor(c.traits.glow), renderer.fx.glow);
   ctx.drawImage(sprite.surface, cx - gr, cy - gr, gr * 2, gr * 2);
   ctx.restore();
 }
@@ -385,15 +595,20 @@ function drawGlowLayer(ctx, renderer, c, r, cx, cy, breathe) {
 // 第 2–4 层共用一个 clip 括号。
 // 必须 clip：本体是一张**圆形** sprite，而身体是会形变的 24 点五角星软体。
 // 不裁的话挤压、碰撞凹陷、生气时前端变尖在画面上完全看不出来（spec §5.1 整个软体模型白做）。
+// ⚠️ 蹦跳的竖向压扁就藏在这个 clip 里：轮廓路径（buildBodyPath）已经按 fx.squashV 压过，
+// 而本体 sprite 本身是一张不缩放的圆图 —— 于是"压扁"这件事由轮廓裁出来，
+// 一次贴图都不多花（这正是 B14 那次 clip 决定的第二笔回报）。
 function drawBodyLayers(ctx, renderer, c, body, cx, cy, r, ca, sa, breathe, dpr) {
   const t = c.traits;
-  const pelt = renderer.getPeltSprite(t.hue, t.sat, t.lum);
+  // sick 的去饱和：不换 sprite 张数、不加滤镜，只把饱和度落到**已有的**低饱和档上。
+  const sat = c.sick ? sickDesaturate(t.sat) : t.sat;
+  const pelt = renderer.getPeltSprite(t.hue, sat, t.lum);
   ctx.save();
   buildBodyPath(ctx, renderer, c, body, cx, cy, r);
   ctx.clip();
-  ctx.globalAlpha = peltAlphaFor();         // 不透明：毛绒与凝胶最直接的区别（改动 #1）
+  ga(ctx, peltAlphaFor(), renderer.fx.alpha);   // 不透明：毛绒与凝胶最直接的区别（改动 #1）
   ctx.drawImage(pelt.surface, cx - r, cy - r, r * 2, r * 2);
-  drawPatternLayer(ctx, c, pelt, cx, cy, r);
+  drawPatternLayer(ctx, c, pelt, cx, cy, r, renderer.fx.alpha);
   drawInnerLightLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, breathe, dpr);
   ctx.restore();
 }
@@ -405,14 +620,14 @@ function drawBodyLayers(ctx, renderer, c, body, cx, cy, r, ca, sa, breathe, dpr)
 // 这是表现层污染逻辑层的经典事故，由 tests/render-body.test.js 的"绘制一帧不向 rng 取数"守住。
 const PATTERN_SPOTS = 6, PATTERN_RINGS = 3, PATTERN_CLOUDS = 4, PATTERN_STARS = 9;
 
-function drawPatternLayer(ctx, c, pelt, cx, cy, r) {
+function drawPatternLayer(ctx, c, pelt, cx, cy, r, k) {
   const t = c.traits;
   const alpha = patternAlphaFor(t.pattern);
   if (alpha <= 0) return;                    // none ⇒ 这一层整个不存在
   const density = 0.4 + 0.6 * clamp01(t.patternDensity);
   const mark = r * R.patternMarkFactor * density;
   ctx.save();
-  ctx.globalAlpha = alpha;
+  ga(ctx, alpha, k);
   ctx.fillStyle = pelt.patternColor;         // 建 sprite 时算好的字符串，运行时零分配
   if (t.pattern === 'spots') {
     for (let i = 0; i < PATTERN_SPOTS; i++) {
@@ -459,15 +674,23 @@ function drawPatternLayer(ctx, c, pelt, cx, cy, r) {
 //   · clip 是在**设备空间**生效的，换 CTM 不会让它失效 —— 这正是"亮区被轮廓裁住、
 //     读起来像毛里面的光而不是水里的光"的原因。
 // 这条坑在桩里看不见（桩不记参数），但它是真实存在的错位，所以显式写出来。
+//
+// ⚠️ 第二个乘进来的是 **fx.squashV / fx.stretchH**（B16 蹦跳的屏幕竖向压扁 + 横向补偿）。
+// setTransform(a,b,c,d,e,f) 的 b/d 是**输出 y** 那一行、a/c 是输出 x 那一行，
+// 所以"绕体心做屏幕竖向缩放"就是给 b/d 乘 vy、给 a/c 乘 hx —— 不需要 atan2、不需要额外一次
+// save/restore、也**不重算毛的位置**（spec §4.7："毛必须跟着形变走……一次 drawImage +
+// setTransform，极便宜"）。原点 e/f 不乘：压扁是绕身体中心发生的。
 function drawInnerLightLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, breathe, dpr) {
   const sprite = renderer.getCoreSprite(coreColorFor(c.emotions));
   const cr = innerRadiusFor(r, breathe);
   const ax = cr * renderer.squashAlong * dpr;
   const ay = cr * renderer.squashPerp * dpr;
+  const fx = renderer.fx;
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = innerAlphaFor(c.traits.glow, breathe);
-  ctx.setTransform(ca * ax, sa * ax, -sa * ay, ca * ay, cx * dpr, cy * dpr);
+  ga(ctx, innerAlphaFor(c.traits.glow, breathe), fx.alpha);
+  ctx.setTransform(fx.stretchH * ca * ax, fx.squashV * sa * ax,
+    -fx.stretchH * sa * ay, fx.squashV * ca * ay, cx * dpr, cy * dpr);
   ctx.drawImage(sprite.surface, -1, -1, 2, 2);
   ctx.restore();
 }
@@ -484,7 +707,7 @@ function drawTailLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, viewport) {
   const lift = tailLiftPx(body, r);
   const segPx = (body.tailWorldLen * viewport.scale * 0.5) / n;
   ctx.save();
-  ctx.globalAlpha = TAIL_ALPHA;
+  ga(ctx, TAIL_ALPHA, renderer.fx.alpha);
   for (let i = 0; i < n; i++) {
     const nd = nodes[i];
     const nx = cx + (nd.x * ca - nd.y * sa) * r;
@@ -508,10 +731,14 @@ function drawFluffLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, dpr) {
   const s = fluffOuterRadius(r, body.fluffLen) / (sprite.unit * (1 + CONFIG.fluff.lenRatio));
   const ax = s * renderer.squashAlong * dpr;
   const ay = s * renderer.squashPerp * dpr;
+  const fx = renderer.fx;
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = 1;                    // 碎边的强度已经烧在 sprite 的 stroke alpha 里
-  ctx.setTransform(ca * ax, sa * ax, -sa * ay, ca * ay, cx * dpr, cy * dpr);
+  ga(ctx, 1, fx.alpha);                   // 碎边的强度已经烧在 sprite 的 stroke alpha 里
+  // ⚠️ 与体内亮区同一对乘数：蹦跳压扁时**毛跟着一起压**（spec §4.7"毛必须跟着形变走，
+  // 而不是重新计算毛的位置"；独立动的碎边会退化成 §4.3 那圈已有的光晕，等于白画一层）。
+  ctx.setTransform(fx.stretchH * ca * ax, fx.squashV * sa * ax,
+    -fx.stretchH * sa * ay, fx.squashV * ca * ay, cx * dpr, cy * dpr);
   ctx.drawImage(sprite.surface, -sprite.half, -sprite.half, sprite.size, sprite.size);
   ctx.restore();
 }
@@ -595,6 +822,10 @@ function traceStarPupil(ctx, ex, ey, radius, spin) {
 }
 
 function drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa) {
+  // 第 6 层的四次 alpha 写入共用**同一个** dim 系数（B16：sick / 哀悼 / 溶散都会连眼睛一起暗）。
+  // 起个名字而不是每次现取：那四条赋值必须与眼睛那一层的其余三次同批生效，
+  // 漏掉任何一次都会得到"身体暗了但眼白仍然 0.96"那种发光眼。
+  const EYE_K = renderer.fx.alpha;
   const p = eyeParamsInto(renderer.eyeCache, c, renderer.time, fillHandOpts(renderer, c, ca, sa));
   renderer.eyeFacing.x = ca;
   renderer.eyeFacing.y = sa;
@@ -623,7 +854,7 @@ function drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa) {
     }
 
     // 1) 眼白：一条路径画两只（扁平时读作"眯着"，不靠 clip）
-    ctx.globalAlpha = 0.96;
+    ga(ctx, 0.96, EYE_K);
     ctx.fillStyle = eyeWhiteColor();
     ctx.beginPath();
     ctx.ellipse(geom[0], geom[1], geom[4], geom[5], 0, 0, TAU);
@@ -631,7 +862,7 @@ function drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa) {
     ctx.fill();
 
     // 2) 瞳孔：幸福那一格画四角星，其余画椭圆。颜色只能来自 CONFIG.colors.pupil（#2D1240）。
-    ctx.globalAlpha = 1;
+    ga(ctx, 1, EYE_K);
     ctx.fillStyle = pupilColor();
     ctx.beginPath();
     for (let i = 0; i < 2; i++) {
@@ -647,7 +878,7 @@ function drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa) {
     ctx.fill();
 
     // 3) 瞳孔高光：常态在左上，委屈那一格被 highlightY 推到**下缘**（含泪感）。
-    ctx.globalAlpha = 0.85;
+    ga(ctx, 0.85, EYE_K);
     ctx.fillStyle = eyeHighlightColor();
     ctx.beginPath();
     for (let i = 0; i < 2; i++) {
@@ -660,7 +891,7 @@ function drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa) {
     // 4) 眼睑线：^^ 那一格画一道**上弯**的弧（圆心在眼睛下方），其余画上缘的一条浅弧。
     //    不用 quadraticCurveTo —— spec §5.3 与 B14 那条"贝塞尔段数只等于身体轮廓"的判据
     //    靠的是"毛一段都不走路径"，眼睛如果也去抢贝塞尔预算，那条断言就失去意义了。
-    ctx.globalAlpha = LID_LINE_ALPHA;
+    ga(ctx, LID_LINE_ALPHA, EYE_K);
     ctx.strokeStyle = pupilColor();
     ctx.lineWidth = Math.max(0.7, eyeR * 0.14);
     ctx.lineCap = 'round';
@@ -697,7 +928,7 @@ function drawBlushLayer(ctx, renderer, c, blush, cx, cy, r, ca, sa) {
   const sep = d * blush.offsetPerp;
   const rr = d * blush.radius;
   ctx.save();
-  ctx.globalAlpha = blush.alpha;
+  ga(ctx, blush.alpha, renderer.fx.alpha);
   ctx.fillStyle = blushColor();
   ctx.beginPath();
   ctx.ellipse(bx + px * sep, by + py * sep, rr, rr * BLUSH_RIPPLE, 0, 0, TAU);
@@ -708,22 +939,314 @@ function drawBlushLayer(ctx, renderer, c, blush, cx, cy, r, ca, sa) {
 
 export function drawCreature(ctx, renderer, c, body, viewport) {
   const cx = screenX(c.pos.x, viewport);
-  const cy = screenY(c.pos.y, viewport);
-  const r = radiusPx(c, viewport);
+  const worldCy = screenY(c.pos.y, viewport);
+  const worldR = radiusPx(c, viewport);
   // 太小不值得画；同时挡住 NaN（NaN > 0.5 为 false）与脏存档给出的非有限坐标
-  if (!(r > 0.5) || !Number.isFinite(cx) || !Number.isFinite(cy)) return;
+  if (!(worldR > 0.5) || !Number.isFinite(cx) || !Number.isFinite(worldCy)) return;
   const facing = c.facing;
   const ca = Number.isFinite(facing.x) ? facing.x : 1;
   const sa = Number.isFinite(facing.y) ? facing.y : 0;
   const dpr = Number.isFinite(viewport.dpr) && viewport.dpr > 0 ? viewport.dpr : 1;
   const breathe = breatheOf(body);
-  // 外层括号：B16 的 sick 变暗与死亡溶散 alpha 会乘在这一层
+
+  // ---- B16：把三个纯函数组的读数搬进每帧复用的容器（spec §5.3 零分配）----
+  //
+  // ⚠️ 这一段**只写 renderer.fx，一个字都不写 c**。
+  // 溶散进度读 c.dying、变暗读 c.sick/c.mourn、蹦跳竖向偏移读 c.intent + c.intentTime ——
+  // 全是内核**已经在产出**的读数，表现层不自建任何计时器、也不回填任何结果：
+  // spec §7.2 明文"表现层的身体状态（控制点相位、尾巴角度、毛边 sprite 选择、当前气泡）
+  // 一律不入档"，而"每帧重算的确定性函数"是唯一能保证这一点的写法
+  // （由 tests/render-fx.test.js 的 creature 快照断言守住）。
+  const fx = renderer.fx;
+  const t = dissolveT(c);
+  const dying = t > 0;
+  const dim = dimFactorFor(c);
+  fx.alpha = dying ? dissolveAlphaOf(t) : dim;
+  fx.glow = dying ? dissolveGlowOf(t) : dim;
+  fx.expand = dying ? dissolveExpandOf(t) : 1;
+  fx.rise = dying ? dissolveLiftOf(t) * viewport.height : 0;
+  const p = hopProgress(c);
+  fx.squashV = hopSquashAt(p);
+  fx.stretchH = 1 / fx.squashV;            // 体积守恒的横向补偿（spec §4.7）
+  const activity = c.traits && c.traits.personality ? c.traits.personality.activity : 0;
+  fx.lift = hopLiftAt(p, hopImpulse(activity)) * worldR;
+
+  // 竖向偏移与溶散上浮都只改**绘制用的几何**，不改 c.pos（世界状态）。
+  const cy = worldCy - fx.lift - fx.rise;
+  const r = worldR * fx.expand;
+  // 外层括号：漏一次 restore 会把 'lighter' 与 alpha 污染给后面所有层
   ctx.save();
   drawGlowLayer(ctx, renderer, c, r, cx, cy, breathe);
   drawBodyLayers(ctx, renderer, c, body, cx, cy, r, ca, sa, breathe, dpr);
   drawTailLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, viewport);
   drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa);       // 第 6 层（B15）
   drawFluffLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, dpr);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- 溶散微粒（对象池）
+//
+// spec §4.11 的死亡那一行最后半句："身体溶散成**微粒**上升消散"。
+// B14 立下的三条上界里最硬的一条是"稳态 200 帧新建 0 张离屏画布"，所以这一层的
+// 每一颗粒都贴**同一张**微粒 sprite（renderer.moteSprite，水体那 120 颗用的就是它）
+// 并靠 drawImage 的目标尺寸缩放 —— 为每颗粒建一张 canvas 就是那条贝塞尔毛的另一种写法。
+//
+// ⚠️ 池是**并列 typed array**，不是对象数组（架构决定 6 / spec §5.3"微粒与事件用对象池"）。
+// ⚠️ 粒子抖动**不向 rng 取数**：事件在帧边界被消费，帧率是设备相关的，
+// 于是"从 rng 抽每颗粒的速度"会让同一个种子在两台设备上长出不同的缸
+// —— 那是表现层污染逻辑层那一类事故（render-body.test.js 有一条专项守卫）。
+// 改成从环形游标自身的确定性哈希推出来：**仍然可复现**（全局纪律第 2 条），
+// 因为它是纯函数而不是随机数；同种子同事件序列在两台设备上逐位相同，
+// 由 tests/render-fx.test.js 的"两台设备"那条断言核对每一个数组。
+export function createBursts(n) {
+  return {
+    n, cursor: 0, live: 0,
+    x: new Float64Array(n), y: new Float64Array(n),
+    vx: new Float64Array(n), vy: new Float64Array(n),
+    life: new Float64Array(n), maxLife: new Float64Array(n),
+    r: new Float64Array(n),
+    color: new Uint8Array(n),          // 颜色用**索引**，不用字符串（字符串会分配）
+  };
+}
+
+// 四档颜色全部是 CONFIG.colors 里的既有字符串：拼一个新 rgba 就是每帧一次分配。
+const BURST_COLORS = [CONFIG.colors.mote, CONFIG.colors.sakura, CONFIG.colors.peach, CONFIG.colors.rose];
+
+// 爆发一批粒子。**环形写入**：池满就覆盖最老的那几颗，永不扩容 ⇒ 永不分配。
+// 池容量（CONFIG.render.burstPool = 240）刻意小于"同帧 24 只全死"的 336 ——
+// 死亡是老死/病死的稀疏事件，为它预留满员槽位是浪费；覆盖最老粒子在视觉上无感。
+export function burst(renderer, x, y, colorIdx, count) {
+  const b = renderer.bursts;
+  const idx = ((colorIdx % BURST_COLORS.length) + BURST_COLORS.length) % BURST_COLORS.length;
+  for (let i = 0; i < count; i++) {
+    const k = b.cursor;
+    b.cursor = (k + 1) % b.n;
+    // 角度按**序号**均分（一圈均匀的散开），游标只当扰动项，避免每次爆发的角度完全重合。
+    const a = (i / count) * TAU + k * 0.7;
+    const sp = 0.05 + 0.11 * ((k * 37) % 13) / 13;
+    // ⚠️ live 的增减必须在**覆盖之前**判：写成"赋值后再看 life 是否 ≤ 0"永远是 false，
+    // 于是计数一路停在 0 —— 症状是粒子系统全灭而画面上什么都没有、也不报错。
+    // 只有覆盖掉一个**死槽**才算新增；覆盖活口不增长（池满时反复爆发不许把计数推成天量）。
+    if (b.life[k] <= 0) b.live += 1;
+    b.x[k] = x; b.y[k] = y;
+    b.vx[k] = Math.cos(a) * sp;
+    b.vy[k] = Math.sin(a) * sp;
+    b.maxLife[k] = 0.9 + 0.5 * ((k * 53) % 11) / 11;
+    b.life[k] = b.maxLife[k];
+    b.r[k] = 1.2 + 1.8 * ((k * 29) % 7) / 7;
+    b.color[k] = idx;
+    // live 只在"覆盖的是一个已经死掉的槽位"时才增长：池满时反复爆发不许把计数推成天量。
+    if (b.life[k] <= 0) b.live += 1;
+  }
+}
+
+// 就地积分。dt 必须是**模拟**秒（main.js 喂的那一个），不是渲染帧时长 ——
+// 与水体同一个理由：4× 倍速下溶散也得跟着快，不许冻在原速。
+export function updateBursts(b, dt) {
+  let n = 0;
+  for (let i = 0; i < b.n; i++) {
+    if (b.life[i] <= 0) continue;
+    b.life[i] -= dt;
+    if (b.life[i] <= 0) continue;
+    b.x[i] += b.vx[i] * dt;
+    b.y[i] += b.vy[i] * dt;
+    b.vy[i] -= 0.02 * dt;              // 轻微上浮（屏幕 y 向下为正 ⇒ 减 vy 才是往上）
+    b.vx[i] *= 1 - 1.6 * dt;           // 阻尼：散开之后要停下来，不是越飞越快
+    b.vy[i] *= 1 - 1.6 * dt;
+    n += 1;
+  }
+  b.live = n;                          // live 是**重算**出来的，不是累加的（防漂移）
+}
+
+export function drawBursts(ctx, renderer, viewport) {
+  const b = renderer.bursts;
+  if (b.live === 0) return;
+  const src = renderer.moteSprite.surface;   // ⚠️ 同一张 sprite，缩放靠目标尺寸
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < b.n; i++) {
+    if (b.life[i] <= 0) continue;
+    const k = b.life[i] / b.maxLife[i];
+    ga(ctx, k * k * 0.8, 1);
+    const d = b.r[i] * viewport.scale * 0.5 * (0.5 + k);
+    ctx.drawImage(src, screenX(b.x[i], viewport) - d, screenY(b.y[i], viewport) - d, d * 2, d * 2);
+  }
+  ctx.restore();
+}
+
+// world.events 是内核与表现层之间**唯一**的通信通道（计划 1 原文）。
+//
+// ⚠️ 本函数**不清空** events：清空由 main.js 每帧做一次（`world.events.length = 0`）。
+// 分成两个职责是为了让 audio（B18）也能消费同一批事件 —— 谁先清空谁就把事件
+// 从另一个人手里抢走了。
+//
+// ⚠️ 未知事件种类一律**不抛**：内核以后会加事件（B18/B19 各要加几种），
+// 表现层因为一条没见过的 kind 而白屏，违反 spec §7.7"绝不让整个世界崩溃"。
+export function consumeEvents(renderer, events) {
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    switch (ev.kind) {
+      case 'death':                              // sim.js:754
+        burst(renderer, ev.pos.x, ev.pos.y, 0, R.dissolveParticles);
+        break;
+      case 'hatch':                              // sim.js:935
+        burst(renderer, ev.pos.x, ev.pos.y, 1, 10);
+        break;
+      case 'eggFailed':                          // sim.js:879 / 919
+        burst(renderer, ev.pos.x, ev.pos.y, 3, 5);
+        break;
+      // 以下六种在**这一层**没有对应的画面，各有各的理由（不是漏掉）：
+      case 'laid':                               // 没有 pos（只有 id 与枚数）；卵本身就画在缸底
+      case 'dissolved':                          // 个体已被 splice，溶散动画早播完了
+      case 'emigrate':                           // 漂走不是死亡（不记 deaths、不发 death）
+      case 'drift':                              // 漂入的是**卵**，由 drawEggs 画；事件里没 pos
+      case 'eat':                                // 进食的读出通道是需求条与情绪，不是粒子
+      case 'say':                                // 那是第 8 层气泡的活（B19）
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- 卵（spec §4.11 / §4.12 第 6 条）
+
+// 卵的光晕用它**将来**的色相（它自己的 genes，不是母亲的），"壳内透出轮廓"讲的正是这件事。
+// ⚠️ 不缓存 decode 结果（旧计划 Task 7 用了一个 Map 并配一段清理代码）：
+// 一次 decode 是 19 次算术，比一次 Map 查找加上"每帧比对全部卵的 id 集合"那条清理路径
+// 更便宜，而且那个缓存会随卵的消失泄漏。脏/缺基因退回**粉色区间的中位**（350°），
+// 不是退回随机色：那枚卵仍然读起来是"缸里的一枚蛋"，而不是一个彩色气球。
+const EGG_FALLBACK_HUE = (() => {
+  const [start, end] = CONFIG.hueRange;
+  return (start + ((end - start + 360) % 360) / 2) % 360;
+})();
+
+export function eggHueOf(egg) {
+  const genes = egg && egg.genes;
+  if (!genes) return EGG_FALLBACK_HUE;
+  try {
+    const hue = decode(genes).hue;
+    return Number.isFinite(hue) ? hue : EGG_FALLBACK_HUE;
+  } catch {
+    return EGG_FALLBACK_HUE;      // 存档迁移到一半的基因形状：亮区退回区间中位，不许白屏
+  }
+}
+
+function drawEggShell(ctx, egg, x, y, rr) {
+  // 壳是一枚竖着的椭圆（不是正圆）：圆蛋在任何位置都读成"气泡"，
+  // 竖椭圆加上下缘那点透光才像"躺在沉积物里的一枚蛋"。
+  ctx.beginPath();
+  ctx.ellipse(x, y, rr * 0.82, rr, 0, 0, TAU);
+  ctx.fill();
+}
+
+function drawEggsInner(ctx, renderer, egg, viewport) {
+  const glow = eggGlowFor(egg);
+  const reveal = eggShellRevealFor(egg);          // 0 直到孵化后段（spec"壳内透出轮廓"）
+  const x = screenX(egg.pos.x, viewport);
+  const y = screenY(egg.pos.y, viewport);
+  // 脉动加快：reveal 从 0 走到 1，频率跟着从 2.2 抬到 4.8。
+  // ⚠️ 用 renderer.time 当相位**在这里是允许的**（一枚卵没有第二方需要同相），
+  // 而求偶/呼吸那一类"两方必须同相"的场合绝不允许 —— 旧计划栽的那一跤在后者，
+  // B14 的呼吸也已经换成读 body.phase（见 breatheOf）。
+  const pulse = 1 + R.eggGlowPulse * Math.sin(renderer.time * (2.2 + 2.6 * reveal) + x * 0.02)
+    * (egg.viable ? 1 : glow);
+  const rr = eggRadiusPx(egg, viewport) * pulse;
+  const sprite = getGlowSprite(renderer, eggHueOf(egg));
+  // ① 缸底那一团光（spec §4.11 卵那一格："缸底微光脉动"）。
+  //    不可孵化的卵这一团就是被 eggGlowFor 慢慢熄灭的那一个。
+  // ⚠️ 混合模式**每段都显式设**，不设"进循环时设一次"：上一枚卵的蛋壳是 source-over 画的，
+  // 留着它去贴下一枚卵的光晕，第二枚开始就没有那团光了。
+  ctx.globalCompositeOperation = 'lighter';
+  ga(ctx, glow * 0.85, 1);
+  ctx.drawImage(sprite.surface, x - rr * 2.2, y - rr * 2.2, rr * 4.4, rr * 4.4);
+  // ② 壳内透出轮廓：同一张光晕 sprite 缩到壳内，亮度跟着 reveal 抬起来。
+  //     这是这一层**唯一**可能被跳过的那次贴图 ⇒ 桩数得出 1 次与 2 次的差别。
+  if (reveal > 0) {
+    ga(ctx, reveal * 0.55, 1);
+    ctx.drawImage(sprite.surface, x - rr * 0.7, y - rr * 0.7, rr * 1.4, rr * 1.4);
+  }
+  // ③ 蛋壳本体（八色蛋色在这里，spec §4.1 / §4.12 第 5 条）。
+  //    ⚠️ fillStyle 走的是**取表**（eggTintHex），不在这里拼颜色字符串（spec §5.3 禁分配）。
+  ctx.globalCompositeOperation = 'source-over';
+  ga(ctx, 0.35 + 0.55 * glow, 1);
+  ctx.fillStyle = eggTintHex(egg.eggTint);
+  drawEggShell(ctx, egg, x, y, rr);
+}
+
+export function drawEggs(ctx, renderer, world, viewport) {
+  const eggs = world.eggs;
+  if (!eggs || eggs.length === 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < eggs.length; i++) drawEggsInner(ctx, renderer, eggs[i], viewport);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- 食物（spec §6.2 的三种外观）
+//
+// ⚠️ 这一层**一次贴图都不花**：微粒 sprite 是粉色的（CONFIG.colors.mote），
+// 拿它去贴食物就等于把 spec §6.2 明文"避开粉色系"的那三种颜色又染回粉色。
+// 三条形状各走各的图元，这也是记录型桩**唯一**能看出"三种外观互不相同"的地方：
+//   光藻 = 一簇 arc（青绿微粒）
+//   蜜珠 = 一个 ellipse 加一颗 arc 高光（琥珀金珠）
+//   冰晶 = moveTo + 五条 lineTo + closePath + stroke（淡蓝结晶的直棱）
+
+const FOOD_ALGAE_MOTES = 4;      // 一簇几颗：太少读成"一个点"，太多就成一团雾
+const FOOD_CRYSTAL_FACETS = 6;   // 晶面数：六边形是"结晶"，五边形读成"石头"
+
+function drawFoodAlgae(ctx, x, y, rr) {
+  ctx.beginPath();
+  for (let i = 0; i < FOOD_ALGAE_MOTES; i++) {
+    const a = (i / FOOD_ALGAE_MOTES) * TAU + 0.4;
+    const spread = rr * 1.5;
+    ctx.arc(x + Math.cos(a) * spread, y + Math.sin(a) * spread, rr * 0.5, 0, TAU);
+  }
+  ctx.fill();
+}
+
+function drawFoodNectar(ctx, x, y, rr) {
+  ctx.beginPath();
+  ctx.ellipse(x, y, rr, rr * 1.12, 0, 0, TAU);     // 珠子本身（竖着略鼓，像一滴蜜）
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x - rr * 0.32, y - rr * 0.36, rr * 0.3, 0, TAU);   // 那一点高光
+  ctx.fill();
+}
+
+function drawFoodCrystal(ctx, x, y, rr) {
+  ctx.beginPath();
+  for (let i = 0; i < FOOD_CRYSTAL_FACETS; i++) {
+    const a = (i / FOOD_CRYSTAL_FACETS) * TAU - Math.PI / 2;   // 一个尖朝上
+    const px = x + Math.cos(a) * rr;
+    const py = y + Math.sin(a) * rr;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.lineWidth = Math.max(0.8, rr * 0.24);
+  ctx.stroke();
+}
+
+export function drawFoods(ctx, renderer, world, viewport) {
+  const foods = world.foods;
+  if (!foods || foods.length === 0) return;
+  ctx.save();
+  ga(ctx, 0.92, 1);
+  for (let i = 0; i < foods.length; i++) {
+    const f = foods[i];
+    const pos = f.pos;
+    if (!pos) continue;
+    const x = screenX(pos.x, viewport);
+    const y = screenY(pos.y, viewport);
+    const rr = foodRadiusPx(f, viewport);
+    const color = foodColorFor(f.kind);
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    if (f.kind === 'crystal') drawFoodCrystal(ctx, x, y, rr);
+    else if (f.kind === 'nectar') drawFoodNectar(ctx, x, y, rr);
+    else drawFoodAlgae(ctx, x, y, rr);           // 未知种类按光藻画（颜色也已退回藻色）
+  }
   ctx.restore();
 }
 
@@ -936,6 +1459,20 @@ export function createRenderer(opts) {
     handLocalVec: { x: 0, y: 0 },
     eyeGeom: new Float64Array(8),   // 两只眼的 [ex, ey] 与 [半宽, 半高]，一条数组装完
     hand: null,           // 每帧从 world.playerHand 读过来（**只读**，见 eyes.js 文件头那条 ⚠️）
+    // ---- B16 的每帧复用容器：drawCreature 逐只写它，各层从这里读（**零分配**，spec §5.3）----
+    // ⚠️ 它是**绘制参数**，不是状态：里面没有任何计时器，所有读数都是 drawCreature 开头
+    // 那一组纯函数（dissolveT / dimFactorFor / hopProgress …）对**当前这一只**的输出。
+    // 所以"绘制不可重入"那条老纪律同样适用于它（文件头），且 creature 上不长任何字段。
+    fx: {
+      alpha: 1,           // 整只的亮度乘数：溶散 alpha，或 sick/哀悼的 dim（两者互斥，见 dimFactorFor）
+      glow: 1,            // 第 1 层光晕单独的乘数（溶散时**光比身体先熄灭**）
+      expand: 1,          // 溶散的体型倍数（>1：散开，不是缩没）
+      lift: 0,            // 蹦跳的屏幕竖向抬升（**CSS 像素**，已乘身体半径）
+      rise: 0,            // 溶散的上浮（视口高度 fraction × viewport.height）
+      squashV: 1,         // 蹦跳的屏幕竖向尺度（落地 <1、滞空 >1）
+      stretchH: 1,        // 它的横向补偿 = 1/squashV（体积守恒）
+    },
+    bursts: createBursts(CONFIG.render.burstPool),   // 溶散/孵化/卵失败的对象池（环形写入，永不扩容）
     time: 0,
     getPeltSprite(hue, sat, lum) {
       const key = peltKey(hue, sat, lum);
@@ -978,16 +1515,27 @@ export function createRenderer(opts) {
       // 同一个对象被 main.js 原地改写，所以这里写回去不会造成任何额外分配。
       viewport.time = renderer.time;
       updateMotes(renderer.motes, viewport, dt);
+      // 溶散粒子与水体同一个 dt（**模拟**秒，main.js 喂的那一个）：
+      // 4× 倍速下动画也得跟着快，否则"溶散"在快进里变成一场永不结束的雪。
+      updateBursts(renderer.bursts, dt);
       drawWater(ctx, renderer, viewport);
+      // B16 的场景层：食物与卵在**缸底与水中**，所以画在生物之下（旧计划 Task 7 同序）。
+      // 顺序在这里是可数的：本文件里只有食物用 arc、只有卵用 ellipse、只有本体 clip，
+      // 由 tests/render-fx.test.js 的"arc 早于 ellipse 早于 clip"守住。
+      drawFoods(ctx, renderer, world, viewport);
+      drawEggs(ctx, renderer, world, viewport);
       // 生物层（spec §5.1 的六层：B14 的第 1/2/3/4/5/7 + B15 的第 6）。
       // 层序有意义：生物在水体**之上**；B15 的眼睛接在 drawCreature 内部（clip 之外），
-      // B16 的食物/卵接在**本循环之前**（它们在缸底/水中），B19 的气泡接在最后。
+      // B19 的气泡接在最后。
       const creatures = world.creatures;
       for (let i = 0; i < creatures.length; i++) {
         const c = creatures[i];
         const b = bodies && bodies.get ? bodies.get(c.id) : undefined;
         if (b !== undefined) drawCreature(ctx, renderer, c, b, viewport);
       }
+      // 溶散/孵化的微粒在生物**之上**：它们是叠加光效，不是水里的实物
+      // （微粒在身体下面画会被毛绒不透明的本体整个盖掉，等于没有那场散开）。
+      drawBursts(ctx, renderer, viewport);
     },
   };
   buildStatics(renderer);
@@ -1084,7 +1632,7 @@ function drawWater(ctx, renderer, viewport) {
   // 光束：'lighter' 叠加，靠平移预渲染好的 sprite 实现摆动（不重建渐变）
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = R.shaftAlpha;
+  ga(ctx, R.shaftAlpha, 1);
   for (const s of renderer.shafts) {
     const sway = Math.sin(renderer.time / R.shaftSwayPeriod * TAU + s.phase) * 0.06;
     const x = (s.base + sway) * w - s.w * 0.5;
@@ -1105,7 +1653,7 @@ function drawWater(ctx, renderer, viewport) {
   ctx.globalCompositeOperation = 'lighter';
   for (let i = 0; i < m.n; i++) {
     const d = m.r[i] * 2 * viewport.scale * 0.5;
-    ctx.globalAlpha = m.a[i];
+    ga(ctx, m.a[i], 1);
     ctx.drawImage(src, screenX(m.x[i], viewport) - d, screenY(m.y[i], viewport) - d, d * 2, d * 2);
   }
   ctx.restore();

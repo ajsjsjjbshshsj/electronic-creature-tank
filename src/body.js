@@ -193,6 +193,25 @@ function detectImpact(body, c) {
   return strength;
 }
 
+// 求关注升级链的**档位**（spec §4.10 的三档：0 卖萌 / 1 蹦到手的正前方 / 2 背对手生气）。
+//
+// ⚠️ 这里刻意**不** import behavior.begEscalation 而是按同一份 CONFIG 阈值自己比两次，
+// 理由不是省事：begEscalation 每次调用都要**新分配一个对象**（{level, hopBonus, protestFloor}），
+// 而本函数坐在 updateTail 里，跑在"每只 × 每子步"上（24 只 × 60 子步 = 每秒 1440 次分配），
+// spec §5.3 把"运行时不分配对象"列为硬约束。返回标量就一次都不分配。
+//
+// 两份实现的**一致性**由 tests/render-fx.test.js 的一条扫描线守住：
+// 它对一组 begIgnored 探针逐点断言本函数与 begEscalation(c).level 相同。
+// 阈值本身只有**一处定义**（CONFIG.behavior.begEscalate），所以会分家的只有比较式，
+// 而那条测试正是冲着它来的。
+export function begLevelOf(c) {
+  const E = CONFIG.behavior.begEscalate;
+  const ignored = Number.isFinite(c.begIgnored) ? c.begIgnored : 0;
+  if (ignored >= E.protestAfter) return 2;
+  if (ignored >= E.hopAfter) return 1;
+  return 0;
+}
+
 // 尾巴（spec §4.7.1）。三段链，每段的目标位置 = 上一段方向**旋转一个摆角**再前进 segLen，
 // 摆角取 amp × sin(phase − i × waveLag)：相位沿链后退 ⇒ 波从根部往尖端传，
 // 而不是整条一起左右平移（那看着像一根棍子在扫）。
@@ -206,9 +225,13 @@ function updateTail(body, c, dt, damp, emo) {
   const n = nodes.length;
   const personality = c.traits ? c.traits.personality : null;
   const activity = personality ? clamp01(personality.activity) : 0;
+  // 求关注升级链的档位（spec §4.10）。**只读** begIgnored，不写任何东西回去。
+  const beg = begLevelOf(c);
 
   // 摆速：spec 公式 + anger 的"急促前后抽"（表里那一档）
-  const rate = tailSwingRate(activity, emo.arousal) * (1 + TAIL.angerRateGain * emo.anger);
+  //          + 升级链**第二档**的急促（被冷落到背过身去那一档，抽得更快）。
+  const rate = tailSwingRate(activity, emo.arousal) * (1 + TAIL.angerRateGain * emo.anger)
+    * (beg >= 2 ? 1 + TAIL.begRateGain : 1);
   tail.rate = rate;
   tail.phase = (tail.phase + rate * dt) % TAU;
 
@@ -218,8 +241,10 @@ function updateTail(body, c, dt, damp, emo) {
   tail.tuck = tuck;
 
   // 幅度：spec 只给排序（幸福 > 快乐 > 安静 > 伤心）与 fear/anger 两档，没给数 ⇒ 数在 CONFIG。
+  // 第三档加数 = 升级链**第一档**的"尾巴幅度拉满"；到第二档**撤掉**（不是叠加），
+  // 因为 spec §4.10 明写"两级的出口是替换而非叠加"，叠加会读成"越被无视越开心"。
   tail.amp = (TAIL.ampQuiet + TAIL.ampJoy * emo.joy + TAIL.ampArousal * emo.arousal
-    + TAIL.ampAnger * emo.anger) * damp * tuck;
+    + TAIL.ampAnger * emo.anger + (beg === 1 ? TAIL.ampBeg : 0)) * damp * tuck;
   // "伤心：垂着不动，尖端轻微卷" —— 局部空间没有"下"，所以实现为静态卷角（见文件头那条 ⚠️）
   tail.curl = TAIL.curlQuiet * (1 - emo.joy) * damp;
   tail.drive = tail.amp * Math.sin(tail.phase);

@@ -54,7 +54,13 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 45 keys 47
   // ⚠️ 45 → 46、47 → 48：B15（2026-10-21）加了 CONFIG.eye 一段（一个节点、57 个旋钮）。
   // 加这一段的全部理由：spec §4.6 那张十行表的数只能有一处定义，而 eyes.js 不许有字面量。
-  assert.equal(visited.length, 46, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 46 → 47（顶层键数仍 48）：B16（2026-10-21）在 CONFIG.colors 里加了 **eggTints 子表**
+  // （一个节点、八个键）。它为什么必须是子表而不是八个平铺的键：蛋色的键集要能与
+  // CONFIG.eggTint.colors（遗传位点那八个名字）**逐键比对** —— 平铺键做不到这件事，
+  // 而"位点加了一色、色表忘了补"的症状是那颗卵静默沿用上一颗的颜色（tests/render-fx.test.js 钉）。
+  // 同一 Task 还往 CONFIG.render / CONFIG.tail 里加了若干**标量**旋钮：标量不是节点，
+  // 所以只动了下面两条键名清单，没动这里计数。
+  assert.equal(visited.length, 47, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'behavior', 'blink', 'body', 'bodyPoints', 'broody',
@@ -76,6 +82,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.body', 'CONFIG.star', 'CONFIG.fluff', 'CONFIG.tail', 'CONFIG.blink',   // B12 新增五段
     'CONFIG.render',                                                              // B13 新增（水体与缩放）
     'CONFIG.eye',                                                                 // B15 新增（眼睛十行表）
+    'CONFIG.colors.eggTints',                                                     // B16 新增（八色蛋的子表）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -325,13 +332,19 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
   // 这两个数是 spec §4.7.1 那条公式**自身**的两个常数（搬进 CONFIG 只为了让 body.js 无字面量）
   assert.equal(CONFIG.tail.swingActivityFloor, 0.4);
   assert.equal(CONFIG.tail.swingArousalGain, 1);
+  // ⚠️ 15 → 17：B16（2026-10-21）加了 ampBeg / begRateGain 两项，它们是 spec §4.10
+  // 求关注升级链在**尾巴**这一条通道上的落点（第一档"尾巴幅度拉满"、第二档"生气"的急促）。
+  // 档位本身**不在这里**：阈值只有 CONFIG.behavior.begEscalate 一处，body.js 读那两个秒数。
   assert.deepEqual(Object.keys(CONFIG.tail).sort(), [
-    'ampAnger', 'ampArousal', 'ampJoy', 'ampQuiet', 'angerRateGain', 'curlQuiet', 'dragRate',
-    'fearTuck', 'followRate', 'lenRatio', 'segs', 'swingActivityFloor', 'swingArousalGain',
-    'swingBase', 'waveLag',
-  ], '尾巴的十五个旋钮，不多不少（spec 只给了前三个数与后十个的**排序**，数值属 §12 授权）');
+    'ampAnger', 'ampArousal', 'ampBeg', 'ampJoy', 'ampQuiet', 'angerRateGain', 'begRateGain',
+    'curlQuiet', 'dragRate', 'fearTuck', 'followRate', 'lenRatio', 'segs', 'swingActivityFloor',
+    'swingArousalGain', 'swingBase', 'waveLag',
+  ], '尾巴的十七个旋钮，不多不少（spec 只给了前三个数与后十个的**排序**，数值属 §12 授权）');
   assert.ok(CONFIG.tail.ampQuiet > 0, '安静档也必须还在摆（spec §4.7.1 表："低频慢摆"，不是"不动"）');
   assert.ok(CONFIG.tail.fearTuck > 0 && CONFIG.tail.fearTuck <= 1, 'fearTuck 是收缩分数');
+  // 升级链那两项的方向性：第一档只加幅度、第二档只加速（spec §4.10"替换而非叠加"）。
+  assert.ok(CONFIG.tail.ampBeg > 0, '第一档的"幅度拉满"必须真的加东西');
+  assert.ok(CONFIG.tail.begRateGain > 0, '第二档的"急促前后抽"必须真的更快');
 
   assert.deepEqual(Object.keys(CONFIG.blink).sort(), ['activityFloor', 'intervalBase']);
   assert.equal(CONFIG.blink.intervalBase, 4.0);
@@ -402,19 +415,26 @@ test('眼睛的五十七个旋钮齐备，且十行表的方向性不等式成�
   assert.ok(Y.blushOffsetX > 0 && Y.blushRadius > 0, '腮红必须有位置与半径，否则等于没画');
 });
 
-test('渲染层的三十一个旋钮被字面量钉住（水体与缩放 + 分层身体；行为两侧由 render.test.js 负责）', () => {
+test('渲染层的五十个旋钮被字面量钉住（水体与缩放 + 分层身体 + 溶散/卵/食物/蹦跳；行为两侧由 render-fx.test.js 负责）', () => {
   // 分工同 §4.5 / §4.7 那两组：config.test.js 钉**数值本身**，render.test.js 钉它造成的映射。
   // 只钉行为的话，把 scaleMin 从 1.5 调到 0.4 会让手机上"生物小到看不见"（spec §3.4-2
   // 点名要防的情况）而行为侧仍然全绿；只钉数值的话，改 clamp 的方向也不会报警。
   const R = CONFIG.render;
+  // ⚠️ 31 → 50：B16（2026-10-21）加了 19 个旋钮（6 个溶散/粒子 + 2 个 sick + 1 个哀悼
+  // + 5 个卵 + 1 个食物 + 4 个蹦跳），全部是标量 ⇒ 顶层节点数不动，只有这张清单变长。
+  // 分工与上面几段一致：**数**在这里，**行为**在 tests/render-fx.test.js。
   assert.deepEqual(Object.keys(R).sort(), [
-    'fluffSpriteSize', 'glowAlphaFactor', 'glowRadiusFactor', 'glowSpriteSize',
-    'innerAlpha', 'innerPulse', 'innerRadiusFactor', 'moteAlphaMax', 'moteAlphaMin',
-    'moteDrift', 'moteRadiusMax', 'moteRadiusMin', 'moteRiseMax', 'moteRiseMin',
-    'moundCount', 'patternAlpha', 'patternMarkFactor', 'peltDarkCut', 'peltLitBoost',
-    'peltSatLift', 'peltSpriteSize', 'scaleMax', 'scaleMin', 'scaleRef', 'sedimentHeight',
-    'shaftAlpha', 'shaftCount', 'shaftSwayPeriod', 'tailLiftFactor', 'tailSegFactor', 'tailTaper',
-  ], '三十一个旋钮，不多不少（三个缩放 + 十二个水体 + 十六个分层身体，B14 起）');
+    'burstPool', 'dissolveAlphaPow', 'dissolveExpand', 'dissolveGlowPow', 'dissolveLift',
+    'dissolveParticles', 'eggFailFadeTime', 'eggFailMinGlow', 'eggGlowPulse', 'eggRadius',
+    'eggRevealAt', 'fluffSpriteSize', 'foodRadius', 'glowAlphaFactor', 'glowRadiusFactor',
+    'glowSpriteSize', 'hopLandAt', 'hopLiftRatio', 'hopSquashMin', 'hopStretchAir', 'innerAlpha',
+    'innerPulse', 'innerRadiusFactor', 'moteAlphaMax', 'moteAlphaMin', 'moteDrift',
+    'moteRadiusMax', 'moteRadiusMin', 'moteRiseMax', 'moteRiseMin', 'moundCount', 'mournDim',
+    'patternAlpha', 'patternMarkFactor', 'peltDarkCut', 'peltLitBoost', 'peltSatLift',
+    'peltSpriteSize', 'scaleMax', 'scaleMin', 'scaleRef', 'sedimentHeight', 'shaftAlpha',
+    'shaftCount', 'shaftSwayPeriod', 'sickDesat', 'sickDim', 'tailLiftFactor', 'tailSegFactor',
+    'tailTaper',
+  ], '五十个旋钮，不多不少（三个缩放 + 十二个水体 + 十六个分层身体 + 十九个 B16，数出来的）');
 
   // ---- 缩放（spec §3.4-2："由短边推导并 clamp"；三个数属 §12 授权的观感自定）----
   assert.deepEqual([R.scaleRef, R.scaleMin, R.scaleMax], [540, 1.5, 2.6]);
@@ -474,6 +494,82 @@ test('渲染层的三十一个旋钮被字面量钉住（水体与缩放 + 分�
   assert.deepEqual([R.innerRadiusFactor, R.innerAlpha, R.innerPulse], [0.46, 0.34, 0.45]);
   // 第 5 层：尾巴段数**不在这里**（在 CONFIG.tail.segs），这里只钉每段的画法
   assert.deepEqual([R.tailSegFactor, R.tailTaper, R.tailLiftFactor], [0.72, 0.20, 0.30]);
+
+  // ---- B16（2026-10-21）：死亡溶散 / sick / 哀悼 / 卵 / 食物 / 蹦跳 ----
+  // 分工与上面各段一致：这里钉**数**，行为在 tests/render-fx.test.js。
+  // 三条"改回去就红"的结构关系写在下面，它们各自的对应行为断言在同名测试里。
+  assert.deepEqual([R.dissolveExpand, R.dissolveLift, R.dissolveParticles], [1.9, 0.035, 14]);
+  assert.deepEqual([R.dissolveAlphaPow, R.dissolveGlowPow], [2, 3]);
+  // ⚠️ 这两条幂是 spec §4.11 那一行**顺序**的唯一实现："光慢慢熄灭 → 身体溶散"。
+  // 把两者对调（或把 glow 调成更小）会让身体比光先淡掉，画面读起来就是"它淡出了视野"，
+  // 而不是"它死了、散开了"。这条不等式是那个错误的唯一机器证据。
+  assert.ok(R.dissolveGlowPow > R.dissolveAlphaPow,
+    '光的幂必须**大于**身体的幂：幂越大掉得越快 ⇒ 光先熄灭');
+  assert.ok(R.dissolveAlphaPow >= 2, '线性淡出（幂 1）读起来像关灯，不像"化进水里"');
+  assert.ok(R.dissolveExpand > 1, '溶散必须是**散开**（>1），不是缩没');
+  assert.ok(R.dissolveLift > 0 && R.dissolveLift < 0.1,
+    `上浮量必须看得见又不夸张（归一化 ${R.dissolveLift} ≈ 1080 高的缸上 ${(R.dissolveLift * 1080).toFixed(0)}px）`);
+  // 粒子池：**刻意**小于"同帧全部死亡"的最坏需求（24 × 14 = 336），靠环形覆盖保住零分配。
+  assert.equal(R.burstPool, 240);
+  assert.ok(R.burstPool > R.dissolveParticles, '单只死亡的粒子必须装得下');
+  assert.ok(R.burstPool < CONFIG.populationCap.desktop * R.dissolveParticles,
+    '池容量必须低于满缸同死的理论最坏值 —— 这是"覆盖最老粒子"而不是"扩容"的那条决定');
+
+  assert.deepEqual([R.sickDim, R.sickDesat, R.mournDim], [0.35, 0.55, 0.72]);
+  // sick 是故障、哀悼是情绪（spec §7.7 vs §4.11）：前者必须暗得更狠，但两者都不能暗到看不见。
+  assert.ok(R.sickDim < R.mournDim, 'sick 必须比哀悼更暗，否则"这只不对劲"读不出来');
+  assert.ok(R.sickDim > 0, '暗到 0 就是把 sick 又藏起来了 —— 正撞在"绝不静默"那条上');
+  assert.ok(R.sickDesat > 0 && R.sickDesat < 1, '去饱和是分数，不是绝对饱和度');
+
+  assert.deepEqual([R.eggRadius, R.eggGlowPulse, R.eggFailFadeTime, R.eggFailMinGlow, R.eggRevealAt],
+    [12, 0.30, 22, 0.06, 0.60]);
+  assert.ok(R.eggFailMinGlow > 0,
+    '不可孵化的卵必须留**残光**：彻底消失就又变成一条静默的禁令（spec §4.12 第 6 条要避免的就是它）');
+  assert.ok(R.eggRevealAt > 0.5 && R.eggRevealAt < 1,
+    '"壳内透出轮廓"只能在孵化**后段**出现（spec §4.11 卵那一格的原话）');
+  // 蛋是沉在缸底的世界物体，尺寸走 viewport.scale（spec §3.4-2）。手机短边触底 scale=1.5 时
+  // 最小的蛋（eggSize 0.6）直径也得看得见，否则"这缸里有卵"这件事在手机上就没了。
+  assert.ok(R.eggRadius * CONFIG.render.scaleMin * 0.6 * 2 >= 12,
+    `手机上下限蛋的直径只有 ${(R.eggRadius * CONFIG.render.scaleMin * 0.6 * 2).toFixed(1)}px，太小`);
+  assert.ok(R.eggFailFadeTime < CONFIG.stage.egg,
+    '熄灭必须比孵化时长快：慢于 60 秒的话玩家看到的是"一枚一直不太亮的卵"，不是一个事件');
+
+  assert.equal(R.foodRadius, 7);
+  assert.ok(R.foodRadius * CONFIG.render.scaleMin * 2 * 0.6 >= 8,
+    '吃到只剩一点的食物仍然要看得见（看不见＝"它凭空少了"，又是一条静默）');
+
+  assert.deepEqual([R.hopLiftRatio, R.hopLandAt, R.hopSquashMin, R.hopStretchAir], [0.55, 0.72, 0.62, 1.10]);
+  assert.ok(R.hopLandAt > 0.5 && R.hopLandAt < 1,
+    '落地必须落在 hop 窗口之内，才留得出过冲回弹那一段（否则"过冲"永远播不完）');
+  assert.ok(R.hopSquashMin < 1 && R.hopStretchAir > 1, '压扁 <1、拉长 >1（spec §4.7 的两个方向）');
+  // 过冲量 = (1 − hopSquashMin) / 4（(1−q)² 包络在 q=0.5 处），必须"一点点"：
+  // 弹得比压下去的还多就不再是 Q 弹，是一只橡皮球。
+  assert.ok((1 - R.hopSquashMin) / 4 < 1 - R.hopSquashMin, '过冲必须严格小于压扁量');
+  // 抬升以**身体半径**为单位：activity=0 时 0.275、activity=1 时 0.825（冲量之比 3 倍）。
+  assert.ok(R.hopLiftRatio * CONFIG.hop.impulseBase * 0.5 > 0.2, '跳得太矮等于没跳');
+  assert.ok(R.hopLiftRatio * CONFIG.hop.impulseBase * 1.5 < 1, '好动的也不该跳飞出身体直径的距离');
+
+  // ---- B16 新增的颜色（spec §6.2 的三种食物 + §11 的八色蛋）----
+  // 语义侧（避开粉色系、在深底上可读、不跟瞳孔撞色、键集与位点对齐）全在
+  // tests/render-fx.test.js；这里只钉**色值本身**，因为改一个颜色不会有任何别的地方变红。
+  assert.deepEqual([CONFIG.colors.algae, CONFIG.colors.nectar, CONFIG.colors.crystal],
+    ['#7FE3B0', '#FFC46B', '#A8D8FF']);
+  assert.deepEqual(Object.keys(CONFIG.colors.eggTints), [...CONFIG.eggTint.colors],
+    '蛋色子表的键**顺序与集合**都必须与遗传位点那八个名字一致（Object.keys 用插入序，与 colors 同批书写）');
+  // 蛋色的**相对明度次序**是这两枚特殊色唯一可机器核对的一半（另外那一半在屏上，进手工清单）：
+  // 黑蛋是八色里最暗的、白蛋是最亮的。次序被调乱（比如把 lilac 做成近黑）时这里先红。
+  const relLum = (hex) => {
+    const n = parseInt(hex.slice(1), 16);
+    return 0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255);
+  };
+  const lumOf = CONFIG.eggTint.colors.map((k) => relLum(CONFIG.colors.eggTints[k]));
+  const argExt = (cmp) => lumOf.reduce((best, v, i) => (cmp(v, lumOf[best]) ? i : best), 0);
+  assert.equal(CONFIG.eggTint.colors[argExt((a, b) => a < b)], 'black',
+    '黑蛋必须仍是八色里最暗的一档（它被抬到对比度下限之上，但不许抬过别的色）');
+  assert.equal(CONFIG.eggTint.colors[argExt((a, b) => a > b)], 'white',
+    '白蛋必须仍是最亮的一档（否则"白"这个名字就在骗人）');
+  assert.ok(Math.max(...lumOf) - Math.min(...lumOf) > 60,
+    '八色的明度跨度太窄就是一片同色气球');
   assert.ok(R.tailSegFactor > 0 && R.tailSegFactor <= 1, '单段贴图半径不得超过段长（段与段会糊成一坨）');
   assert.ok(R.tailTaper > 0 && R.tailTaper * (CONFIG.tail.segs - 1) < 1,
     '段间递减到最后一尖必须还有宽度，否则尾尖是 0 半径（drawImage 退化）');

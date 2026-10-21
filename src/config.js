@@ -336,6 +336,10 @@ const CONFIG = {
     waveLag: 0.7,              // 相邻段的相位差（弧度）：波从根部往尖端传，不是整条一起摆
     followRate: 16,            // 每秒向目标位置松弛的系数（显式积分 ⇒ 必须跑在固定步长里）
     dragRate: 8,               // Verlet 阻尼（每秒，换算成 exp(-rate×dt) 而非每步常数）
+    // 求关注升级链的第三条读出通道（spec §4.10："升一级：… 尾巴幅度拉满"）。
+    // 档位判定读 CONFIG.behavior.begEscalate 的两个秒数，**不在这里另写阈值**。
+    ampBeg: 0.34,              // 第一档给摆幅的加数（拉满；到第二档就**撤掉**，见下面那条）
+    begRateGain: 0.9,          // 第二档（protest，背对手生气）给摆速的增益：急促前后抽
   },
   blink: {
     intervalBase: 4.0,         // BLINK_INTERVAL_BASE：秒；实际 = BASE / (0.4 + activity)
@@ -493,6 +497,43 @@ const CONFIG = {
     tailTaper: 0.20,           // 第 5 层：段间递减（根粗尖细），3 段之后仍 > 0
     tailLiftFactor: 0.30,      // 第 5 层：屏幕空间的"高举"量 × 摆幅（§4.7.1 表里幸福那一档）
     fluffSpriteSize: 160,      // 第 7 层碎边 sprite 边长（px）；**总共只有 CONFIG.fluff.sprites 张**
+
+    // ---- B16（2026-10-21）：死亡溶散 / sick / 哀悼 / 卵 / 食物 / 蹦跳 ----
+    // 这一段的分工与上面几段一致：数在这里，**行为**由 tests/render-fx.test.js 钉。
+    // 死亡溶散（spec §4.11 那一行："停止运动 → 光慢慢熄灭 → 身体溶散成微粒上升消散"）。
+    // ⚠️ 时长**不在这里**：它用内核的 CONFIG.dissolveDuration（4 秒），因为 reapDead
+    // 就是按 dying >= dissolveDuration 把个体 splice 掉的（sim.js 的 reapDead）。
+    // 表现层另计一套时钟必然漂移，症状是"动画没播完生物就没了"或反过来。
+    dissolveExpand: 1.9,       // 结束时体型放大到 1.9 倍：**散开**而不是缩没
+    dissolveLift: 0.035,       // 同时向上漂移的归一化距离（"溶进水里"）
+    dissolveAlphaPow: 2,       // 身体 alpha = (1−t)^此值：末尾"化掉"而不是线性淡出
+    dissolveGlowPow: 3,        // 光晕 alpha = (1−t)^此值：**幂更大 ⇒ 光比身体先熄灭**（spec 那句话的顺序）
+    dissolveParticles: 14,     // 每只死亡时爆发的微粒数
+    burstPool: 240,            // 粒子对象池容量。**刻意小于** 24×14=336：池满就环形覆盖最老的粒子，
+                               // 而同帧 24 只全死在实际模拟里不会发生（死亡是稀疏事件）。
+                               // 环形覆盖保证永不扩容 ⇒ 永不分配（spec §5.3）。
+    // sick（spec §7.7："单只生物 tick 抛异常 → 隔离这一只、标 sick"；sim.js 把
+    // "画成变暗、静止，而不是无声地少一只"这条义务点名交给了表现层）
+    sickDim: 0.35,             // 亮度乘数：暗到明显异常，但仍看得清是什么
+    sickDesat: 0.55,           // 去饱和比例。**换档而不是加滤镜**：ctx.filter 在部分移动端
+                               // 浏览器上不支持或极慢，而 spec §5.3 的预算是按手机算的。
+    // 哀悼（spec §4.11："死亡时附近的个体会停顿、变暗一小会儿"；时长 = CONFIG.mournDuration）
+    mournDim: 0.72,            // 比 sick 轻：哀悼是情绪、不是故障，不该看起来像坏了
+    // 卵（spec §4.11 / §4.12 第 6 条）
+    eggRadius: 12,             // 世界单位半径（× viewport.scale × eggSize），eggSize 的两端是 0.6/1.4
+    eggGlowPulse: 0.30,        // 可孵化卵的脉动幅度（"缸底微光脉动"）
+    eggFailFadeTime: 22,       // 不可孵化卵的光在多少个 **egg.age 秒**内熄灭（同一条时间轴）
+    eggFailMinGlow: 0.06,      // 熄灭后的残光：彻底消失就又变成一条**静默的禁令**了
+    eggRevealAt: 0.60,         // 孵化进度到这一档才开始"壳内透出轮廓"（spec §4.11 卵那一行）
+    // 食物（spec §6.2 的三种外观）
+    foodRadius: 7,             // 世界单位基准半径（× viewport.scale × amount 项）
+    // 蹦跳（spec §4.7.2 落地那半句 + §4.7 的 squash & overshoot）
+    // ⚠️ 竖向偏移**不是世界状态**：它每帧由 intent.kind === 'hop' 与 intentTime 重算，
+    // 不入档（spec §7.2"表现层的身体状态一律不入档"），时长读 intent.minDuration。
+    hopLiftRatio: 0.55,        // 最高点 = 该值 × 身体半径 × 冲量（冲量见 CONFIG.hop.impulseBase）
+    hopLandAt: 0.72,           // 落地落在 hop 窗口的这一进度上，**留出后面的过冲段**
+    hopSquashMin: 0.62,        // 落地那一刻的竖向尺度（压扁 38%）
+    hopStretchAir: 1.10,       // 滞空中点的竖向尺度（拉长 10%；与压扁共用一条 sin 弧）
   },
 
   // ---- 世界 ----
@@ -550,6 +591,31 @@ const CONFIG = {
     sediment: '#170A22',
     sedimentLight: '#3A1850',   // 堆叠形状的受光面，制造体积感
     shaft: '#6A4A8A',           // 光束：偏冷的紫，用 'lighter' 叠上去后接近水的散射色
+    // 三种食物的颜色（spec §6.2）。
+    // ⚠️ **刻意全部避开粉色**：spec §6.2 的原话是三种食物"避开粉色系（青绿 / 琥珀 / 淡蓝），
+    // 这样它们在粉紫色的世界里一眼可辨，不会被误认为生物"。所以这里出现青绿/琥珀/淡蓝
+    // 不是配色失误，是设计要求 —— 改这三个颜色会直接违反 spec §6.2，
+    // 由 tests/render-fx.test.js 的"三种食物刻意避开粉色系"用色相并集判定拦住。
+    algae: '#7FE3B0',           // 青绿光藻：基础食物，会自然再生（初始缸里就有 12 份）
+    nectar: '#FFC46B',          // 琥珀金珠：高能量，争抢的主要来源（色相 36°，恰在粉色区外）
+    crystal: '#A8D8FF',         // 淡蓝结晶：安抚，玩家的"灭火器"
+    // 蛋色（spec §11 EGG_TINTS 的八色：**键集必须与 CONFIG.eggTint.colors 同一份**）。
+    // 具体色值属 §12 授权（按观感定），但 spec §11 留了两条硬要求：
+    //   ① 在深靛紫底（#2D1240）上全部可读 ⇒ 黑蛋不能真是 #000000（那样在缸底彻底看不见），
+    //      它是八色里最暗的一档但仍抬到对比度下限之上；
+    //   ② 不与 PUPIL_COLOR（#2D1240）撞色。
+    // 两条都由 tests/render-fx.test.js 用独立实现的相对亮度算子核对（不在 src/ 里，
+    // 因为表现层不得自己再解码一次颜色空间）。
+    eggTints: Object.freeze({
+      'macaron-pink': '#FFB3D1',
+      'macaron-blue': '#A8CFFF',
+      'macaron-mint': '#A6E9C8',
+      'macaron-lilac': '#D8BEFF',
+      'macaron-cream': '#FFEFC2',
+      'macaron-peach': '#FFC9A3',
+      'white': '#F6F1F8',       // 不是纯白：纯白贴在深紫上会读成"贴纸"（B15 眼白那条同理由）
+      'black': '#4A4458',       // 抬亮的炭灰：可读性下限要求的唯一一处妥协，见上面 ①
+    }),
   },
 };
 
