@@ -114,6 +114,26 @@ const reportEvery = Math.round((5 * 60) / dt);      // 每 5 模拟分钟报告�
 
 const world = createWorld({ seed });
 
+// ---- 出词统计（2026-10-21，Task A9）----
+// 只统计**主运行**这一段（60 分钟常态演化），不算后面抚摸/衰减那两个实验阶段 ——
+// 它们的 tick 也会产生 say 事件，但那是被人为凑到人手边的情境，
+// 混进来会让"分布随 talk 分化"这条判据测到实验设计而不是世界本身。
+const sayByCreature = new Map();     // id → { n, talk }
+let sayTotal = 0;
+function harvestSay(w) {
+  for (const ev of w.events) {
+    if (ev.kind !== 'say') continue;
+    sayTotal += 1;
+    let rec = sayByCreature.get(ev.id);
+    if (!rec) {
+      const c = w.creatures.find((x) => x.id === ev.id);
+      rec = { n: 0, talk: c ? phenotype('talk', c.genes.talk) : null };
+      sayByCreature.set(ev.id, rec);
+    }
+    rec.n += 1;
+  }
+}
+
 console.log(`种子 ${seed} · 模拟 ${minutes} 分钟 · 上限 ${world.populationCap}`);
 console.log('─'.repeat(74));
 console.log(
@@ -144,6 +164,7 @@ let hueFirstViolation = null;
 
 for (let step = 0; step <= totalSteps; step++) {
   if (step > 0) tickWorld(world, dt);
+  harvestSay(world);
   // 表现层会消费 events 后清空；无头运行时也必须清，否则队列无限增长
   world.events.length = 0;
 
@@ -499,6 +520,13 @@ if (survivorLines.length) {
 }
 
 // ---- 自动断言：这个脚本本身就是验收，不合格要以非零码退出 ----
+//
+// ⚠️ 这一行原来在下面"多样性判据"的**后面**（`const failures = []` 在使用它的语句之后）。
+// `const` 有暂时性死区：多样性判据里那句 `if (hueStd < 0.03) failures.push(...)`
+// 一旦真的触发，抛的是 ReferenceError 而不是那条人话失败信息 ——
+// 也就是说**这条判据在它最需要工作的那一档里会崩**。本轮顺手修掉，声明挪到所有使用点之前。
+const failures = [];
+
 // ---- 多样性判据（2026-10-20，Task A3）----
 // 用**表型色相的组内标准差**，不用"两等位是否不同"的杂合度：后者在
 // MUTATION_RATE=0.06 的连续扰动下 6 代仍停在 0.97（理论应约 0.004），
@@ -521,7 +549,42 @@ console.log(`  色相组内标准差 ${hueStd.toFixed(4)}（表现型空间，0�
 console.log(`  漂入 ${world.stats.driftIns} 次 / 老年个体漂走 ${world.stats.emigrations} 次`);
 if (hueStd < 0.03) failures.push(`多样性塌了：色相组内标准差只有 ${hueStd.toFixed(4)}`);
 
-const failures = [];
+// ---- 出词判据（2026-10-21，Task A9）----
+//
+// 为什么必须有这一条：否则**整个语言层可以一行没实现而这份验收全绿**。
+// 这是"脚本不得教错人"的直接推论 —— 它是本项目唯一一处会被人类当说明书读的东西。
+//
+// 两条子判据，都断言**比值**而不是绝对值（计划 A6 的陷阱条）：
+// 绝对值会让任何人调 SPEECH_COOLDOWN 就全线红，而比值才是"性格在做事"的证据。
+const speakers = [...sayByCreature.values()].filter((r) => r.talk !== null);
+const byTalk = speakers.slice().sort((a, b) => a.talk - b.talk);
+const third = Math.max(1, Math.floor(byTalk.length / 3));
+const loGroup = byTalk.slice(0, third);
+const hiGroup = byTalk.slice(-third);
+// ⚠️ 分母是**该组全部个体**，不是"说过话的那几只"。
+// 只算说话者的话，一缸"10% 的话痨说了全部的话"会被读成"两组差不多"，
+// 而那恰恰是性格系统失效的样子 —— 沉默的个体必须按 0 计入。
+const mean = (g) => (g.length ? g.reduce((a, r) => a + r.n, 0) / g.length : 0);
+const loMean = mean(loGroup);
+const hiMean = mean(hiGroup);
+console.log(`  出词 ${sayTotal} 句 / ${speakers.length} 只个体`
+  + `（高 talk 三分之一均值 ${hiMean.toFixed(2)} vs 低 talk 三分之一 ${loMean.toFixed(2)}）`);
+if (sayTotal === 0) {
+  failures.push('整场模拟一句都没说过：语言层没接上，或 world.speechEnabled 被关了');
+} else if (byTalk.length < 3) {
+  failures.push(`说过话的个体只有 ${byTalk.length} 只，无法判断出词分布是否随 talk 分化`);
+} else if (loMean > 0 && hiMean / loMean < 2.5) {
+  // ⚠️ 阈值原本是 1.5，是**探针抬上来的**：把 speechCooldown 改成不随 talk 的常数 10
+  // 之后，实测比值仍有 1.85 —— 1.5 那条线放过了一个真实性能退化（talk 从"进三处"退化成"只进意愿一处"）。
+  // 抬到 2.5 的根据是四个种子的实测分布（6.4 / 4.1 / 4.0 / 4.1），最窄的一侧也有 2.5 倍以上的余量。
+  // 诚实记录这条判据的**边界**：它测的是"性格在读数上看不看得见"，
+  // 不测强度设计 —— 把系数调温和一些也会让这条变红，那时该改的是这里的阈值而不是实现。
+  // 而"0.1 与 0.9 的出词数之比 ≥ 3"那种**定量**断言在 tests/speech.test.js 里，不在这里：
+  // 分层是有意的 —— 本脚本要能在任何调参下分辨"语言层没了"，而不是看守某个具体手感值。
+  failures.push(`出词分布没有随 talk 分化：高 talk 均值 ${hiMean.toFixed(2)}，低 talk 均值 ${loMean.toFixed(2)}（比值 ${(hiMean / loMean).toFixed(2)} < 2.5）`);
+} else if (loMean === 0 && hiMean === 0) {
+  failures.push('出词计数全为 0（与 sayTotal 矛盾，说明统计口径错了）');
+}
 
 // ⚠️ 2026-10-14 控制方裁定：**灭绝不再是验收失败，它是一个合法结局。**
 // 这条原先是 `failures.push(...)`，把"种群自我延续"当成本计划的验收目标；
@@ -614,7 +677,8 @@ if (failures.length) {
   // ⚠️ 这里原先写"种群自我延续，未灭绝、未爆缸"。2026-10-14 裁定灭绝为合法结局之后，
   // 那句话会在"缸断了、但其余判据都过"的情况下**说谎**（它声称的"未灭绝"根本没被断言）。
   // 改为只陈述真正被断言的三件事，并在断代时补一行说明，免得读者以为脚本漏判。
-  console.log('✓ 验收通过：峰值未超上限、色相全程锁在粉色区间、繁殖确实在发生（世代 ≥ 2 且出生 ≥ 2）。');
+  console.log('✓ 验收通过：峰值未超上限、色相全程锁在粉色区间、繁殖确实在发生（世代 ≥ 2 且出生 ≥ 2）、'
+    + '出词确实在发生且分布随 talk 分化。');
   if (extinctAt >= 0) {
     console.log(`  （注：本缸在 ${extinctAt.toFixed(0)}s 断代 —— 按裁定这是合法结局，不计为失败。）`);
   }
