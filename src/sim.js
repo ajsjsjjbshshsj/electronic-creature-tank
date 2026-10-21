@@ -38,6 +38,8 @@ import {
 } from './memory.js';
 import { createCreature, ageCreature, canBreed, sizeOf } from './creature.js';
 import { maybeSay } from './speech.js';
+import { recall } from './heard.js';
+import { mostUrgent } from './needs.js';
 import {
   kinshipOf, crowdingFactor, layEggs, tickEgg, hatch, registerKinship,
 } from './breeding.js';
@@ -572,8 +574,14 @@ function speak(world, c, senses) {
   const nearest = senses.neighbors.length ? senses.neighbors[0] : null;
   const otherRef = nearest ? world.creatures.find((x) => x.id === nearest.id) : null;
   const mood = moodOf(c.emotions, c.needs, c.memory, { adversity: c.mourn > 0 });
+  // 听进去的话只在文字层开着时检索：recall 是纯读的，但它要抽随机数（说错词），
+  // 关掉之后还去抽样就是白白让私有流往前走 —— 不影响世界，只是没必要。
+  const need = mostUrgent(c.needs);
+  const hit = world.speechEnabled ? recall(c, { need, mood }, world.time, world.speechRng) : null;
   const u = maybeSay(c, {
     mood,
+    need,
+    heard: hit ? hit.token : null,
     playerNear: senses.playerHand !== null,
     other: otherRef ? { id: otherRef.id, name: otherRef.name } : null,
     speechEnabled: world.speechEnabled,

@@ -26,6 +26,11 @@ const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 // 饿死优先于累死、累死优先于孤独、孤独优先于不安。这条优先级被测试钉住。
 const KEYS = Object.keys(createNeeds());
 
+// 对外暴露同一份键表（不是再抄一遍字面量）：lexicon.NEED_WORDS 的键与 heard 的 boundNeed
+// 都要按它校验。两处各列一份迟早漂移，而漏掉一条需求的症状是
+// 「那条需求永远不被说出口、也永远想不起来」—— 不报错，只是少一档。
+export const NEED_KEYS = Object.freeze(KEYS);
+
 // 初值刻意不是全 0：新孵化的幼体带一点饥饿，好让它立刻开始觅食，
 // 玩家不必干等两分钟才看到第一个行为。
 export function createNeeds() {

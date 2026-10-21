@@ -123,6 +123,10 @@ export function createCreature(opts) {
     // 语言层的私有状态：下一次最早能开口的时刻 + 上一句（防连发）。
     // 只有 speech.js 写它，别的模块都不该碰。
     speech: { nextAt: 0, lastTokens: null },
+    // "听进去的话"（spec §4.8.1）。**刻意与 memory 分开**：记得你说的话 ≠ 记得你，
+    // 混在一个池子里，热闹缸里的对话会把玩家本人从 12 条配额里挤掉。
+    // 只有 heard.js 写它（hear），recall 是纯读的。
+    heard: opts.heard || [],
   };
   if (opts.rng) assignCatchphrase(c, opts.rng.fork());
   return c;

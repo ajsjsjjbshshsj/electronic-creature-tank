@@ -104,6 +104,9 @@ export function maybeSay(c, ctx, rng, nowSec) {
     // 必填的永远是心情词 —— 它是那座桥的直接读出。需求词只在真的紧时才加。
     const must = needWord ? [moodWord, needWord] : [moodWord];
     const prefix = [];
+    // 听进去的话排在最前面：它是这整条链路的回报（用户要的「给它讲东西，它记住并个性化反馈」
+    // 在内核里唯一的可观察形式就是这个位置）。缺省不占位，所以 A6 的行为一个都没变。
+    if (ctx.heard) prefix.push(ctx.heard);
     if (wantCp) prefix.push(c.catchphrase);
     if (wantAddr) prefix.push(PLAYER_WORD);
     if (wantOther) prefix.push(ctx.other.name);

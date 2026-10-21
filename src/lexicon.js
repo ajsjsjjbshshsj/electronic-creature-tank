@@ -49,6 +49,52 @@ export const MOOD_SALIENCE = Object.freeze({
 
 export const PLAYER_WORD = '主人';
 
+// ---- 听进去的话：分词的停用表与切分（spec §4.8.1，Task A7）----
+//
+// 停用词表按"整词等于它"来筛，不按子串 —— 中文没有词边界，子串匹配会把
+// "也要好好吃饭" 里正常的一部分误杀。所以表里只放**独立成词时几乎不承载信息**的东西。
+// 刻意保守：宁可留下几个虚词当"实词"，也不要因为表太长把有信息的词切掉 ——
+// 前者只是略啰嗦，后者是"它好像什么都没记住"。
+export const STOPWORDS = Object.freeze([
+  '今天', '明天', '昨天', '一下', '一个', '这个', '那个', '我们', '你们', '他们',
+  '什么', '怎么', '为什么', '因为', '所以', '但是', '可以', '这样', '那样',
+  '还有', '就是', '不是', '没有', '知道', '觉得',
+]);
+
+const SEPARATORS = /[，。！？；：、,.\u2026\uFF0E\uFF1F\s"'（）()【】\[\]~—\-]+/;
+
+// 中文切词：按标点/空白先切段，段内取 2–3 gram（2 字优先，因为中文实词绝大多数是双字），
+// 再丢停用词与单字。这是**够用的启发式**，不是分词器：
+// 计划 A7 的陷阱条说得很清楚 —— 测试只能钉行为，不能钉具体切法，否则换个策略就全红。
+export function tokenize(text) {
+  if (typeof text !== 'string' || text.trim() === '') return [];
+  const out = [];
+  const push = (w) => {
+    const t = w.trim();
+    if (t.length < 2) return;                    // 单字几乎总是虚词或噪声
+    if (STOPWORDS.includes(t)) return;
+    if (!out.includes(t)) out.push(t);
+  };
+  for (const raw of text.split(SEPARATORS)) {
+    const seg = raw.trim();
+    if (!seg) continue;
+    if (seg.length <= 3) { push(seg); continue; }
+    // 长段：滑窗取 gram，先 3 字后 2 字（长的更像词，也少切出半截虚词）
+    for (let i = 0; i + 3 <= seg.length; i += 1) push(seg.slice(i, i + 3));
+    for (let i = 0; i + 2 <= seg.length; i += 1) push(seg.slice(i, i + 2));
+  }
+  return out;
+}
+
+// 说错词时的替换池：同一张词表里的另一个词。
+// ⚠️ 这是"近邻"在规则档里能做到的**全部** —— 它按"同属一张表"选，不按语义相似选。
+// 导出为扁平数组并冻结：heard.js 直接 filter/pick，一次就地改动会全局影响说错词的结果。
+export const WORD_POOL = Object.freeze([
+  ...Object.values(NEED_WORDS),
+  ...MOOD_WORDS.anger, ...MOOD_WORDS.sad, ...MOOD_WORDS.bliss,
+  ...MOOD_WORDS.happy, ...MOOD_WORDS.calm,
+]);
+
 // 候选集由 talk × clingy 定（spec §4.13.1 表格第一层）。
 // 用**乘积**而不是相加：相加会让"高冷但不黏人"和"活泼但不黏人"落进同一个池子，
 // 而这两个词族的气质差别恰恰在黏不黏人上；乘积要求两者都高才拿到萌系词。

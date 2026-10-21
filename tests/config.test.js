@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CONFIG } from '../src/config.js';
+import { MOODS } from '../src/emotions.js';
+import { NEED_KEYS } from '../src/needs.js';
+import { NEED_WORDS, STOPWORDS, WORD_POOL, tokenize } from '../src/lexicon.js';
 
 // 本文件是 ES module，而 ESM 一律运行在严格模式下 —— 对冻结对象赋值本来就会抛
 // TypeError。所以这里不需要写 'use strict'：模块顶层那条指令是空操作，删掉它行为
@@ -238,3 +241,43 @@ test('语言层的十二个旋钮被字面量钉住（行为两侧由 speech.tes
   assert.ok(s.cutePoolFloor > s.middlePoolFloor, '萌系候选集的门槛必须比中性的高');
 });
 
+
+test('听进去的话的九个常量与价格表齐备，价格表键集与 MOODS 对齐', () => {
+  // 分工同前两节：这里钉数值，heard.test.js 钉它造成的行为差异。
+  const h = CONFIG.heard;
+  assert.equal(h.halfLife, 300);
+  assert.equal(h.strongUses, 2);
+  assert.equal(h.strongFactor, 2);
+  assert.equal(h.retainMin, 0.25);
+  assert.equal(h.suppressBelow, -0.6);
+  assert.equal(h.moodBoost, 0.5);
+  assert.deepEqual([h.takeBase, h.takeGain], [1, 4]);
+  // 价格表少一档的症状是静默的：undefined 进存档变 null、读回 0，
+  // 于是那一档听到的词全部变成"中性价"，既不会被躲也不会被偏爱 —— 没有任何报错。
+  assert.deepEqual(Object.keys(h.moodPrice).sort(), [...MOODS].sort(),
+    '价格表必须恰好覆盖五档心情');
+  assert.equal(h.moodPrice.calm, 0);
+  assert.ok(h.moodPrice.anger < h.suppressBelow,
+    'anger 必须落在"会被抑制"那一侧，否则"骂过它的词它会躲"永远不成立');
+  assert.ok(h.moodPrice.sad > h.suppressBelow,
+    'sad 不能落到抑制线以下 —— 饿的时候听到"吃饭"通常就是带着难过听的，被抑制就等于这个例子失效');
+  assert.ok(h.moodPrice.bliss > 0 && h.moodPrice.happy > 0);
+  assert.ok(Object.isFrozen(h.moodPrice), '价格表应被冻结');
+});
+
+test('NEED_WORDS 的键与 needs 的四条匮乏度是同一份键表（不是各抄一遍）', () => {
+  // lexicon 与 heard 都按 needs 的键查表；漏一条的症状是"那条需求永远不被说出口、
+  // 也永远想不起来"。needs.js 现在把 NEED_KEYS 导出，两边都从它对齐。
+  assert.deepEqual([...NEED_KEYS].sort(), Object.keys(NEED_WORDS).sort());
+  assert.deepEqual(NEED_KEYS.map((k) => typeof NEED_WORDS[k]), ['string', 'string', 'string', 'string']);
+});
+
+test('分词表：停用词与替换池都被冻结，且停用词表里没有单字词', () => {
+  // 单字进停用表是危险的：中文分词按 2–3 gram 切，"好"这种单字本来就不会成为候选，
+  // 把它列进表里只会让人以为表按子串生效（实际按整词等于才生效）。
+  assert.ok(Object.isFrozen(STOPWORDS) && Object.isFrozen(WORD_POOL));
+  for (const w of STOPWORDS) assert.ok(w.length >= 2, `停用词 "${w}" 短于两字，切法会误伤`);
+  assert.ok(WORD_POOL.length >= 10, '替换池太小会让说错词退化成"原样再说一遍"');
+  // 反向确认：停用词真的会被切掉（行为级，不钉具体切法 —— 计划 A7 的陷阱条）
+  assert.ok(!tokenize('今天也要好好吃饭哦').includes('今天'), '停用词不该进候选');
+});

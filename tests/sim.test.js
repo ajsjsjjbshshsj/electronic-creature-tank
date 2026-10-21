@@ -6,6 +6,7 @@ import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '.
 import { createCreature } from '../src/creature.js';
 import { ALL_GENES, randomGenome } from '../src/genes.js';
 import { MOODS } from '../src/emotions.js';
+import { hear } from '../src/heard.js';
 import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION } from '../src/behavior.js';
 import { thresholds } from '../src/personality.js';
@@ -1459,4 +1460,81 @@ test('出词用独立分叉流：speechRng 与 rng 不是同一个对象，且�
     Array.from({ length: 8 }, () => createWorld({ seed: 5 }).speechRng.next()),
     '同种子下分叉流必须逐位相同',
   );
+});
+
+// ---------------------------------------------------------------- 听进去的话（Task A7 接线）
+
+test('玩家对它说的话，会在之后的相关情境里自己冒出来（端到端）', () => {
+  // spec §4.8.1 的例子："存了「吃饭」，在它 hunger 高时说出来 ⇒ 看起来就是
+  // 它记得你说过吃饭，而且它现在想吃"。
+  // 这条把 hear → recall → maybeSay → say 事件整条链钉住：任一环节没接上都会红。
+  const w = createWorld({ seed: 80, initialCreatures: 0 });
+  w.foods.length = 0;
+  const c = createCreature({ id: 'e2e', name: '饿饿', x: 0.5, y: 0.5, age: 600, rng: createRng(80) });
+  c.traits.personality.talk = 0.9;
+  c.thresholds = thresholds(c.traits.personality);
+  addCreature(w, c);
+  c.needs.hunger = 0.9;                       // 听到时就饿，之后仍然饿 ⇒ 需求线索对得上
+  hear(c, '吃饭', createRng(1), w.time, { mood: 'sad', need: 'hunger' });
+  assert.ok(c.heard.length >= 1, `前置条件：词得存进去（分词结果 ${JSON.stringify(c.heard.map((e) => e.token))}）`);
+  const stored = c.heard[0].token;
+
+  const said = [];
+  for (let i = 0; i < Math.round(400 * 60); i++) {
+    c.needs.hunger = Math.max(0.6, c.needs.hunger - 0.001);   // 让它一直是"饿"这个处境
+    tickWorld(w, 1 / 60);
+    for (const ev of w.events) if (ev.kind === 'say') said.push(ev.text);
+    w.events.length = 0;
+  }
+  assert.ok(said.length >= 5, `前置条件：这一路要说够多句，实测 ${said.length}`);
+  assert.ok(said.some((t) => t.includes(stored)),
+    `听过 ${stored} 之后 400 秒里一次都没提过：${said.slice(0, 6).join(' | ')}`);
+});
+
+test('骂过它的词它不再自己提（价格是承重的，不是存档里的装饰）', () => {
+  // 与上一条只差 hear 时的心情档：anger → 价格 -0.8 ≤ suppressBelow → 永不召回。
+  // "有的词它会躲"必须是可观察的行为差异，而不是信息卡上一个没人看的数字。
+  const run = (mood) => {
+    const w = createWorld({ seed: 81, initialCreatures: 0 });
+    w.foods.length = 0;
+    const c = createCreature({ id: 'p', name: '泡泡', x: 0.5, y: 0.5, age: 600, rng: createRng(81) });
+    c.traits.personality.talk = 0.9;
+    c.thresholds = thresholds(c.traits.personality);
+    addCreature(w, c);
+    c.needs.hunger = 0.9;
+    hear(c, '吃饭', createRng(1), w.time, { mood, need: 'hunger' });
+    const token = c.heard[0].token;
+    const texts = [];
+    for (let i = 0; i < Math.round(400 * 60); i++) {
+      c.needs.hunger = Math.max(0.6, c.needs.hunger - 0.001);
+      tickWorld(w, 1 / 60);
+      for (const ev of w.events) if (ev.kind === 'say') texts.push(ev.text);
+      w.events.length = 0;
+    }
+    return { token, n: texts.length, mentioned: texts.filter((t) => t.includes(token)).length };
+  };
+  const happy = run('happy');
+  const angry = run('anger');
+  assert.ok(happy.n >= 5 && angry.n >= 5, `两边都要出够多句（${happy.n}/${angry.n}）`);
+  assert.ok(happy.mentioned > 0, `正价的词该提过（${happy.token}）`);
+  assert.equal(angry.mentioned, 0, `负价的词一次都不该提，实测 ${angry.mentioned} 次（${angry.token}）`);
+});
+
+test('heard 是只读旁路：存了话的缸，关掉文字层之后其余状态仍逐位不变', () => {
+  // A6 那条对照测试的加强版。这里两缸**都**hear 同一段话（hear 是玩家输入，
+  // 与文字层开关无关），差别只有"会不会把话讲出来"。
+  // 若有人让 recall 去改 needs/emotions/memory，这条会当场把他抓出来。
+  const play = (speechEnabled) => {
+    const w = createWorld({ seed: 82, speechEnabled });
+    for (let k = 0; k < 20; k++) {
+      for (const c of aliveCreatures(w)) {
+        hear(c, '宝宝今天也要好好吃饭哦 要摸摸 怕怕 玩 开心', createRng(500 + k), w.time, {
+          mood: 'calm', need: 'hunger',
+        });
+      }
+      step(w, 3);
+    }
+    return fingerprint(w);
+  };
+  assert.deepEqual(play(false), play(true), '听进去的话不该改变世界，只该改变它说出来的话');
 });

@@ -109,6 +109,22 @@ const CONFIG = {
     bubbleTtl: 3,
   },
 
+  // ---- 听进去的话（spec §4.8.1，Task A7）----
+  heard: {
+    halfLife: 300,             // 秒：一次都没再听到的词掉到一半要这么久
+    strongUses: 2,             // 听到次数达到它 ⇒ 半衰期加倍（"反复说的记得牢"）
+    strongFactor: 2,
+    retainMin: 0.25,           // 剩余强度低于它就不再冒出来（遗忘是真的）
+    suppressBelow: -0.6,       // 价格低于它 ⇒ 它自己绝不再提这个词（"你骂过的词它会躲"）
+    moodBoost: 0.5,            // 心情对上的候选词在排序里加权
+    takeBase: 1, takeGain: 4,  // 一次听进去几个 = round(base + curious × gain) ⇒ 1..5
+    // 价格表：**听到时**的心情给这个词定的价。calm 是 0（既不奖励也不惩罚）。
+    // 少一档的后果是静默的（undefined 存盘变 null、读回 0），所以键集由测试对齐 MOODS。
+    moodPrice: Object.freeze({
+      anger: -0.8, sad: -0.5, bliss: 0.9, happy: 0.6, calm: 0,
+    }),
+  },
+
   // ---- 五档心情的阈值（spec §4.5.1，2026-10-20 新增）----
   // **顺序**在 emotions.moodOf 的 if 链里，不在这里：愤怒必须第一个判，
   // 否则"又饿又气但 joy 还有惯性残留"的个体会报出"幸福"—— 那是当着玩家的面说谎。
