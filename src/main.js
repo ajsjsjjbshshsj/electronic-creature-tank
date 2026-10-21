@@ -15,21 +15,41 @@
 // 相对旧计划 Task 3 的删减（2026-10-21 B11 落地时，均有台账记录）：
 //   · createViewport / CONFIG.render：config.test.js 用精确相等钉住 CONFIG 的键集
 //     （当时 41 键 / 39 节点），B11 不许动它 ⇒ 视口缩放段随渲染层（B13）一起加。
-//     B12 已经把 body / star / fluff / tail / blink 五段加进去了（46 键 / 44 节点，
-//     数出来的），但 CONFIG.render 仍然没有 —— 它属 B13。
+//     ✅ B13（2026-10-21）已交付：createViewport 在下面，CONFIG.render 十五个旋钮，
+//     键集快照同步到 47 键 / 45 节点（数出来的）。
 //   · 临时调试圆点：B11 不画任何东西，页面此时就是 CSS 渐变空缸（预期状态）。
+//     ✅ B13 起画的是真水体（微粒 / 光束 / 沉积带），临时调试点从未落地过，无需删除。
 //
 // B12（2026-10-21）接上的部分：软体子步进。
 //   updateBodies 被放进下面的子步循环，喂 CONFIG.fixedDt 而不是 frameDt ——
 //   弹簧积分与尾巴松弛都是显式积分，**不具**步长无关性，放在渲染帧率下会让
 //   高刷屏上的身体更硬、低刷屏上更软。这条纪律由 tests/body.test.js 的
 //   「main.js 把 updateBodies 放进子步循环」与「一个 1 秒大步 ≠ 六十个小步」两条一起守。
+//
+// B13（2026-10-21）接上的部分：渲染层。
+//   createRenderer 靠**依赖注入**拿离屏画布（makeCanvas 工厂），所以 src/render.js
+//   自己一个浏览器全局都不碰、继续在 Node 里被单测（tests/constraints.test.js 的
+//   DOM 扫描因此仍然覆盖它）。本文件是七个浏览器全局名唯一允许出现的地方。
 
 import { CONFIG } from './config.js';
 import { createWorld, tickWorld } from './sim.js';
 import { updateBodies, reconcileBodies } from './body.js';
+import { createRenderer } from './render.js';
 
 // ---------------------------------------------------------------- 纯逻辑（可在 Node 测）
+
+// 视口与缩放（spec §3.4-2）。
+// scale 是"世界单位 → CSS 像素"，dpr 是"CSS 像素 → 设备像素"，两者**不可混用**：
+// 混了会让高分屏上的生物大得离谱（3× dpr 的手机变成 3 倍体型）。
+// 纯函数、不碰任何浏览器对象 ⇒ tests/render.test.js 直接断言它的 clamp 行为。
+export function createViewport(cssWidth, cssHeight, dpr) {
+  const short = Math.min(cssWidth, cssHeight);
+  const R = CONFIG.render;
+  let scale = short / R.scaleRef;
+  if (scale < R.scaleMin) scale = R.scaleMin;
+  if (scale > R.scaleMax) scale = R.scaleMax;
+  return { width: cssWidth, height: cssHeight, dpr, scale };
+}
 
 // 原地修改，不返回新对象。
 //
@@ -95,17 +115,35 @@ export function boot(opts) {
   const seed = options.seed !== undefined ? options.seed : (Date.now() >>> 0);
   const world = createWorld({ seed, populationCap: cap });
 
-  // viewport 只存几何量；世界单位→像素的 scale 属渲染层（B13），
-  // 它依赖的 CONFIG.render 因 config.test.js 的键集快照无法在本 Task 加入。
-  const viewport = { width: 0, height: 0, dpr: 1 };
+  // viewport 只存几何量（width/height/dpr/scale）。scale 是"世界单位 → CSS 像素"，
+  // 由短边推导并 clamp（spec §3.4-2，算法在下面的 createViewport 里，Node 可测）。
+  // ⚠️ 它是**同一个对象被原地改写**（见 resize）：渲染层持有它的引用，
+  // 换成新对象就会让 renderer.viewport 指到一份过期几何上。
+  const viewport = { width: 0, height: 0, dpr: 1, scale: 1 };
   const loop = { acc: 0, steps: 0 };
   // Body 表：id → 软体状态（视状态，不进存档）。一次创建、终身复用同一个 Map，
   // 里面只在出生时增长 —— 见 body.js 的 updateBodies / reconcileBodies 注释。
   const bodies = new Map();
   const state = { frame: 0, timeScale: 1, lastT: -1, rafId: 0, running: true };
 
-  // 渲染层与音频在 B12–B18 接进来；本 Task 刻意不画任何东西（空渐变是预期状态）。
-  const renderer = options.renderer || null;
+  // 渲染层（B13：水体层）。options.renderer 的注入口保留 —— 测试要用 spy 替掉它。
+  // makeCanvas 是本文件**唯一**允许创建可绘制对象的地方：render.js 拿到的是
+  // { ctx, surface }，surface 直接喂 drawImage，所以那个模块里不需要任何浏览器全局。
+  const renderer = options.renderer || createRenderer({
+    makeCanvas: (w, h) => {
+      const off = document.createElement('canvas');
+      off.width = w;
+      off.height = h;
+      return { ctx: off.getContext('2d'), surface: off };
+    },
+    // 水体偏移量（每颗粒的半径、速度、alpha、相位）必须来自注入的 rng，
+    // 不许用 Date.now 或下标哈希凑 —— 那会让同一份存档在两台设备上长出不同的水。
+    // ⚠️ rng.fork() 不接受参数（见 src/rng.js：分叉只从父流自己的状态推），
+    // 所以旧计划写的 fork(seed ^ 0x9e37) 里那个参数是**空写的**，不搬。
+    rng: world.rng.fork(),
+    viewport,
+    isMobile: coarse,
+  });
   const audio = options.audio || null;
   const detachInput = options.detachInput || null;
 
@@ -113,17 +151,20 @@ export function boot(opts) {
     const dpr = window.devicePixelRatio || 1;
     const cssW = canvasEl.clientWidth || window.innerWidth;
     const cssH = canvasEl.clientHeight || window.innerHeight;
-    viewport.width = cssW;
-    viewport.height = cssH;
-    viewport.dpr = dpr;
+    const next = createViewport(cssW, cssH, dpr);
+    viewport.width = next.width;
+    viewport.height = next.height;
+    viewport.dpr = next.dpr;
+    viewport.scale = next.scale;
     // 位图尺寸 = CSS 尺寸 × dpr，否则高分屏上画面发虚。
     // ⚠️ 这里**不碰任何 c.pos**：位置是归一化的 [0,1]²，世界尺寸恒等于视口，
     // 所以视口变化时归一化坐标的含义没变，spec §3.4-2 那句"按新旧尺寸比例映射所有位置"
     // 在本设计下是**空操作**。真要"补"一个位置重映射反而会引入 bug：
     // 每次 resize 都把整缸乘一个比例，来回拖几次窗口就把它们全推进角落。
+    // 这条由 tests/render.test.js 的「resize 不重映射任何 c.pos」逐位钉住。
     canvasEl.width = Math.round(cssW * dpr);
     canvasEl.height = Math.round(cssH * dpr);
-    if (renderer && renderer.onResize) renderer.onResize(viewport);
+    if (renderer && renderer.onResize) renderer.onResize(viewport, world.rng.fork());
   };
 
   const step = (t) => {
@@ -145,11 +186,15 @@ export function boot(opts) {
 
     state.frame += 1;
 
-    // 绘制。B11 只清帧不画内容：canvas 保持透明，水体渐变由 CSS 的 body 背景透出
-    // （spec §3.4-5）。B12–B14 在这里接 renderer.draw。
+    // 绘制。canvas 保持透明，水体渐变由 CSS 的 body 背景透出（spec §3.4-5），
+    // 所以这里只清空、不填背景色；B13 画水体三层，B14 起在同一 ctx 上叠生物。
     ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
     ctx.clearRect(0, 0, viewport.width, viewport.height);
-    if (renderer) renderer.draw(ctx, world, viewport, state.frame);
+    // ⚠️ 喂给渲染层的 dt 必须是**模拟**秒数（本帧子步数 × fixedDt），不是 frameDt。
+    // 传 frameDt 的症状是"4× 倍速下缸在快进而水冻在原速、0.5× 下水体反而比生物快"，
+    // 不报错、不影响模拟，只有一屏动画不对 —— 由 tests/render.test.js 的一条直接钉。
+    const simDt = loop.steps * CONFIG.fixedDt;
+    if (renderer) renderer.draw(ctx, world, bodies, viewport, simDt);
 
     // 事件消费（B16 接溶散动画、B18 接叫声、B19 接气泡）。
     // ⚠️ 必须每帧清空：world.events 是**无界增长**的（sim.js 只写不读、不代为清理），

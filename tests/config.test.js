@@ -46,11 +46,13 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   // 新增情绪事件的人同步更新测试一样。"每次加常量都要回来改测试"不是缺点，是守卫的代价。
   //
   // ⚠️ 39 → 44、41 → 46：B12（2026-10-21）加了 body / star / fluff / tail / blink 五段，
-  // 每段一个节点。两个新数都是**用 node 数出来的**，不是估的：
+  // 每段一个节点。两个新数都是**用 node 数出来的**，不是估的。
+  // ⚠️ 44 → 45、46 → 47：B13（2026-10-21）加了 CONFIG.render 一段（一个节点）。
+  // 两个新数同样是数出来的，不是估的：
   //   node -e "import('./src/config.js').then(({CONFIG})=>{let n=0;const w=x=>{if(x===null\
   //   ||typeof x!=='object')return;n++;for(const k of Object.keys(x))w(x[k])};w(CONFIG);\
-  //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 44 keys 46
-  assert.equal(visited.length, 44, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 45 keys 47
+  assert.equal(visited.length, 45, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'behavior', 'blink', 'body', 'bodyPoints', 'broody',
@@ -59,9 +61,9 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hueRange',
     'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
     'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
-    'populationCap', 'speech', 'stage', 'star', 'tail', 'timeScales',
-  ], 'CONFIG 顶层键名（46 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 46);
+    'populationCap', 'render', 'speech', 'stage', 'star', 'tail', 'timeScales',
+  ], 'CONFIG 顶层键名（47 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 47);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -70,6 +72,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.mood', 'CONFIG.heard', 'CONFIG.speech', 'CONFIG.hop',   // 2026-10-20 之后新增的四段
     'CONFIG.heard.moodPrice', 'CONFIG.behavior.begEscalate',        // 第三层的新增项
     'CONFIG.body', 'CONFIG.star', 'CONFIG.fluff', 'CONFIG.tail', 'CONFIG.blink',   // B12 新增五段
+    'CONFIG.render',                                                              // B13 新增（水体与缩放）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -331,6 +334,53 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
   assert.equal(CONFIG.blink.intervalBase, 4.0);
   assert.equal(CONFIG.blink.activityFloor, 0.4,
     '眨眼与蹦跳同源的证据：两条公式用的是同一个 activity 地板');
+});
+
+test('渲染层的十五个旋钮被字面量钉住（水体与缩放；行为两侧由 render.test.js 负责）', () => {
+  // 分工同 §4.5 / §4.7 那两组：config.test.js 钉**数值本身**，render.test.js 钉它造成的映射。
+  // 只钉行为的话，把 scaleMin 从 1.5 调到 0.4 会让手机上"生物小到看不见"（spec §3.4-2
+  // 点名要防的情况）而行为侧仍然全绿；只钉数值的话，改 clamp 的方向也不会报警。
+  const R = CONFIG.render;
+  assert.deepEqual(Object.keys(R).sort(), [
+    'moteAlphaMax', 'moteAlphaMin', 'moteDrift', 'moteRadiusMax', 'moteRadiusMin',
+    'moteRiseMax', 'moteRiseMin', 'moundCount', 'scaleMax', 'scaleMin', 'scaleRef',
+    'sedimentHeight', 'shaftAlpha', 'shaftCount', 'shaftSwayPeriod',
+  ], '十五个旋钮，不多不少（三个缩放 + 十二个水体）');
+
+  // ---- 缩放（spec §3.4-2："由短边推导并 clamp"；三个数属 §12 授权的观感自定）----
+  assert.deepEqual([R.scaleRef, R.scaleMin, R.scaleMax], [540, 1.5, 2.6]);
+  assert.ok(R.scaleMin < R.scaleMax, 'clamp 的上下限不许反（反了会让每个视口都取到上限）');
+  // 下限存在的唯一理由是手机：390×844 的短边 390 ⇒ 390/540 = 0.722 < scaleMin ⇒ 触底。
+  // 把 scaleMin 抬到 2.6 会让所有设备都钉在上限上（clamp 退化成常量），这条就抓得住。
+  assert.ok(390 / R.scaleRef < R.scaleMin, '手机竖屏必须落在下限上，否则 18.8px 的成体会回来');
+  assert.ok(2160 / R.scaleRef > R.scaleMax, '4K 短边必须触顶，否则 24 只 104px 的团子挤满画面');
+
+  // ---- 微粒（alpha 区间是 spec §4.3 的字面量，不是观感自定）----
+  assert.deepEqual([R.moteAlphaMin, R.moteAlphaMax], [0.15, 0.40],
+    'spec §4.3 原文："微粒：#FFD9E8，alpha 0.15–0.4" —— 改这两个数要先改 spec');
+  assert.deepEqual([R.moteRiseMin, R.moteRiseMax], [0.006, 0.020]);
+  assert.deepEqual([R.moteRadiusMin, R.moteRadiusMax], [0.6, 2.2]);
+  assert.ok(R.moteRiseMin < R.moteRiseMax && R.moteRadiusMin < R.moteRadiusMax, '区间两端不许反');
+  // 背景不是主角：最慢的微粒横穿整缸要 1/0.006 ≈ 167 秒（一帧 1/60 秒 ⇒ 一万帧）
+  assert.ok(1 / R.moteRiseMin > 150, `最慢的上浮速度太快就不像深水了：${1 / R.moteRiseMin}s`);
+  assert.equal(R.moteDrift, 0.004);
+  assert.ok(R.moteDrift < R.moteRiseMin, '横向漂移必须慢于上浮，否则看起来像在横扫');
+  assert.deepEqual([CONFIG.particles.desktop, CONFIG.particles.mobile], [120, 60],
+    'spec §5.2："上浮微粒 60–120 个" —— 两端各取一档');
+
+  // ---- 光束（spec §5.2："2–3 道缓慢摆动的柔光束"）----
+  assert.ok(R.shaftCount >= 2 && R.shaftCount <= 3, `道数必须在 spec 给的 2–3 里，实测 ${R.shaftCount}`);
+  assert.equal(R.shaftAlpha, 0.055, 'lighter 叠加下 alpha 稍大整缸就发灰');
+  assert.equal(R.shaftSwayPeriod, 26, '一道光束摆一个来回的秒数；要慢到察觉不到在动');
+  assert.ok(R.shaftSwayPeriod > 20, '摆动周期低于 20 秒就成了"闪烁的迪厅灯"');
+
+  // ---- 缸底沉积带（spec §5.2："深色沉积带 + 几个柔软小丘（产卵点）"）----
+  assert.equal(R.sedimentHeight, 0.085);
+  assert.equal(R.moundCount, 5);
+  // 这条是**承重的**几何关系：卵产在 y ∈ [0.78, 0.97]（breeding.js 的 rng.range），
+  // 沉积带上沿在 1 − sedimentHeight ⇒ 必须盖过 0.915，才有"卵埋在沉积物里"而不是悬空。
+  assert.ok(1 - R.sedimentHeight >= 0.915,
+    `沉积带上沿只到 ${1 - R.sedimentHeight}，最低的卵（0.97）会悬在带子上方`);
 });
 
 test('尾巴与眨眼都不许新增基因位点，且 activity 地板两处必须相等', () => {
