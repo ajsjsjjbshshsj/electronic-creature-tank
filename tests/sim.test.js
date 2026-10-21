@@ -1538,3 +1538,164 @@ test('heard 是只读旁路：存了话的缸，关掉文字层之后其余状�
   };
   assert.deepEqual(play(false), play(true), '听进去的话不该改变世界，只该改变它说出来的话');
 });
+
+// ---------------------------------------------------------------- 它在看着你（spec §4.6 末段）
+//
+// B15 交付眼睛时确认过：这条**内核做不到** —— facing 只在 moveToward 里更新，
+// 而表现层不许写世界状态。当时**没有**在 render 里偷改 c.facing 假装做到，
+// 因为那会把一个内核缺口伪装成已完成。这一组就是补那个缺口。
+//
+// ⚠️ 人设一律把意图钉成 idle（minDuration 1e9 ⇒ tickCreature 永不重新决策）。
+// 第一版没钉，于是"好感高转向手"那条**在功能还不存在的情况下就绿了** ——
+// 因为 affection 0.8 会让 beg 胜出，而 beg 的目标点就是手，moveToward 顺手把
+// facing 拧过去了。那是 beg 的副产品，不是"它在看着你"。
+// 同理第二版还写过"移动中 facing 必须贴着速度方向（< 0.35）"，那也是错的：
+// moveToward 里的 facing 是**带惯性的 lerp**（spec §4.6"转向有惯性，不是瞬间掉头"），
+// 目标方向大改后它会名正言顺地滞后。改成测"移动中不被拧向手"。
+
+const facingAngle = (c) => Math.atan2(c.facing.y, c.facing.x);
+const angleGap = (a, b) => {
+  let d = a - b;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return Math.abs(d);
+};
+
+// 一只**静止**的成体 + 一只在右边的手。好感由参数给（null = 完全不建 PLAYER 条目）。
+const lookTank = (seed, affection) => {
+  const w = createWorld({ seed, initialCreatures: 0 });
+  w.foods.length = 0;
+  const c = createCreature({ id: 'lk', name: 'L', x: 0.4, y: 0.5, age: 960, rng: createRng(seed) });
+  addCreature(w, c);
+  c.needs.hunger = 0.02; c.needs.energy = 0.02; c.needs.social = 0.02; c.needs.safety = 0;
+  if (affection !== null) {
+    ensure(c.memory, PLAYER_ID);
+    const e = get(c.memory, PLAYER_ID);
+    e.familiarity = 1;
+    e.affection = affection;
+  }
+  c.facing.x = 0; c.facing.y = -1;          // 面朝上方：与"右边的手"差 90°，可观测
+  c.intent = { kind: 'idle', minDuration: 1e9 };   // 钉死成不动，排除 beg/explore 的副产品
+  w.playerHand = { pos: { x: 0.75, y: 0.5 }, speed: 0.01 };
+  return { w, c, handAngle: 0 };            // 手在正右方 ⇒ 目标角 0
+};
+
+test('好感高且静止时，facing 会缓慢转向玩家的手（spec §4.6「它在看你」）', () => {
+  const { w, c, handAngle } = lookTank(900, 0.8);
+  const gap0 = angleGap(facingAngle(c), handAngle);
+  assert.ok(gap0 > 1.5, `前置条件：起手应背对手 90°，实测 ${gap0.toFixed(3)}`);
+  assert.equal(c.moving, false, '前置条件：它必须站着不动');
+  step(w, 3);
+  const gap1 = angleGap(facingAngle(c), handAngle);
+  assert.ok(gap1 < gap0 * 0.5, `三秒后应已转过去大半：${gap0.toFixed(3)} → ${gap1.toFixed(3)}`);
+  assert.ok(gap1 < 0.2, `最终应基本对上手指向：${gap1.toFixed(3)}`);
+});
+
+test('好感 ≤ 0 时反而转开', () => {
+  const { w, c, handAngle } = lookTank(901, -0.5);
+  step(w, 3);
+  assert.ok(angleGap(facingAngle(c), handAngle) > 2.2,
+    `不喜欢它就不该盯着看，实测与手指向夹角 ${angleGap(facingAngle(c), handAngle).toFixed(3)}`);
+});
+
+test('好感在中间地带时什么都不动（不是"有手就盯着"）', () => {
+  const { w, c } = lookTank(902, 0.1);
+  const before = { x: c.facing.x, y: c.facing.y };
+  step(w, 3);
+  assert.deepEqual({ x: c.facing.x, y: c.facing.y }, before,
+    '0 < 好感 < lookTowardAffection 之间必须完全不动');
+});
+
+test('正在移动时手的存在**完全不改变** facing（逃跑与觅食的方向不许被拧弯）', () => {
+  // ⚠️ 这条是**探针逼出来的第二版**。第一版测的是"移动中 facing 离手指向的角度下界 > 1.0"，
+  // 于是把 `if (c.moving) return` 这道门整个摘掉，它**仍然全绿** ——
+  // 因为 moveToward 每 tick 的转向步长比 lookAtHand 大，两个相反的拉力叠加后
+  // 角度下界照样满足。**测"结果还差得远"抓不到"过程被污染"**。
+  // 正确的断言是 A/B 逐位对照：同一颗种子、同一个钉死的意图、同一段路，
+  // 只差"手在不在场"，facing 轨迹必须**逐 tick 完全相同**。
+  const run = (withHand) => {
+    const w = createWorld({ seed: 903, initialCreatures: 0 });
+    w.foods.length = 0;
+    const c = createCreature({ id: 'mv', name: 'M', x: 0.4, y: 0.5, age: 960, rng: createRng(903) });
+    addCreature(w, c);
+    ensure(c.memory, PLAYER_ID);
+    const e = get(c.memory, PLAYER_ID);
+    e.familiarity = 1; e.affection = 0.9;
+    c.thresholds.playerApproach = 0;           // 关掉 beg，别让"边觅食边卖萌"混进来
+    c.needs.hunger = 0.95;
+    c.facing.x = 0; c.facing.y = -1;
+    // 把意图钉成"一直往左走"：手在右边，所以任何一次"被手拉过去"都会留下痕迹。
+    c.intent = { kind: 'explore', targetPos: { x: 0.05, y: 0.5 }, minDuration: 1e9 };
+    if (withHand) w.playerHand = { pos: { x: 0.75, y: 0.5 }, speed: 0.01 };
+    const seq = [];
+    let movingTicks = 0;
+    for (let i = 0; i < Math.round(6 * 60); i++) {
+      tickWorld(w, 1 / 60);
+      if (c.moving) movingTicks += 1;
+      seq.push(`${c.facing.x.toFixed(12)},${c.facing.y.toFixed(12)}`);
+    }
+    return { seq, movingTicks };
+  };
+  const withHand = run(true);
+  const noHand = run(false);
+  assert.ok(noHand.movingTicks > 120,
+    `前置条件：这一路必须真的在移动，实测 ${noHand.movingTicks} tick`);
+  assert.deepEqual(withHand.seq, noHand.seq,
+    '手在场与不在场的 facing 轨迹不同 ⇒ 移动中那道门没挡住转向');
+});
+
+test('转向速率由 bold 调制，且单 tick 步长有上限（是一次 glance，不是瞬间掉头）', () => {
+  const run = (bold) => {
+    const { w, c, handAngle } = lookTank(904, 0.9);
+    c.traits.personality.bold = bold;
+    c.thresholds = thresholds(c.traits.personality);
+    let maxStep = 0;
+    let prev = facingAngle(c);
+    for (let i = 0; i < Math.round(1 * 60); i++) {
+      tickWorld(w, 1 / 60);
+      const now = facingAngle(c);
+      maxStep = Math.max(maxStep, angleGap(now, prev));
+      prev = now;
+    }
+    return { left: angleGap(handAngle, facingAngle(c)), maxStep, thr: c.thresholds.turnRate };
+  };
+  const shy = run(0);
+  const boldy = run(1);
+  assert.ok(boldy.maxStep > shy.maxStep, `胆大的应转得更快：${shy.maxStep} vs ${boldy.maxStep}`);
+  const cap = (s) => s.thr * CONFIG.behavior.lookRateFactor / 60;
+  assert.ok(shy.maxStep <= cap(shy) + 1e-9, `单 tick 步长越过上限：${shy.maxStep} > ${cap(shy)}`);
+  assert.ok(boldy.maxStep <= cap(boldy) + 1e-9, `单 tick 步长越过上限：${boldy.maxStep} > ${cap(boldy)}`);
+  assert.ok(boldy.left < shy.left, '同样一秒后，胆大的更接近手指向');
+});
+
+test('手不在场时 facing 保持上一次（spec §4.6「静止时保持上一次的 facing」）', () => {
+  const { w, c } = lookTank(905, 0.9);
+  step(w, 2);
+  const held = { x: c.facing.x, y: c.facing.y };
+  w.playerHand = null;
+  step(w, 3);
+  assert.deepEqual({ x: c.facing.x, y: c.facing.y }, held,
+    '没有可看的对象时不许自己飘 —— 它不会失去朝向');
+});
+
+test('facing 始终是单位向量（转向用 cos/sin 重写，不许累积长度漂移）', () => {
+  const { w, c } = lookTank(906, 0.9);
+  for (let i = 0; i < Math.round(30 * 60); i++) {
+    tickWorld(w, 1 / 60);
+    const len = Math.hypot(c.facing.x, c.facing.y);
+    assert.ok(Math.abs(len - 1) < 1e-9, `第 ${i} tick 长度漂到 ${len}`);
+  }
+});
+
+test('同种子下整条转向可复现', () => {
+  const play = () => {
+    const { w, c } = lookTank(907, 0.9);
+    const seq = [];
+    for (let i = 0; i < Math.round(5 * 60); i++) {
+      tickWorld(w, 1 / 60);
+      seq.push(`${c.facing.x.toFixed(9)},${c.facing.y.toFixed(9)}`);
+    }
+    return seq;
+  };
+  assert.deepEqual(play(), play());
+});

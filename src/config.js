@@ -210,6 +210,13 @@ const CONFIG = {
     // 而本模块只按 `speed > HAND_SPEED_POKE` 区分粗暴/温柔，不区分静止与划动。
     // 所以"手一直停着也能一直卖萌"这件事要等有真实输入后再调 ——
     // 合理的下一步是让 beg 的分数随手的**移动**上升，而不是仅凭"手在附近"。
+    // 它在看着你（spec §4.6 末段）。facing 的松弛目标由好感决定：
+    // 高好感转过去、负好感转开、**中间地带什么都不做**（否则就成了"有手就盯着"）。
+    // 速率是 turnRate 的一个分数 —— 这是一次 glance，不是瞬间掉头；
+    // turnRate 本身由 bold 调制，所以"胆大的敢直视、胆小的瞥一眼就躲"是涌现的。
+    lookTowardAffection: 0.2,
+    lookAwayAffection: 0,
+    lookRateFactor: 0.35,
     begUrgency: 7.0,
     // 求关注升级链（spec §4.10）：**不是新意图**，是 beg 这一个动机的三档强度。
     // 做成独立 attract 意图的话，beg 与 attract 会在效用评分里互相竞争，

@@ -34,7 +34,7 @@ import { decay as decayNeeds, feed as feedNeeds, comfort } from './needs.js';
 import { computeTargets, update as updateEmotions, applyEvent, moodOf } from './emotions.js';
 import {
   adjust as adjustMemory, decay as decayMemory, ensure as ensureMemory,
-  PLAYER_ID, KINSHIP,
+  affectionFor, PLAYER_ID, KINSHIP,
 } from './memory.js';
 import { createCreature, ageCreature, canBreed, sizeOf } from './creature.js';
 import { maybeSay } from './speech.js';
@@ -593,6 +593,52 @@ function speak(world, c, senses) {
   world.events.push({ kind: 'say', id: c.id, text: u.text, tokens: u.tokens, mood });
 }
 
+// ---------------------------------------------------------------- 它在看着你（spec §4.6 末段）
+
+// 玩家的手在附近时，facing 缓慢转向它（好感高）或转开（好感 ≤ 0）。
+//
+// 为什么必须在内核做而不是在表现层：B15 交付眼睛时，渲染层只能**读** c.facing。
+// 在 render 里顺手改 c.facing 能让"它在看你"看起来成立，但那会把一个内核缺口
+// 伪装成已完成 —— 而且违反本模块的边界（表现层唯一可写的字段是 world.playerHand）。
+//
+// 三条门控，每条都对应一个真实的错误表现：
+//   · **只在 !c.moving 时生效** —— 正在逃、正在觅食时 facing 由位移方向决定。
+//     覆盖它会让它"斜着身子去觅食"，读起来是坏了而不是可爱。
+//   · **好感分三档**（转过去 / 不动 / 转开）。写成"有手就盯着"就把这条变成了
+//     挂机注视，而 spec 的原话是"好感高时主动转，好感低时反而转开"。
+//   · **步长上限 = turnRate × lookRateFactor × dt**。没有上限就是一次瞬移；
+//     有上限才叫 glance。turnRate 由 bold 调制 ⇒ "胆大的敢直视、胆小的瞥一眼就躲"。
+//
+// 用 atan2 + cos/sin 重写而不是向量插值：后者会让 facing 在插值中途**缩短**，
+// 而全项目都假设它是单位向量（spec §4.6 明写）。长度漂移是静默的。
+function lookAtHand(c, senses, dt) {
+  const B = CONFIG.behavior;
+  const hand = senses.playerHand;
+  if (!hand || c.moving) return;
+  const aff = affectionFor(c.memory, PLAYER_ID);
+  let dir = 0;
+  if (aff >= B.lookTowardAffection) dir = 1;
+  else if (aff <= B.lookAwayAffection) dir = -1;
+  if (dir === 0) return;
+
+  const dx = hand.pos.x - c.pos.x;
+  const dy = hand.pos.y - c.pos.y;
+  // 转开 = 看反方向。合成一个表达式会让"转开"读起来像 bug（它在瞪别处），
+  // 所以这里显式取反并注释它对应 spec 的哪半句。
+  const target = Math.atan2(dy, dx) + (dir > 0 ? 0 : Math.PI);
+  const cur = Math.atan2(c.facing.y, c.facing.x);
+  let delta = target - cur;
+  while (delta > Math.PI) delta -= 2 * Math.PI;
+  while (delta < -Math.PI) delta += 2 * Math.PI;
+  if (delta === 0) return;
+
+  const maxStep = c.thresholds.turnRate * B.lookRateFactor * dt;
+  const step = delta > maxStep ? maxStep : (delta < -maxStep ? -maxStep : delta);
+  const next = cur + step;
+  c.facing.x = Math.cos(next);
+  c.facing.y = Math.sin(next);
+}
+
 // ---------------------------------------------------------------- 单只 tick
 
 function tickCreature(world, c, dt) {
@@ -666,6 +712,8 @@ function tickCreature(world, c, dt) {
     const { protestAfter } = CONFIG.behavior.begEscalate;
     if (before < protestAfter && c.begIgnored >= protestAfter) applyEvent(c.emotions, 'ignored');
   }
+
+  lookAtHand(c, senses, dt);
 
   decayNeeds(c.needs, dt, c.traits, {
     moving: c.moving,

@@ -572,3 +572,19 @@ test('分词表：停用词与替换池都被冻结，且停用词表里没有�
   // 反向确认：停用词真的会被切掉（行为级，不钉具体切法 —— 计划 A7 的陷阱条）
   assert.ok(!tokenize('今天也要好好吃饭哦').includes('今天'), '停用词不该进候选');
 });
+
+test('「它在看着你」的三个阈值被字面量钉住，且中间地带必须存在', () => {
+  // spec §4.6 末段：好感高转过去、好感低转开。写成"有手就盯着"就把这条变成挂机注视，
+  // 所以**两个阈值之间必须有一段空隙**（lookAwayAffection < lookTowardAffection）——
+  // 空隙是"它根本不在乎"的那档，由 sim.test.js 的"中间地带什么都不动"钉住行为。
+  const b = CONFIG.behavior;
+  assert.equal(b.lookTowardAffection, 0.2);
+  assert.equal(b.lookAwayAffection, 0);
+  assert.equal(b.lookRateFactor, 0.35);
+  assert.ok(b.lookAwayAffection < b.lookTowardAffection,
+    '两阈值相等就没有中间地带了，那时第三档（不动）永远不可达');
+  // 速率是 turnRate 的分数：两端（0.5 与 6 rad/s）乘出来的角速度都要落在"一眼"的量级
+  assert.ok(b.lookRateFactor > 0 && b.lookRateFactor < 1, 'lookRateFactor 是分数，不是绝对角速度');
+  assert.ok(2 * b.lookRateFactor < 1 && 6 * b.lookRateFactor > 0.5,
+    '一秒内既不能转不完 90°，也不能快到像瞬移');
+});
