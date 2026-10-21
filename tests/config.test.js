@@ -336,16 +336,19 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
     '眨眼与蹦跳同源的证据：两条公式用的是同一个 activity 地板');
 });
 
-test('渲染层的十五个旋钮被字面量钉住（水体与缩放；行为两侧由 render.test.js 负责）', () => {
+test('渲染层的三十一个旋钮被字面量钉住（水体与缩放 + 分层身体；行为两侧由 render.test.js 负责）', () => {
   // 分工同 §4.5 / §4.7 那两组：config.test.js 钉**数值本身**，render.test.js 钉它造成的映射。
   // 只钉行为的话，把 scaleMin 从 1.5 调到 0.4 会让手机上"生物小到看不见"（spec §3.4-2
   // 点名要防的情况）而行为侧仍然全绿；只钉数值的话，改 clamp 的方向也不会报警。
   const R = CONFIG.render;
   assert.deepEqual(Object.keys(R).sort(), [
-    'moteAlphaMax', 'moteAlphaMin', 'moteDrift', 'moteRadiusMax', 'moteRadiusMin',
-    'moteRiseMax', 'moteRiseMin', 'moundCount', 'scaleMax', 'scaleMin', 'scaleRef',
-    'sedimentHeight', 'shaftAlpha', 'shaftCount', 'shaftSwayPeriod',
-  ], '十五个旋钮，不多不少（三个缩放 + 十二个水体）');
+    'fluffSpriteSize', 'glowAlphaFactor', 'glowRadiusFactor', 'glowSpriteSize',
+    'innerAlpha', 'innerPulse', 'innerRadiusFactor', 'moteAlphaMax', 'moteAlphaMin',
+    'moteDrift', 'moteRadiusMax', 'moteRadiusMin', 'moteRiseMax', 'moteRiseMin',
+    'moundCount', 'patternAlpha', 'patternMarkFactor', 'peltDarkCut', 'peltLitBoost',
+    'peltSatLift', 'peltSpriteSize', 'scaleMax', 'scaleMin', 'scaleRef', 'sedimentHeight',
+    'shaftAlpha', 'shaftCount', 'shaftSwayPeriod', 'tailLiftFactor', 'tailSegFactor', 'tailTaper',
+  ], '三十一个旋钮，不多不少（三个缩放 + 十二个水体 + 十六个分层身体，B14 起）');
 
   // ---- 缩放（spec §3.4-2："由短边推导并 clamp"；三个数属 §12 授权的观感自定）----
   assert.deepEqual([R.scaleRef, R.scaleMin, R.scaleMax], [540, 1.5, 2.6]);
@@ -381,6 +384,38 @@ test('渲染层的十五个旋钮被字面量钉住（水体与缩放；行为�
   // 沉积带上沿在 1 − sedimentHeight ⇒ 必须盖过 0.915，才有"卵埋在沉积物里"而不是悬空。
   assert.ok(1 - R.sedimentHeight >= 0.915,
     `沉积带上沿只到 ${1 - R.sedimentHeight}，最低的卵（0.97）会悬在带子上方`);
+
+  // ---- 分层身体（B14，spec §5.1 第 1/2/3/4/5/7 层）----
+  // 这三组数值的"两侧行为"在 tests/render-body.test.js（不透明、不跨色相、层序、贴图上界），
+  // 这里只钉数本身与**新旧造型之间的不等式** —— 那四处"必须改掉的旧设计"若被顺手改回去，
+  // 红的第一下应该在这里，而不是等到 B20 实机看画面才发现团子又变回凝胶。
+  assert.deepEqual([R.glowSpriteSize, R.peltSpriteSize, R.fluffSpriteSize], [128, 96, 160]);
+  assert.ok(R.glowRadiusFactor > 1 && R.glowRadiusFactor < 2.6,
+    '光晕半径必须比旧凝胶方案的 2.6 收小（spec §5.1 第 1 层：毛会散射光）');
+  assert.ok(R.glowAlphaFactor > 0 && R.glowAlphaFactor < 0.55, '同上：alpha 降低');
+  // 第 2 层不透明 ⇒ 本体的明暗跨度由这两项决定，且都必须留在 [0,1] 内（跨了就出白块/黑块）
+  assert.deepEqual([R.peltLitBoost, R.peltDarkCut, R.peltSatLift], [0.13, 0.30, 0.10]);
+  assert.ok(R.peltLitBoost > 0 && R.peltDarkCut > 0, '受光侧不提亮、背光侧不压暗 = 根本没有渐变');
+  assert.ok(R.peltLitBoost + R.peltDarkCut >= 0.08,
+    `明度跨度 ${(R.peltLitBoost + R.peltDarkCut).toFixed(2)}：毛绒的体积感靠这一档，太小就成了一张平色贴纸`);
+  assert.ok(R.peltLitBoost < 0.5 && R.peltDarkCut < 0.7, '提亮/压暗过头会把同色相冲成白或黑');
+  // 第 3 层：spec 逐字"alpha 压到 0.35 左右"
+  assert.equal(R.patternAlpha, 0.35, 'spec §5.1 第 3 层："花纹是绣在毛里的，不是印在塑料上的"');
+  assert.equal(R.patternMarkFactor, 0.16);
+  // 第 4 层："发光核"（0.30 半径 / 0.85 alpha）改成"透过毛看到的一片柔和亮区"
+  assert.ok(R.innerRadiusFactor > 0.30, '亮区半径必须大于旧发光核的 0.30，否则还是一"颗"');
+  assert.ok(R.innerAlpha > 0 && R.innerAlpha < 0.85, '亮区 alpha 必须低于旧 coreAlpha 的 0.85');
+  assert.deepEqual([R.innerRadiusFactor, R.innerAlpha, R.innerPulse], [0.46, 0.34, 0.45]);
+  // 第 5 层：尾巴段数**不在这里**（在 CONFIG.tail.segs），这里只钉每段的画法
+  assert.deepEqual([R.tailSegFactor, R.tailTaper, R.tailLiftFactor], [0.72, 0.20, 0.30]);
+  assert.ok(R.tailSegFactor > 0 && R.tailSegFactor <= 1, '单段贴图半径不得超过段长（段与段会糊成一坨）');
+  assert.ok(R.tailTaper > 0 && R.tailTaper * (CONFIG.tail.segs - 1) < 1,
+    '段间递减到最后一尖必须还有宽度，否则尾尖是 0 半径（drawImage 退化）');
+  assert.equal(R.tailLiftFactor > 0, true, '屏幕空间的"高举"量为 0 ⇒ §4.7.1 表里幸福那一档画不出来');
+  // 第 7 层碎边的长度**不在这里**：它与 CONFIG.fluff.lenRatio 同源（spec §4.7），
+  // 再钉一份就会有两个各自漂移的常数。
+  assert.equal(CONFIG.fluff.lenRatio, 0.18, 'spec §4.7 逐字：毛长 = fluff × 0.18 × 身体半径');
+  assert.equal(CONFIG.fluff.sprites, 2, 'spec §4.7/§11 FLUFF_SPRITES = 2（常态/炸开）—— 第三张意味着按毛色分档的老路');
 });
 
 test('尾巴与眨眼都不许新增基因位点，且 activity 地板两处必须相等', () => {

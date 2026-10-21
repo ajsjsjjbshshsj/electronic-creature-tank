@@ -287,29 +287,37 @@ test('sprite 缓存有界，不会随时间无限增长（防内存泄漏）', (
   const bodies = makeBodies(world);
   const renderer = makeRenderer(world, DESKTOP, false);
   const ctx = createStubCtx();
-  const bound = CONFIG.glowHueBuckets * 8;      // 色相 32 桶 × 尺寸 8 档
+  // ⚠️ B14 把本体 sprite 的键从"色相桶 × 尺寸档"改成了"色相桶 × 饱和档 × 明度档"
+  //（本体是不透明填充，明度梯度必须带个体的 sat/lum，而尺寸靠 drawImage 的缩放，不进键）。
+  // 上界因此从 32×8 变成 32×16；惰性构建让实际驻留量 ≈ 缸里的个体数。
+  const bound = CONFIG.glowHueBuckets * 16;
   for (let i = 0; i < 600; i++) {
     tickWorld(world, CONFIG.fixedDt);
     renderer.draw(ctx, world, bodies, DESKTOP, CONFIG.fixedDt);
   }
-  assert.ok(renderer.gel.size <= bound, `凝胶体 sprite 缓存 ${renderer.gel.size} 超过上界 ${bound}`);
-  // ⚠️ 旧计划这一条里还有一句 `renderer.glow.length === CONFIG.glowHueBuckets`
-  //（"光晕精灵必须恰好 32 张"）。它属于 Task 5（B14）—— 本 Task 只交付水体层，
-  // glow 池还没长出来，为了凑绿把它建成 32 张就是越界。已记进回报。
+  assert.ok(renderer.pelts.size <= bound, `本体 sprite 缓存 ${renderer.pelts.size} 超过上界 ${bound}`);
+  assert.ok(renderer.coreSprites.size <= Object.values(CONFIG.colors).length,
+    `体内亮区 sprite 缓存 ${renderer.coreSprites.size} 应当不超过 CONFIG.colors 的条目数`);
+  // 光晕与碎边是**启动时一次建好**的定长数组，不参与惰性缓存 ⇒ 永远不可能泄漏
+  assert.equal(renderer.glow.length, CONFIG.glowHueBuckets);
+  assert.equal(renderer.fluff.length, CONFIG.fluff.sprites);
 });
 
 test('水体三层的每帧 drawImage 数 = 微粒 + 光束 + 1（删掉任何一层都会红）', () => {
   // 上面那条只要求 drawImage "足够多"：把沉积带或整组光束的绘制调用删掉，
   // 120 个微粒仍然远超 2400 的门槛 ⇒ 守卫一片绿而缸底少了一条带、水面少了几道光。
   // 所以这里钉**精确等式**：三层各贡献多少次就是多少次。
+  //
+  // ⚠️ B14 起生物层也往同一个 ctx 贴图（每只 7 次），所以这条把 bodies 换成**空表**：
+  // 空表 ⇒ draw() 里每只都查不到 Body ⇒ 只剩水体三层，等式重新变成精确的。
+  // 生物那一侧的精确账单由 tests/render-body.test.js 钉（每只恰好 7 次、24 段贝塞尔）。
   const created = [];
   const world = makeWorld(11);
-  const bodies = makeBodies(world);
   const renderer = makeRenderer(world, DESKTOP, false, created);
   const ctx = createStubCtx();
-  renderer.draw(ctx, world, bodies, DESKTOP, CONFIG.fixedDt);
+  renderer.draw(ctx, world, new Map(), DESKTOP, CONFIG.fixedDt);
   ctx.reset();
-  renderer.draw(ctx, world, bodies, DESKTOP, CONFIG.fixedDt);
+  renderer.draw(ctx, world, new Map(), DESKTOP, CONFIG.fixedDt);
 
   assert.equal(renderer.shafts.length, CONFIG.render.shaftCount,
     `光束应当预渲染 ${CONFIG.render.shaftCount} 道（spec §5.2："2–3 道"）`);
@@ -329,14 +337,26 @@ test('渐变确实被预渲染过（防"干脆不画"这种绕过零渐变约束
   const created = [];
   const world = makeWorld(11);
   const renderer = makeRenderer(world, DESKTOP, false, created);
-  assert.equal(created.length, 1 + CONFIG.render.shaftCount + 1,
-    `启动时应建 1 张沉积带 + ${CONFIG.render.shaftCount} 张光束 + 1 张微粒 sprite，实测 ${created.length} 张`);
+  const waterSprites = 1 + CONFIG.render.shaftCount + 1;
+  const bodySprites = CONFIG.glowHueBuckets + CONFIG.fluff.sprites;
+  assert.equal(created.length, waterSprites + bodySprites,
+    `启动时应建 1 张沉积带 + ${CONFIG.render.shaftCount} 张光束 + 1 张微粒 sprite
+     + ${CONFIG.glowHueBuckets} 张光晕 + ${CONFIG.fluff.sprites} 张碎边（B14），实测 ${created.length} 张`);
   assert.ok(renderer.sediment.ctx.count('createLinearGradient') >= 1, '沉积带的静态渐变必须建出来');
   assert.ok(renderer.sediment.ctx.count('fillRect') >= 1);
   for (const s of renderer.shafts) {
     assert.ok(s.ctx.count('createLinearGradient') >= 2, '光束要有横向色带 + 纵向衰减两条渐变');
   }
   assert.equal(renderer.moteSprite.ctx.count('createRadialGradient'), 1, '微粒是一张径向渐变的圆点');
+  // B14：光晕与碎边同样是**预渲染**的，运行时只 drawImage
+  for (const g of renderer.glow) {
+    assert.equal(g.ctx.count('createRadialGradient'), 1, '每张光晕恰好建一次渐变（建池时）');
+  }
+  for (const f of renderer.fluff) {
+    assert.ok(f.ctx.count('drawImage') === 0, '碎边 sprite 不该由别的贴图合成');
+    assert.ok(f.ctx.count('stroke') >= CONFIG.bodyPoints,
+      `碎边要有毛尖的形状（建 sprite 时画 ${f.ctx.count('stroke')} 根，运行时一根都不画）`);
+  }
   // 沉积带要盖到卵的下沿（卵产在 y ∈ [0.78, 0.97]，breeding.js），否则卵悬空
   assert.ok(renderer.sediment.h >= DESKTOP.height * 0.05,
     `沉积带太薄（${renderer.sediment.h}px），卵会像悬在沉积带上方`);
