@@ -52,18 +52,20 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   //   node -e "import('./src/config.js').then(({CONFIG})=>{let n=0;const w=x=>{if(x===null\
   //   ||typeof x!=='object')return;n++;for(const k of Object.keys(x))w(x[k])};w(CONFIG);\
   //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 45 keys 47
-  assert.equal(visited.length, 45, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 45 → 46、47 → 48：B15（2026-10-21）加了 CONFIG.eye 一段（一个节点、57 个旋钮）。
+  // 加这一段的全部理由：spec §4.6 那张十行表的数只能有一处定义，而 eyes.js 不许有字面量。
+  assert.equal(visited.length, 46, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'behavior', 'blink', 'body', 'bodyPoints', 'broody',
     'colors', 'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize', 'eggTint',
-    'eggsPerClutch', 'emotions', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt', 'fluff',
+    'eggsPerClutch', 'emotions', 'eye', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt', 'fluff',
     'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hueRange',
     'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
     'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
     'populationCap', 'render', 'speech', 'stage', 'star', 'tail', 'timeScales',
-  ], 'CONFIG 顶层键名（47 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 47);
+  ], 'CONFIG 顶层键名（48 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 48);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -73,6 +75,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.heard.moodPrice', 'CONFIG.behavior.begEscalate',        // 第三层的新增项
     'CONFIG.body', 'CONFIG.star', 'CONFIG.fluff', 'CONFIG.tail', 'CONFIG.blink',   // B12 新增五段
     'CONFIG.render',                                                              // B13 新增（水体与缩放）
+    'CONFIG.eye',                                                                 // B15 新增（眼睛十行表）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -334,6 +337,69 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
   assert.equal(CONFIG.blink.intervalBase, 4.0);
   assert.equal(CONFIG.blink.activityFloor, 0.4,
     '眨眼与蹦跳同源的证据：两条公式用的是同一个 activity 地板');
+});
+
+test('眼睛的五十七个旋钮齐备，且十行表的方向性不等式成立（数值侧守，映射侧由 eyes.test.js 负责）', () => {
+  // 分工与 mood / tail / blink 三组一样：这里钉**数本身与数之间的排序**，
+  // eyes.test.js 钉"eyes.js 有没有照这些数算"。只钉一侧会漏：
+  //   只钉行为 → 把 happyLid 从 0.30 改成 0.95 时行为断言仍然绿（它按 CONFIG 比）；
+  //   只钉数值 → 把 eyeSpacing 的内收写成外扩时数值全对而画面是错的。
+  const Y = CONFIG.eye;
+  assert.deepEqual(Object.keys(Y).sort(), [
+    'angerLid', 'angerPupil', 'angerSpacing', 'angerTopLid',
+    'arousalPupil', 'begLid', 'begLiftY', 'begPupil',
+    'blinkWaveFrac', 'blissLid', 'blissPupil', 'blushAlong',
+    'blushAlpha', 'blushBegBoost', 'blushJoyBoost', 'blushMax',
+    'blushOffsetX', 'blushOffsetY', 'blushRadius', 'curiosityAsym',
+    'curiosityOffset', 'curiosityPupil', 'deathCloseSeconds', 'eyeSizeMin',
+    'fearLid', 'fearOffset', 'fearPupil', 'fearShrink',
+    'forward', 'handNearRadius', 'happyLid', 'happyPupil',
+    'highlightRadius', 'highlightX', 'highlightY', 'leakGain',
+    'lookMax', 'lookTrustMin', 'neutralPupil', 'phaseModulus',
+    'pupilMax', 'pupilMin', 'sadHighlightY', 'sadLid',
+    'sadLowerLid', 'sadOffset', 'sadPupil', 'sadSpacing',
+    'sleepyBlinkStretch', 'sleepyLid', 'spacing', 'starPoints',
+    'starScaleMax', 'starSpinMax', 'starSpinPeriod', 'trustAffectionMin',
+    'trustBlinkStretch',
+  ], '五十七个旋钮，不多不少。⚠️ 这里**没有** sadTopLid 是故意的：spec 逐字"不是上眼睑下垂"');
+
+  // 七格"瞪圆 > 半睁 > 眯成一条"的排序
+  assert.ok(Y.fearLid > Y.sadLid && Y.sadLid > Y.sleepyLid && Y.sleepyLid > Y.happyLid,
+    '开合的排序是 spec 那张表的骨架：害怕瞪到最大 > 委屈半睁 > 困倦半闭 > 开心眯成 ^^');
+  assert.ok(Y.happyLid > 0, '开心那一格必须是"一条弧"而不是"整个消失"');
+  // 瞳孔：婴儿式最大，害怕最小
+  assert.ok(Y.fearPupil < Y.angerPupil && Y.angerPupil < Y.neutralPupil, '瞪圆时瞳孔是缩小的');
+  assert.ok(Y.neutralPupil < Y.happyPupil && Y.happyPupil < Y.blissPupil, '开心→幸福是逐步放大');
+  assert.equal(Y.pupilMax, Y.begPupil, '瞳孔上限就是卖萌那一格：两个数分家会漂移');
+  assert.ok(Y.pupilMin > 0 && Y.pupilMin < Y.fearPupil, '最小瞳孔也必须画得出来');
+  assert.ok(Y.sadPupil > Y.neutralPupil, '委屈那一格"瞳孔放大"（裁定 2 里它与 fear 方向相反）');
+  // 间距：惊吓外扩、生气内收 —— 两个符号必须相反
+  assert.ok(Y.sadSpacing > 0 && Y.angerSpacing < 0, 'spec：伤心 eyeSpacing 外扩、anger 内收');
+  assert.ok(Y.spacing + Y.angerSpacing > 0, '内收过头会让两眼交叉');
+  // 前后：害怕与委屈都后移，好奇前倾
+  assert.ok(Y.fearOffset < 0 && Y.sadOffset < 0 && Y.curiosityOffset > 0, '沿 facing 的方向不能写反');
+  assert.ok(Math.abs(Y.fearOffset) + Y.forward > 0, '后移不许把眼睛移到中心线另一侧（那是后脑勺）');
+  // 垂直：卖萌上望
+  assert.ok(Y.begLiftY > 0, 'eyes.js 取负号写成向上；这里只保证幅度为正、方向由代码定');
+  // 星星眼的"轻微"必须有上界，否则幸福那一格会抽风
+  assert.ok(Y.starSpinMax > 0 && Y.starSpinMax < 1, `旋转幅度必须是"轻微"：${Y.starSpinMax}`);
+  assert.ok(Y.starScaleMax > 0 && Y.starScaleMax < 0.5, `缩放幅度必须是"轻微"：${Y.starScaleMax}`);
+  assert.ok(Y.starSpinPeriod > 1, '星转得太快就不是奖赏而是故障');
+  assert.equal(Y.starPoints, 4, 'spec 逐字"四角星"');
+  // 两个"缓慢"都必须真的慢（倍数 > 1）
+  assert.ok(Y.sleepyBlinkStretch > 1 && Y.trustBlinkStretch > 1, '"极缓慢地眨"与 slow blink 都是把周期拉长');
+  assert.ok(Y.blinkWaveFrac > 0 && Y.blinkWaveFrac < 1, '一次眨眼必须明显短于整个周期');
+  assert.ok(Y.deathCloseSeconds > 0, '死亡那一格是"缓缓闭合"，不是瞬间归零');
+  assert.ok(Y.leakGain > 0 && Y.leakGain < 1, '次要情绪的泄漏必须存在但不能盖过主导那一格');
+  assert.ok(Y.lookTrustMin > 0 && Y.lookTrustMin < 1, '好感为零也要留一点余光，但不能满幅');
+  assert.ok(Y.handNearRadius > 0 && Y.handNearRadius < 1, '手"在附近"必须是个有限的归一化距离');
+  assert.ok(Y.eyeSizeMin > 0, '害怕收缩的下限若为 0，眼睛会在屏幕上塌成无效路径');
+  // 高光：常态在上缘、委屈在下缘 —— 一个正一个负是"含泪"这件事的全部读数
+  assert.ok(Y.highlightY < 0 && Y.sadHighlightY > 0, 'spec 逐字：委屈那格"高光偏到眼睛下缘"');
+  // 腮红三档的排序（spec §4.5 的卖萌行"腮红泛开"）
+  assert.ok(Y.blushBegBoost > Y.blushJoyBoost, '卖萌的腮红必须比单纯开心更明显');
+  assert.ok(Y.blushMax > Y.blushAlpha + Y.blushJoyBoost, '上限不该把开心那一档截掉');
+  assert.ok(Y.blushOffsetX > 0 && Y.blushRadius > 0, '腮红必须有位置与半径，否则等于没画');
 });
 
 test('渲染层的三十一个旋钮被字面量钉住（水体与缩放 + 分层身体；行为两侧由 render.test.js 负责）', () => {

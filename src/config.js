@@ -335,6 +335,102 @@ const CONFIG = {
     activityFloor: 0.4,        // 同一条 spec §4.6 公式里的地板常数，与尾巴的 activity 同源
   },
 
+  // ---- 眼睛（spec §4.6 的十行表，2026-10-21 B15）----
+  // 分工与 mood / tail / blink 三组一样：**数在这里，映射在 src/eyes.js**。
+  // eyes.js 里不许出现数值字面量（由 tests/eyes.test.js 的源码扫描钉住，先例是
+  // body.test.js 对 body.js 那条），所以十行表每一格的读数都只能从这一段取。
+  // 注释里标了"spec 逐字"的那些是 §4.6 表里写死的数值，改它们要先改 spec；
+  // 其余属 §12 授权"实现阶段按观感直接定"的范围，改它们只需要一次有意识的动作
+  // （tests/eyes.test.js 里那一格的行为断言会跟着红，这是想要的摩擦）。
+  eye: {
+    // 四参数的基准值（spec §4.6：pupilSize / lidOpen / eyeSpacing / eyeOffset）
+    neutralPupil: 0.42,        // 中性瞳孔半径 / 眼睛半径
+    spacing: 0.42,             // 两眼圆心间距 / 体直径；单只眼 0.28 ⇒ 边缘几乎相触
+    forward: 0.15,             // 眼睛整体沿 facing 前移 / 体直径（脸长在前半侧）
+    pupilMin: 0.12,            // 瞳孔下限：再小就在屏幕上塌成一个点
+    pupilMax: 0.95,            // 瞳孔上限 = 卖萌那一格（spec 逐字 0.95），婴儿式
+    eyeSizeMin: 0.45,          // 害怕收缩的下限（0 半径的路径在 canvas 上是无效绘制）
+    leakGain: 0.22,            // 次要情绪的泄漏幅度（spec §4.5："次要情绪会泄漏出来"）
+    phaseModulus: 997,         // 眨眼相位的取模质数：由 id 哈希来，不许用随机数也不许用下标
+
+    // 第 1 行 joy 快乐 = ^^ 眯弧
+    happyLid: 0.30,            // spec 逐字："眯成两道上弯弧 ^^，lidOpen ≈ 0.3"
+    happyPupil: 0.62,          // 开心时瞳孔比中性放大（spec 只说"放大"，数属 §12）
+
+    // 第 2 行 幸福 = 星星眼（2026-10-20 裁定 1：稀有才是奖赏）
+    blissPupil: 0.80,          // spec 逐字："pupilSize ≈ 0.8"
+    blissLid: 0.92,            // 星星眼要睁着才看得见（不许同时是 ^^）
+    starPoints: 4,             // spec 逐字："瞳孔画成**四角星**"
+    starSpinMax: 0.22,         // "随 arousal 轻微旋转"的最大弧度（"轻微"有上界）
+    starScaleMax: 0.18,        // "随 arousal 轻微缩放"的最大幅度（± 此值）
+    starSpinPeriod: 2.6,       // 秒：星慢慢转一圈的周期
+
+    // 第 3 行 伤心 = 委屈眼（2026-10-20 裁定 2：独立形态，不是 fear 的复用）
+    sadLid: 0.55,              // spec 逐字："lidOpen ≈ 0.55"
+    sadLowerLid: 0.42,         // spec 逐字："**下眼睑上抬**（不是上眼睑下垂）"
+    sadPupil: 0.72,            // "瞳孔放大"（spec 只给方向，数属 §12）
+    sadSpacing: 0.10,          // "eyeSpacing 外扩"
+    sadOffset: -0.18,          // "整只后移"（沿 facing 的负偏移）
+    sadHighlightY: 0.45,       // "高光偏到眼睛下缘"（+y = 屏幕向下 ⇒ 含泪感）
+
+    // 第 4 行 anger
+    angerPupil: 0.25,          // spec 逐字："pupilSize ≈ 0.25"
+    angerTopLid: 0.42,         // "瞪圆但**上眼睑压低**"
+    angerSpacing: -0.10,       // "eyeSpacing 内收"（挤在一起 ⇒ 皱眉感）
+    angerLid: 0.95,            // 瞪圆：开合几乎不动，压低的活交给 angerTopLid
+
+    // 第 5 行 fear
+    fearPupil: 0.15,           // spec 逐字："pupilSize ≈ 0.15"
+    fearLid: 1.00,             // "瞪到最大"
+    fearOffset: -0.22,         // "eyeOffset 沿 facing 后移"
+    fearShrink: 0.22,          // 裁定 2 里害怕的"整只收缩"（委屈没有这一项）
+
+    // 第 6 行 curiosity
+    curiosityAsym: 0.55,       // "一只眼睁大一只微眯"：左右 lidOpen 的差
+    curiosityPupil: 0.62,      // "瞳孔放大"
+    curiosityOffset: 0.14,     // "eyeOffset 前倾"
+
+    // 第 7 行 sleepy
+    sleepyLid: 0.40,           // "半闭"
+    sleepyBlinkStretch: 2.4,   // "极缓慢地眨"：眨眼周期 × 此值（> 1 才是"缓慢"）
+
+    // 第 8 行 卖萌
+    begPupil: 0.95,            // spec 逐字："瞳孔放到最大 ≈ 0.95（婴儿式）"
+    begLid: 0.96,              // 卖萌要睁大眼睛（不许被 sleepy 压成半闭）
+    begLiftY: 0.20,            // "叠加一个向上的垂直偏移"（微微上望）
+
+    // 第 9 行 信任玩家（猫的 slow blink）
+    trustBlinkStretch: 1.8,    // "缓慢眨一次眼"：周期 × 此值
+    trustAffectionMin: 0.5,    // 好感低于此不慢眨：陌生人不欠你一个 slow blink
+
+    // 第 10 行 死亡
+    deathCloseSeconds: 1.2,    // "眼睛**缓缓**闭合"：从断气到 lidOpen → 0 的秒数
+
+    // 眨眼的波形（三角波：快闭快开、中间有停顿；正弦波看起来像在抽搐）
+    blinkWaveFrac: 0.24,       // 一次眨眼占整个周期的比例（其余时间是睁着的）
+    arousalPupil: 0.08,        // 兴奋对瞳孔的额外放大（叠加层，不改任何一格的名义值）
+
+    // "看着玩家的手"（spec §4.6 里**瞳孔**那半；facing 那半内核还做不到）
+    lookMax: 0.22,             // 瞳孔朝手最多偏移这么多（× 眼睛半径）
+    lookTrustMin: 0.35,        // 好感 0 时只看 35% 的幅度（好感低会"转开"）
+    handNearRadius: 0.16,      // 归一化距离：手在这个半径内才算"在附近"
+
+    // 瞳孔高光（"有神"的那一笔；常态在左上，委屈那一格被推到下缘）
+    highlightX: -0.34,         // × 瞳孔半径，负 = 朝屏幕左
+    highlightY: -0.38,         // × 瞳孔半径，负 = 朝屏幕上
+    highlightRadius: 0.26,     // × 瞳孔半径
+
+    // 腮红（spec §5.1 第 6 层"眼睛 → 腮红"的后半；§4.5 的卖萌行"腮红泛开"）
+    blushAlpha: 0.30,
+    blushJoyBoost: 0.35,       // joy=1 时再加这么多
+    blushBegBoost: 0.45,       // 卖萌时最明显（spec §4.5 的卖萌行）
+    blushMax: 0.85,            // 上限：再红就不是毛绒而是猴屁股
+    blushOffsetX: 0.34,        // 沿垂直 facing 方向，两侧各一个 / 体直径
+    blushOffsetY: 0.22,        // 沿 facing 方向压到眼睛下方 / 体直径
+    blushRadius: 0.16,         // × 体直径
+    blushAlong: 0.10,          // 沿 facing 的前移量 / 体直径
+  },
+
   // ---- 渲染（spec §3.4-2 的缩放、§5.2 的水体）----
   // 世界单位 → CSS 像素的缩放（spec §3.4-2："缩放系数由视口短边推导并 clamp"）。
   // spec §12 把这类视觉参数列为"实现阶段按观感直接定即可，无需再次确认"，
@@ -428,6 +524,10 @@ const CONFIG = {
     mote: '#FFD9E8',
     pupil: '#2D1240',
     blush: '#FF6B9D',
+    // B15 眼睛（spec §4.6）。eyeWhite 不是纯白而是带回粉的白：
+    // 纯白的眼白贴在粉色卷毛上会读成"贴纸"，而 spec §4.2 那条"不用纯黑"是同一个理由的两端。
+    eyeWhite: '#FFF2F8',
+    eyeHighlight: '#FFFFFF',   // 瞳孔高光那一笔是纯白：它要的就是"湿"的反光
     sakura: '#FFC8DE',
     peach: '#FF9EB5',
     coral: '#FF8FA3',

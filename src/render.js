@@ -36,12 +36,18 @@
 import { CONFIG } from './config.js';
 import { renderSizeOf, starRadius } from './body.js';
 import { dominant } from './emotions.js';
+// 第 6 层（B15）：四参数与十行表的**计算全在 eyes.js**（纯函数、Node 里全测），
+// 本文件只负责把它们画出来 —— 这是本 Task 的架构裁定，不是顺手拆分。
+import {
+  eyeParamsInto, eyeAnchorsInto, blushFor,
+  pupilColor, eyeWhiteColor, eyeHighlightColor, blushColor,
+} from './eyes.js';
 
-// ⚠️ B14（本 Task）交付**分层身体的第 1/2/3/4/5/7 层**（spec §5.1 由内到外）：
+// ⚠️ B14 交付**分层身体的第 1/2/3/4/5/7 层**，B15（2026-10-21）补上第 6 层（spec §5.1 由内到外）：
 //   1 光晕 → 2 不透明本体 → 3 花纹（绣在毛里）→ 4 体内亮区（透过毛看到的一片）
-//   → 5 尾巴（3 段贴图）→ [6 眼睛/腮红 = B15] → 7 毛尖碎边（1 次 setTransform + 1 次 drawImage）
-//   → [8 语言气泡 = B19]。第 6、8 层与蹦跳压扁、死亡溶散、卵与食物的绘制**不在本次**
-//   （B15/B16/B19），所以 CONFIG.render 里也没有它们的常量。
+//   → 5 尾巴（3 段贴图）→ **6 眼睛 + 腮红（B15，走路径不贴图）** → 7 毛尖碎边
+//   （1 次 setTransform + 1 次 drawImage）→ [8 语言气泡 = B19]。
+//   蹦跳压扁、死亡溶散、卵与食物的绘制仍不在本次（B16），所以 CONFIG.render 里也没有它们的常量。
 //
 // ⚠️ 相对旧计划 Task 5 的四处改动，全部按 spec §5.1 的 2026-10-20 重排落地：
 //   1. 半透明凝胶（gelAlpha 0.55）→ **不透明**填充：本体 sprite 的每个色标 alpha 恒为 1，
@@ -510,6 +516,196 @@ function drawFluffLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, dpr) {
   ctx.restore();
 }
 
+// ---------------------------------------------------------------- 第 6 层：眼睛 → 腮红
+//
+// spec §5.1 的层序是 5 尾巴 → **6 眼睛/腮红** → 7 毛尖碎边，所以这一层接在尾巴之后、
+// 碎边之前，而且和尾巴一样在 clip **之外**：眼睛要能压在轮廓边缘上（星形两个角之间），
+// 被轮廓裁掉一半就没人看得出它往哪儿看。
+//
+// ⚠️ 这一层的账单是**零 drawImage、零 clip、零 globalCompositeOperation、零新建 sprite**，
+// 眼睛与腮红全走路径（每只固定 3 条眼路径 + 1 条腮红路径）。不是偷懒：
+// B14 那三条"每只恰好 7 次贴图 / 每只只裁一次 / 混合模式写 3 次"的精确账单是
+// spec §5.3 的机器证据，眼睛顺手加一张眼白 sprite 或一次 clip 就要改那三条守卫，
+// 而"改了守卫"与"守住了约束"是两件事。眼白用扁平填充（不带渐变）正是这个决定的代价与取舍。
+//
+// ⚠️ 四参数与十行表的**全部计算**在 src/eyes.js（纯函数）。本文件只把它们画出来。
+// 桩 ctx 记不到像素，所以"眯弧弯得够不够""星星眼像不像一只星""含泪高光看不看得见"
+// 都在手工清单里；这里能断言的只有路径/贴图/深度的形状与次数。
+
+const LID_OPEN_EPS = 0.02;      // 开合低于这个值就当闭着（整层跳过，省掉四条路径）
+const LID_LINE_ALPHA = 0.5;     // 眼睑线的透明度：要读得出"有一条眼皮"，不能读成第二条瞳孔
+const Pupil_SQUASH = 1;         // 瞳孔竖直半径与睁开高度的比例上限（不用 clip，靠几何裁）
+const BLUSH_RIPPLE = 0.62;      // 腮红椭圆的高宽比（横着摊开的一团，不是圆点）
+
+// 四角星的单位顶点（建模块时算一次，运行时只做旋转与缩放 ⇒ 每帧零三角函数分配）。
+// 角数唯一来源是 CONFIG.eye.starPoints（spec §4.6 逐字"四角星"）。
+const STAR_INNER = 0.38;        // 星的内尖半径 / 外尖半径（0.38 是"星"而不是"十字"的那个度）
+const STAR_V = (() => {
+  const n = CONFIG.eye.starPoints * 2;
+  const out = new Float64Array(n * 2);
+  for (let k = 0; k < n; k++) {
+    const a = (k / n) * TAU - Math.PI / 2;      // -90° 起笔：第一个尖朝上
+    const rad = (k % 2) === 0 ? 1 : STAR_INNER;
+    out[k * 2] = Math.cos(a) * rad;
+    out[k * 2 + 1] = Math.sin(a) * rad;
+  }
+  return out;
+})();
+
+// 玩家的手在这只生物**局部空间**的单位方向（x 沿 facing，y 沿垂直方向）。
+// 只在手存在且近到 CONFIG.eye.handNearRadius 以内时才有值。
+// ⚠️ 这是只读 world.playerHand；本函数**不写**世界状态（spec §4.6 末段那句
+// "facing 会缓慢转向它"做不到，原因见 eyes.js 文件头的同一条 ⚠️）。
+function fillHandOpts(renderer, c, ca, sa) {
+  const opts = renderer.eyeOpts;
+  const vec = renderer.handLocalVec;
+  vec.x = 0;
+  vec.y = 0;
+  opts.handLocal = null;
+  const hand = renderer.hand;
+  if (hand && hand.pos) {
+    const dx = hand.pos.x - c.pos.x;
+    const dy = hand.pos.y - c.pos.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 0 && dist <= CONFIG.eye.handNearRadius) {
+      vec.x = (dx * ca + dy * sa) / dist;
+      vec.y = (dx * -sa + dy * ca) / dist;
+      opts.handLocal = vec;
+    }
+  }
+  return opts;
+}
+
+// 星形瞳孔：moveTo + (2×starPoints − 1) 次 lineTo + closePath。
+// lineTo 的次数是**可测的**（tests/render-body.test.js 数得到），所以"四角"这件事
+// 在自动化里留了一半证据；剩下那一半（它看起来像不像一只星）进手工清单。
+function traceStarPupil(ctx, ex, ey, radius, spin) {
+  const cs = Math.cos(spin);
+  const sn = Math.sin(spin);
+  const n = STAR_V.length / 2;
+  for (let k = 0; k < n; k++) {
+    const ux = STAR_V[k * 2];
+    const uy = STAR_V[k * 2 + 1];
+    const x = ex + (ux * cs - uy * sn) * radius;
+    const y = ey + (ux * sn + uy * cs) * radius;
+    if (k === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa) {
+  const p = eyeParamsInto(renderer.eyeCache, c, renderer.time, fillHandOpts(renderer, c, ca, sa));
+  renderer.eyeFacing.x = ca;
+  renderer.eyeFacing.y = sa;
+  const a = eyeAnchorsInto(renderer.eyeAnchor, p, r, renderer.eyeFacing);
+  const blush = blushFor(c);
+  const eyeR = a.eyeR;
+  const openL = clamp01(p.lidOpenL - p.blink);
+  const openR = clamp01(p.lidOpenR - p.blink);
+
+  ctx.save();
+  if (openL > LID_OPEN_EPS || openR > LID_OPEN_EPS) {
+    // ---- 每只眼睛的几何：名义睁开半径 oR，被上眼睑压低 press、被下眼睑上抬 lift 各切一刀
+    // （裁定 2 的两半就落在 press 与 lift 上：anger 只有 press，委屈只有 lift，害怕两个都是 0）
+    const geom = renderer.eyeGeom;
+    for (let i = 0; i < 2; i++) {
+      const open = i === 0 ? openL : openR;
+      const ex = i === 0 ? cx + a.lx : cx + a.rx;
+      const ey = i === 0 ? cy + a.ly : cy + a.ry;
+      const oR = eyeR * open;
+      const top = -oR + eyeR * p.topLidPress;
+      const bot = oR - eyeR * p.lowerLidRaise * Pupil_SQUASH;
+      geom[i * 2] = ex;
+      geom[i * 2 + 1] = ey + (top + bot) / 2;
+      geom[4 + i * 2] = eyeR;                             // 水平半径
+      geom[4 + i * 2 + 1] = Math.max(0, (bot - top) / 2); // 竖直半径（眼睛的真实开合）
+    }
+
+    // 1) 眼白：一条路径画两只（扁平时读作"眯着"，不靠 clip）
+    ctx.globalAlpha = 0.96;
+    ctx.fillStyle = eyeWhiteColor();
+    ctx.beginPath();
+    ctx.ellipse(geom[0], geom[1], geom[4], geom[5], 0, 0, TAU);
+    ctx.ellipse(geom[2], geom[3], geom[6], geom[7], 0, 0, TAU);
+    ctx.fill();
+
+    // 2) 瞳孔：幸福那一格画四角星，其余画椭圆。颜色只能来自 CONFIG.colors.pupil（#2D1240）。
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = pupilColor();
+    ctx.beginPath();
+    for (let i = 0; i < 2; i++) {
+      const pr = p.pupilSize * eyeR;
+      const hh = geom[4 + i * 2 + 1];
+      if (p.star > 0) {
+        traceStarPupil(ctx, geom[i * 2], geom[i * 2 + 1], Math.min(pr * p.starScale, hh), p.starSpin);
+      } else {
+        ctx.ellipse(geom[i * 2], geom[i * 2 + 1], Math.min(pr, geom[4 + i * 2]),
+          Math.min(pr, hh), 0, 0, TAU);
+      }
+    }
+    ctx.fill();
+
+    // 3) 瞳孔高光：常态在左上，委屈那一格被 highlightY 推到**下缘**（含泪感）。
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = eyeHighlightColor();
+    ctx.beginPath();
+    for (let i = 0; i < 2; i++) {
+      const pr = p.pupilSize * eyeR;
+      const hr = Math.max(0.6, pr * CONFIG.eye.highlightRadius);
+      ctx.arc(geom[i * 2] + p.highlightX * pr, geom[i * 2 + 1] + p.highlightY * pr, hr, 0, TAU);
+    }
+    ctx.fill();
+
+    // 4) 眼睑线：^^ 那一格画一道**上弯**的弧（圆心在眼睛下方），其余画上缘的一条浅弧。
+    //    不用 quadraticCurveTo —— spec §5.3 与 B14 那条"贝塞尔段数只等于身体轮廓"的判据
+    //    靠的是"毛一段都不走路径"，眼睛如果也去抢贝塞尔预算，那条断言就失去意义了。
+    ctx.globalAlpha = LID_LINE_ALPHA;
+    ctx.strokeStyle = pupilColor();
+    ctx.lineWidth = Math.max(0.7, eyeR * 0.14);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    const squinting = p.squintArc > 0.35;
+    for (let i = 0; i < 2; i++) {
+      const ex = geom[i * 2];
+      const ey = geom[i * 2 + 1];
+      if (squinting) {
+        const rr = eyeR * (1 + p.squintArc * 0.6);
+        ctx.arc(ex, ey + rr * 0.75, rr, Math.PI * 1.18, Math.PI * 1.82);
+      } else {
+        const h = Math.max(0.5, geom[4 + i * 2 + 1]);
+        ctx.arc(ex, ey, h * 1.05, Math.PI * 1.08, Math.PI * 1.92);
+      }
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  drawBlushLayer(ctx, renderer, c, blush, cx, cy, r, ca, sa);
+}
+
+// 腮红（spec §5.1 第 6 层的后半格；§4.5 的"卖萌"行要"腮红泛开"）。
+// 位置在身体框架内沿 facing 略后、沿垂直方向左右各一团，再往屏幕下方压一点 ——
+// 脸颊跟着身体转，但"红在眼睛下面"这件事不跟着转。
+function drawBlushLayer(ctx, renderer, c, blush, cx, cy, r, ca, sa) {
+  if (!(blush.alpha > 0)) return;
+  const d = r * 2;
+  const px = -sa;
+  const py = ca;
+  const bx = cx + ca * d * CONFIG.eye.blushAlong;
+  const by = cy + sa * d * CONFIG.eye.blushAlong + d * CONFIG.eye.blushOffsetY * 0.5;
+  const sep = d * blush.offsetPerp;
+  const rr = d * blush.radius;
+  ctx.save();
+  ctx.globalAlpha = blush.alpha;
+  ctx.fillStyle = blushColor();
+  ctx.beginPath();
+  ctx.ellipse(bx + px * sep, by + py * sep, rr, rr * BLUSH_RIPPLE, 0, 0, TAU);
+  ctx.ellipse(bx - px * sep, by - py * sep, rr, rr * BLUSH_RIPPLE, 0, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
 export function drawCreature(ctx, renderer, c, body, viewport) {
   const cx = screenX(c.pos.x, viewport);
   const cy = screenY(c.pos.y, viewport);
@@ -526,6 +722,7 @@ export function drawCreature(ctx, renderer, c, body, viewport) {
   drawGlowLayer(ctx, renderer, c, r, cx, cy, breathe);
   drawBodyLayers(ctx, renderer, c, body, cx, cy, r, ca, sa, breathe, dpr);
   drawTailLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, viewport);
+  drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa);       // 第 6 层（B15）
   drawFluffLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, dpr);
   ctx.restore();
 }
@@ -731,6 +928,14 @@ export function createRenderer(opts) {
     sy: new Float64Array(CONFIG.bodyPoints),
     squashAlong: 1,
     squashPerp: 1,
+    // ---- 第 6 层（B15）的复用容器：每帧每只都写这几个，一个对象都不新建（spec §5.3）----
+    eyeCache: {},         // eyeParamsInto 的目标（键集由 eyes.js 第一次写入时定下）
+    eyeAnchor: { lx: 0, ly: 0, rx: 0, ry: 0, eyeR: 0 },
+    eyeFacing: { x: 1, y: 0 },
+    eyeOpts: { handLocal: null },
+    handLocalVec: { x: 0, y: 0 },
+    eyeGeom: new Float64Array(8),   // 两只眼的 [ex, ey] 与 [半宽, 半高]，一条数组装完
+    hand: null,           // 每帧从 world.playerHand 读过来（**只读**，见 eyes.js 文件头那条 ⚠️）
     time: 0,
     getPeltSprite(hue, sat, lum) {
       const key = peltKey(hue, sat, lum);
@@ -766,12 +971,15 @@ export function createRenderer(opts) {
     },
     draw(ctx, world, bodies, viewport, dt) {
       renderer.time += dt;
+      // 第 6 层要读手在哪（瞳孔朝向 + slow blink 的触发条件）。这是**只读**赋值：
+      // world.playerHand 由 input 层写（sim.js 模块头明文的那唯一例外），这里只搬个引用。
+      renderer.hand = world.playerHand;
       // 水体的摆动时钟挂在视口对象上（updateMotes 读 viewport.time）。
       // 同一个对象被 main.js 原地改写，所以这里写回去不会造成任何额外分配。
       viewport.time = renderer.time;
       updateMotes(renderer.motes, viewport, dt);
       drawWater(ctx, renderer, viewport);
-      // 生物层（spec §5.1 的六层，本 Task 的第 1/2/3/4/5/7 层）。
+      // 生物层（spec §5.1 的六层：B14 的第 1/2/3/4/5/7 + B15 的第 6）。
       // 层序有意义：生物在水体**之上**；B15 的眼睛接在 drawCreature 内部（clip 之外），
       // B16 的食物/卵接在**本循环之前**（它们在缸底/水中），B19 的气泡接在最后。
       const creatures = world.creatures;
