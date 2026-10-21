@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover 让 iOS 的 env(safe-area-inset-*) 真的给出非零值。
+     user-scalable=no：spec §10 明确把"捏合缩放等复杂手势"列为范围外，
+     而双指缩放会和抚摸手势抢同一根手指。代价是无法放大看细节，这是刻意的取舍。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0B0620">
+<title>电子生物缸</title>
+<link rel="stylesheet" href="/css/main.css">
+</head>
+<body>
+<canvas id="tank"></canvas>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

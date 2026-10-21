@@ -10,6 +10,13 @@
 # 静态服务器直接吐字节，LF 是唯一合理选择。
 * text=auto eol=lf
 
+# 唯一的例外：.bat 必须是 CRLF。
+# cmd.exe 对纯 LF 的批处理是"通常能跑，但在 label/goto 和某些多行构造上会出鬼"——
+# 这类失败只在用户双击时发生，而 start.bat 存在的唯一理由就是"双击"（spec §1 原则 5：
+# 十年后双击它还能打开）。不在这里赌 cmd.exe 的宽容。
+# server.ps1 不在此列：PowerShell 5.1 读纯 LF 的 .ps1 实测正常（B10 实跑验证过）。
+*.bat text eol=crlf
+
 # 二进制文件不做任何行尾转换
 *.png binary
 *.jpg binary
