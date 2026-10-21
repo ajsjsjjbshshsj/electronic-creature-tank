@@ -126,9 +126,14 @@ export function boot(opts) {
   const bodies = new Map();
   const state = { frame: 0, timeScale: 1, lastT: -1, rafId: 0, running: true };
 
-  // 渲染层（B13：水体层）。options.renderer 的注入口保留 —— 测试要用 spy 替掉它。
+  // 渲染层（B13：水体层；B14：生物六层）。options.renderer 的注入口保留 —— 测试要用 spy 替掉它。
   // makeCanvas 是本文件**唯一**允许创建可绘制对象的地方：render.js 拿到的是
   // { ctx, surface }，surface 直接喂 drawImage，所以那个模块里不需要任何浏览器全局。
+  // B14 起这条注入被两类东西共用：水体的静态 sprite（随 resize 重建）与
+  // 身体的 sprite（光晕 32 张 + 碎边 2 张 + 本体/亮区的惰性缓存）——
+  // 后者与视口尺寸无关，**只建一次**，尺寸变化靠 drawImage 的缩放与 setTransform 的矩阵。
+  // 症状对比：如果把身体 sprite 也搬进 resize 里重建，拖动一次窗口就重画几十张离屏，
+  // 而它换来的画面和上一次一模一样。
   const renderer = options.renderer || createRenderer({
     makeCanvas: (w, h) => {
       const off = document.createElement('canvas');
@@ -187,7 +192,9 @@ export function boot(opts) {
     state.frame += 1;
 
     // 绘制。canvas 保持透明，水体渐变由 CSS 的 body 背景透出（spec §3.4-5），
-    // 所以这里只清空、不填背景色；B13 画水体三层，B14 起在同一 ctx 上叠生物。
+    // 所以这里只清空、不填背景色。B13 画水体三层，B14 起在同一 ctx 上叠生物六层
+    //（光晕 / 不透明本体 / 花纹 / 体内亮区 / 尾巴 / 毛尖碎边），
+    // 层序写在 render.js 的 draw() 里：水在下、生物在中、B16 的溶散与 B19 的气泡在中上。
     ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
     ctx.clearRect(0, 0, viewport.width, viewport.height);
     // ⚠️ 喂给渲染层的 dt 必须是**模拟**秒数（本帧子步数 × fixedDt），不是 frameDt。
