@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -53,16 +53,29 @@ const FORBIDDEN_IDENTIFIERS = [
   'localStorage',
 ];
 
+// 计划 2（B11）新增：只有这一个文件可以触碰浏览器 API。
+//
+// 白名单为什么这么短：render / body / input / audio 全部靠**依赖注入**拿到浏览器能力
+// （ctx、目标元素、AudioContext 构造器、makeCanvas 工厂），源码里根本不出现那七个全局名，
+// 所以它们**继续留在纯度守卫的覆盖范围内**，也继续能在 Node 里单测。
+// 把白名单写短不是洁癖，是保住可测面积 —— 这四个模块里装着软体弹簧、坐标映射、
+// 色相分桶、指针速度分类、嗓音参数映射，全是值得断言的纯数学。
+// 真正无法豁免的只有 main.js：它是页面入口，必须自己拿 canvas、必须自己调 rAF。
+const BROWSER_MODULES = [join('src', 'main.js')];
+
 // 用 \b 词边界匹配，这样 canvasWidth、windowSize、fetchFood 这类正当的本地命名
 // 不会被误伤 —— 要拦的是对浏览器全局对象的引用，不是恰好同前缀的标识符。
-const findViolations = (pattern) => {
+const findViolations = (pattern, excludeRel) => {
   const hits = [];
+  const skip = excludeRel || [];
   for (const file of listSrcFiles(SRC_DIR)) {
+    const rel = relative(ROOT_DIR, file);
+    if (skip.includes(rel)) continue;
     const body = stripComments(readFileSync(file, 'utf8'));
     for (const name of pattern) {
       const re = new RegExp(`\\b${name}\\b`, 'g');
       const count = (body.match(re) || []).length;
-      if (count > 0) hits.push(`${relative(ROOT_DIR, file)}: ${name} ×${count}`);
+      if (count > 0) hits.push(`${rel}: ${name} ×${count}`);
     }
   }
   return hits;
@@ -73,8 +86,11 @@ test('约束扫描确实覆盖到了 src/ 下的模块（防空转）', () => {
   // 比如 src/ 被改名、或 *.js 后缀约定变了。所以先钉住"确实读到了文件"，
   // 否则守卫会在最需要它的时候悄悄失效。
   const files = listSrcFiles(SRC_DIR).map((f) => relative(ROOT_DIR, f));
-  assert.ok(files.length >= 2, `src/ 下只找到 ${files.length} 个 .js 文件，至少应有 2 个`);
-  for (const expected of [join('src', 'config.js'), join('src', 'rng.js')]) {
+  assert.ok(files.length >= 6, `src/ 下只找到 ${files.length} 个 .js 文件，至少应有 6 个`);
+  // main.js 必须**在扫描清单里**：否则「main.js 被豁免」和「main.js 没被扫到」
+  // 这两种情况在下面那条白名单测试的断言上无法区分 —— 后者会让白名单指向空气，
+  // 守卫一片绿，实则 src/ 已经没有任何文件被 DOM 扫描覆盖到。
+  for (const expected of [join('src', 'config.js'), join('src', 'rng.js'), join('src', 'main.js')]) {
     assert.ok(files.includes(expected), `扫描漏掉了 ${expected}`);
   }
   // 2026-10-20 之后新加的四个纯逻辑模块也必须确实在扫描范围内。
@@ -101,10 +117,52 @@ test('src/ 下没有任何模块调用 Math.random()', () => {
   assert.deepEqual(hits, [], '随机性必须全部经由 src/rng.js，不得直接调用 Math.random()');
 });
 
-test('src/ 下没有任何模块引用 DOM / 浏览器 API', () => {
+test('除 main.js 外，src/ 下没有任何模块引用 DOM / 浏览器 API', () => {
   // 这些标识符在 Node 里根本不存在，引用它们会让模块在 import 阶段就抛 ReferenceError，
-  // 于是所有纯逻辑测试都跑不起来。渲染与音频是 Task 9/10 的职责，
-  // 它们必须待在自己的模块里，由 sim 的输出驱动，而不是被核心逻辑反向依赖。
-  const hits = findViolations(FORBIDDEN_IDENTIFIERS);
-  assert.deepEqual(hits, [], '纯逻辑模块不得触碰 DOM / 浏览器 API');
+  // 于是所有纯逻辑测试都跑不起来。渲染与音频（B12–B18）靠依赖注入拿浏览器能力，
+  // 连自己的模块里都不出现这些名字，因此它们仍在本条的覆盖范围内。
+  const hits = findViolations(FORBIDDEN_IDENTIFIERS, BROWSER_MODULES);
+  assert.deepEqual(hits, [], '除 main.js 外的模块不得触碰 DOM / 浏览器 API');
+});
+
+test('白名单没有腐烂：main.js 确实存在，且确实用到了浏览器 API', () => {
+  // 白名单是**豁免**，所以它自己也要被守卫，否则会朝两个方向烂掉：
+  //   · 文件被改名/删除 ⇒ 白名单指向空气，而新加的浏览器模块无人豁免 ⇒ 莫名变红；
+  //   · 文件其实不需要豁免（比如有人把 DOM 代码搬回了 render.js 又把 render.js 加进白名单）
+  //     ⇒ 白名单每多一项，纯度守卫就少覆盖一个模块，而且是**静默**少覆盖。
+  for (const rel of BROWSER_MODULES) {
+    const full = join(ROOT_DIR, rel);
+    assert.ok(existsSync(full), `白名单里的 ${rel} 不存在，请把它从 BROWSER_MODULES 删掉`);
+    const body = stripComments(readFileSync(full, 'utf8'));
+    const used = FORBIDDEN_IDENTIFIERS.filter((n) => new RegExp(`\\b${n}\\b`).test(body));
+    assert.ok(used.length > 0, `${rel} 没有用到任何浏览器 API，不该留在白名单里（白名单是豁免，多余的豁免=守卫盲区）`);
+    // 上面那句 used.length>0 允许"只用到一个冷门标识符"的蒙混过关 —— 不够。
+    // 白名单的正例必须钉到 main.js 的**身份**上：它是页面入口，入口的充要条件是
+    // 自己取 DOM 节点（document）并自己驱动帧循环（requestAnimationFrame）。
+    // 没有这两条，"白名单"就可能是靠"main.js 恰好没写别的"侥幸通过的。
+    for (const required of ['document', 'requestAnimationFrame']) {
+      assert.ok(used.includes(required),
+        `${rel} 没有用到 ${required}：它要么不是页面入口（该移出白名单），要么主循环没接线`);
+    }
+  }
+});
+
+test('依赖方向：任何纯模块都不得 import 浏览器模块', () => {
+  // 这条才是真正保护可测性的约束。DOM 扫描保证"纯模块不碰 DOM"，
+  // 而这条保证"纯模块不被浏览器模块反向拖下水"：
+  // 一旦 body.js import 了 main.js，那么 import body.js 就会连带执行 main.js 的顶层代码，
+  // 所有 body 测试在 Node 里当场 ReferenceError —— 纯度守卫却还是绿的（body.js 自己没写那些词）。
+  const hits = [];
+  for (const file of listSrcFiles(SRC_DIR)) {
+    const rel = relative(ROOT_DIR, file);
+    if (BROWSER_MODULES.includes(rel)) continue;
+    const body = readFileSync(file, 'utf8');     // 这里**不剥注释**：import 语句不会写在注释里，
+    for (const mod of BROWSER_MODULES) {         // 而剥注释的启发式会把 URL 里的 // 之后整行删掉
+      const base = mod.split(/[\\/]/).pop();
+      if (body.includes(`'./${base}'`) || body.includes(`"./${base}"`)) {
+        hits.push(`${rel} import 了 ${mod}`);
+      }
+    }
+  }
+  assert.deepEqual(hits, [], '纯逻辑模块不得依赖浏览器模块');
 });
