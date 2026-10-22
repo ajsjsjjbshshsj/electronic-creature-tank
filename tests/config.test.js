@@ -392,7 +392,7 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
     '眨眼与蹦跳同源的证据：两条公式用的是同一个 activity 地板');
 });
 
-test('眼睛的五十七个旋钮齐备，且十行表的方向性不等式成立（数值侧守，映射侧由 eyes.test.js 负责）', () => {
+test('眼睛的五十八个旋钮齐备（F-2 加了 fitMargin），且十行表的方向性不等式成立（数值侧守，映射侧由 eyes.test.js 负责）', () => {
   // 分工与 mood / tail / blink 三组一样：这里钉**数本身与数之间的排序**，
   // eyes.test.js 钉"eyes.js 有没有照这些数算"。只钉一侧会漏：
   //   只钉行为 → 把 happyLid 从 0.30 改成 0.95 时行为断言仍然绿（它按 CONFIG 比）；
@@ -405,7 +405,7 @@ test('眼睛的五十七个旋钮齐备，且十行表的方向性不等式成�
     'blushAlpha', 'blushBegBoost', 'blushJoyBoost', 'blushMax',
     'blushOffsetX', 'blushOffsetY', 'blushRadius', 'curiosityAsym',
     'curiosityOffset', 'curiosityPupil', 'deathCloseSeconds', 'eyeSizeMin',
-    'fearLid', 'fearOffset', 'fearPupil', 'fearShrink',
+    'fearLid', 'fearOffset', 'fearPupil', 'fearShrink', 'fitMargin',
     'forward', 'handNearRadius', 'happyLid', 'happyPupil',
     'highlightRadius', 'highlightX', 'highlightY', 'leakGain',
     'lookMax', 'lookTrustMin', 'neutralPupil', 'phaseModulus',
@@ -414,7 +414,12 @@ test('眼睛的五十七个旋钮齐备，且十行表的方向性不等式成�
     'sleepyBlinkStretch', 'sleepyLid', 'spacing', 'starPoints',
     'starScaleMax', 'starSpinMax', 'starSpinPeriod', 'trustAffectionMin',
     'trustBlinkStretch',
-  ], '五十七个旋钮，不多不少。⚠️ 这里**没有** sadTopLid 是故意的：spec 逐字"不是上眼睑下垂"');
+  ], '五十八个旋钮，不多不少。⚠️ 这里**没有** sadTopLid 是故意的：spec 逐字"不是上眼睑下垂"');
+  // F-2（2026-10-22）加的第 58 个：fitMargin。它是**标量**，所以 §11 那两条全局计数不动。
+  assert.ok(Y.fitMargin > 0 && Y.fitMargin < 0.2,
+    `fitMargin 必须是正的、且不能大到把两只眼挤到重叠：${Y.fitMargin}`);
+  assert.ok(Y.spacing * 2 > (Y.fitMargin + CONFIG.eyeWidthRatio) * 2,
+    '基准间距必须还容得下两只眼（fitMargin 收进去之后也不许它们相碰）');
 
   // 七格"瞪圆 > 半睁 > 眯成一条"的排序
   assert.ok(Y.fearLid > Y.sadLid && Y.sadLid > Y.sleepyLid && Y.sleepyLid > Y.happyLid,
@@ -533,7 +538,7 @@ test('渲染层的五十个旋钮被字面量钉住（水体与缩放 + 分层�
   assert.ok(R.innerAlpha > 0 && R.innerAlpha < 0.85, '亮区 alpha 必须低于旧 coreAlpha 的 0.85');
   assert.deepEqual([R.innerRadiusFactor, R.innerAlpha, R.innerPulse], [0.46, 0.34, 0.45]);
   // 第 5 层：尾巴段数**不在这里**（在 CONFIG.tail.segs），这里只钉每段的画法
-  assert.deepEqual([R.tailSegFactor, R.tailTaper, R.tailLiftFactor], [0.72, 0.20, 0.30]);
+  assert.deepEqual([R.tailSegFactor, R.tailTaper, R.tailLiftFactor], [1.5, 0.12, 0.30]);
 
   // ---- B16（2026-10-21）：死亡溶散 / sick / 哀悼 / 卵 / 食物 / 蹦跳 ----
   // 分工与上面各段一致：这里钉**数**，行为在 tests/render-fx.test.js。
@@ -610,7 +615,14 @@ test('渲染层的五十个旋钮被字面量钉住（水体与缩放 + 分层�
     '白蛋必须仍是最亮的一档（否则"白"这个名字就在骗人）');
   assert.ok(Math.max(...lumOf) - Math.min(...lumOf) > 60,
     '八色的明度跨度太窄就是一片同色气球');
-  assert.ok(R.tailSegFactor > 0 && R.tailSegFactor <= 1, '单段贴图半径不得超过段长（段与段会糊成一坨）');
+  // ⚠️ 这条原来写的是 `tailSegFactor <= 1`，理由"段与段会糊成一坨"—— 那是**单位滑手**：
+  // render.js 里 `segPx = 尾长 × scale × 0.5 / 段数`，也就是**半个节点间距**，所以 factor ≤ 1
+  // 真正禁止的是"半径 ≤ 半个间距"，即**两段永远不可能重叠** —— 而尾巴要读成一条恰恰必须重叠。
+  // 这条守卫就是 F-tail 那个缺陷的成因（B20 量到三段之间各留一道缝）。
+  // 正确的上界是"半径不超过一个完整间距"（否则尾根会粗过它自己的长度，读成一坨）：factor ≤ 2。
+  // "必须重叠"这半边不在这里钉 —— 它要用真实节点间距算，归 tests/render-body.test.js 的 F-tail 两条。
+  assert.ok(R.tailSegFactor > 0 && R.tailSegFactor <= 2,
+    `单段贴图半径不得超过一个节点间距（factor 的上界是 2，不是 1：segPx 是半个间距）：${R.tailSegFactor}`);
   assert.ok(R.tailTaper > 0 && R.tailTaper * (CONFIG.tail.segs - 1) < 1,
     '段间递减到最后一尖必须还有宽度，否则尾尖是 0 半径（drawImage 退化）');
   assert.equal(R.tailLiftFactor > 0, true, '屏幕空间的"高举"量为 0 ⇒ §4.7.1 表里幸福那一档画不出来');

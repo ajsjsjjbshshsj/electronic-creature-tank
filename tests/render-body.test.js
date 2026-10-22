@@ -960,3 +960,60 @@ test('第 6 层不向 rng 取任何一个数、不新建任何离屏画布（眨
   for (let i = 0; i < 60; i++) r2.draw(ctx, world, bodies, DESKTOP, CONFIG.fixedDt);
   assert.equal(created.length, before, '眼睛不许新建 sprite：眼白是扁平填充，这是"不改 B14 精确账单"的代价与决定');
 });
+
+// ============================================ F-tail：B20 §8.2 明确不通过的那一条
+//
+// B20 在真像素里判"尾巴读不成一条"：三段各自是独立的小团，中间各留一道缝 ⇒ 看上去是虚线/三个点。
+// 这条判据是一个**值**（相邻圆盘到底重不重叠），混在 drawImage 那三笔里就只剩"贴了几次图"这种证据，
+// 而次数对"有没有缝"完全无感 —— 所以走 render.js 的 tailSegInto，并且**从真实绘制路径之后**
+// 读那份复用槽（renderer.tailSeg）：测的是调用点真的用了这套几何，不是测试自己抄了一份公式。
+test('尾巴相邻两段必须互相重叠 —— 读成一条尾巴，不是三个点（§8.2 / F-tail）', () => {
+  const world = makeWorld(11);
+  const bodies = makeBodies(world);
+  const r = makeRenderer(world, DESKTOP, false);
+  const c = world.creatures[0];
+  const body = bodies.get(c.id);
+  const ctx = createLogCtx();
+  drawCreature(ctx, r, c, body, DESKTOP);
+  const seg = r.tailSeg;
+  assert.equal(seg.count, CONFIG.tail.segs, '段数恒 CONFIG.tail.segs，不随体型变（spec §5.3）');
+  const rr = radiusPx(c, DESKTOP);
+  const nodes = body.tail.nodes;
+  for (let i = 0; i + 1 < seg.count; i++) {
+    // 真实间距：量节点坐标（单位空间 × 屏幕半径），**不假设**它等于 segPx × 2
+    const gap = Math.hypot(nodes[i + 1].x - nodes[i].x, nodes[i + 1].y - nodes[i].y) * rr;
+    const cover = seg.radii[i] + seg.radii[i + 1];
+    assert.ok(cover >= gap * 1.15,
+      `第 ${i}→${i + 1} 段之间有缝：两半径之和 ${cover.toFixed(2)} < 间距 ${gap.toFixed(2)} × 1.15`
+      + `（重叠率 ${((cover / gap - 1) * 100).toFixed(0)}%，要 ≥ 15% 才读得成一条尾巴）`);
+  }
+  // 根段不许粗过身体的一半：尾巴是尾巴，不是第二条腿
+  assert.ok(seg.radii[0] <= rr * 0.5, `尾根半径 ${seg.radii[0].toFixed(2)} 超过体半径的一半`);
+});
+
+test('尾尖不许退化到看不见：锥度有上界、绝对尺寸有下界（F-tail 的第二半）', () => {
+  // ⚠️ 这条原来写的是"手机上最小的一只，尾尖 ≥ 1.5 CSS px"，跑出来是 0.65px 而**判不了修复成功**：
+  // 尾巴总长按 spec 就是 `lenRatio × 身体半径 = 0.5r`，一只 r ≈ 12px 的幼体整条尾巴才 6px，
+  // 要它的尾尖达到 1.5px 半径就等于要求"尾巴和它自己一样粗" —— 那读起来是一坨，不是尾巴。
+  // **是我的阈值错了，不是代码错了**，所以换成两条真能判据的：
+  //   ① 锥度有上界（尾尖 ≥ 尾根的 60%）：这条与体型无关，管住"递减到消失"；
+  //   ② 成体在手机视口上尾尖 ≥ 1 CSS px：低于 1px 是真正的"sub-pixel，画了等于没画"。
+  const world = makeWorld(11);
+  const bodies = makeBodies(world);
+  const ctx = createLogCtx();
+
+  const r1 = makeRenderer(world, DESKTOP, false);
+  const c1 = world.creatures[0];
+  drawCreature(ctx, r1, c1, bodies.get(c1.id), DESKTOP);
+  const seg = r1.tailSeg;
+  const tip = seg.radii[seg.count - 1];
+  assert.ok(tip >= seg.radii[0] * 0.6,
+    `尾尖只剩尾根的 ${(tip / seg.radii[0] * 100).toFixed(0)}%，锥度太大等于把尾巴画没了`);
+
+  const r2 = makeRenderer(world, PHONE, false);
+  const adult = world.creatures.find((c) => c.stage === 'adult') || world.creatures[0];
+  drawCreature(ctx, r2, adult, bodies.get(adult.id), PHONE);
+  const s2 = r2.tailSeg;
+  assert.ok(s2.radii[s2.count - 1] >= 1,
+    `成体在手机视口上尾尖只有 ${s2.radii[s2.count - 1].toFixed(2)} CSS px（< 1 就是 sub-pixel）`);
+});

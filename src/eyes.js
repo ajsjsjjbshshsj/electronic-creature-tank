@@ -33,7 +33,7 @@ import { CONFIG } from './config.js';
 import { moodOf, createEmotions } from './emotions.js';
 import { createNeeds } from './needs.js';
 import { createMemory, affectionFor, PLAYER_ID } from './memory.js';
-import { blinkInterval } from './body.js';
+import { blinkInterval, starRadius } from './body.js';
 
 const E = CONFIG.eye;
 const TAU = Math.PI * 2;
@@ -295,6 +295,28 @@ export function eyeAnchorsInto(out, p, r, facing) {
 // spec §4.6 的坐标定义：眼睛长在 facing 那一侧，沿**垂直于 facing** 的方向左右分开，
 // 所有"前 / 后"都是沿 facing 的偏移。返回的是**相对体心的位移**（CSS 像素），
 // 画的那一侧只负责加上 cx / cy —— 基向量的换算留在这里才测得到（见 tests/eyes.test.js）。
+// F-2（B20 真像素确认）：把一只眼**沿"体心 → 眼心"这条射线**收回星形轮廓之内，返回缩放系数 k。
+//
+// 为什么要有这道兜底：表情修正项是在**facing 相对坐标**里加的，而轮廓半径是角的
+// **非单调**函数（36° 内凹 0.62、72° 又是臂尖 1.0）。于是"动一个常量就把某只眼推到臂外面"
+// 是这套加法的固有性质 —— 扫遍 (forward × spacing × sadSpacing) 的 105 个组合，
+// 能同时满足"不出界 + 两眼不相碰 + 后移不越过中心线"的是 **0 个**。常量只能挑到"现在不出界"，
+// 挑不出"以后也出不了界"。
+//
+// 但它**只是安全网，不是常规路径**：k 在真实表情集合上必须恒等于 1（下面那条断言钉着），
+// 因为径向缩放会同时动两个轴，一旦 binding 就破坏 spec §4.6 的坐标契约
+// （"eyeSpacing 只动垂直轴 / eyeOffset 只动沿 facing 轴" —— tests/eyes.test.js 有两条测它）。
+// 角度必须在 **facing 相对系**里算（星臂与 facing 是绑死的，本体点也用同一个 facing 旋转），
+// 在屏上算会在 facing 一转之后用错角度。
+// 只收不推（k ≤ 1）：修正项的**方向**全部保留，被抹掉的只有"出界"这一种后果。
+// 返回系数而不是改坐标，是为了让调用点零分配（本函数每帧每只都跑，spec §5.3）。
+function fitK(u, v, eyeR, r) {
+  const dist = Math.hypot(u, v);
+  if (!(dist > 0)) return 1;                  // 与体心重合：方向未定义，原地不动
+  const limit = starRadius(Math.atan2(v, u)) * r - eyeR - E.fitMargin * r;
+  return limit >= dist ? 1 : Math.max(0, limit) / dist;
+}
+
 function computeAnchors(out, p, r, facing) {
   const d = r * 2;
   const fx = facing && Number.isFinite(facing.x) ? facing.x : 1;
@@ -307,10 +329,17 @@ function computeAnchors(out, p, r, facing) {
   const px = -fy;
   const py = fx;
   const lift = num(p.eyeOffsetY) * r;
-  out.lx = pos0(fx * fwd + px * sep);
-  out.ly = pos0(fy * fwd + py * sep + lift);
-  out.rx = pos0(fx * fwd - px * sep);
-  out.ry = pos0(fy * fwd - py * sep + lift);
+  // 屏空间的"上望"折进 facing 相对系：world 偏移 (0, lift) 在该系里是 (lift·fy, lift·fx)。
+  const lu = fwd + lift * fy;
+  const lv = -sep + lift * fx;
+  const ru = fwd + lift * fy;
+  const rv = sep + lift * fx;
+  const kl = fitK(lu, lv, out.eyeR, r);
+  const kr = fitK(ru, rv, out.eyeR, r);
+  out.lx = pos0(fx * lu * kl + px * lv * kl);
+  out.ly = pos0(fy * lu * kl + py * lv * kl);
+  out.rx = pos0(fx * ru * kr + px * rv * kr);
+  out.ry = pos0(fy * ru * kr + py * rv * kr);
   return out;
 }
 
