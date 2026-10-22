@@ -74,18 +74,27 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   //   node -e "import('./src/config.js').then(({CONFIG})=>{let n=0;const w=x=>{if(x===null\
   //   ||typeof x!=='object')return;n++;for(const k of Object.keys(x))w(x[k])};w(CONFIG);\
   //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 56 keys 49
-  assert.equal(visited.length, 56, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 56 → 57、49 → 50（2026-10-22 B19b-i）：新增 **CONFIG.api 一段**（一个节点、18 个标量）。
+  // 与 B18 的八张声表相反，这一段只需要一个节点：18 个旋钮之间没有"逐键比对"的结构关系
+  // （它们各自的两侧取值由 tests/api.test.js 钉行为），而子表会让节点数与顶层键数各加一 ——
+  // 那正是这里要的摩擦：加一段就必须在下面那张段名清单里说清楚。
+  // ⚠️ 这一段里**永远不许出现 API key 的值**（spec §7.2 末）：CONFIG 深冻结且提交进仓库，
+  //    而 key 只住本机存储。endpoint / model 两个默认值是空字符串，就是这条的形状证据。
+  //   node -e "import('./src/config.js').then(({CONFIG})=>{let n=0;const w=x=>{if(x===null\
+  //   ||typeof x!=='object')return;n++;for(const k of Object.keys(x))w(x[k])};w(CONFIG);\
+  //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 57 keys 50
+  assert.equal(visited.length, 57, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
-    'affectionDecay', 'affectionDecayKin', 'audio', 'behavior', 'blink', 'body', 'bodyPoints', 'broody',
-    'colors', 'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize', 'eggTint',
-    'eggsPerClutch', 'emotions', 'eye', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt', 'fluff',
-    'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hueRange',
-    'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
+    'affectionDecay', 'affectionDecayKin', 'api', 'audio', 'behavior', 'blink', 'body', 'bodyPoints',
+    'broody', 'colors', 'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize',
+    'eggTint', 'eggsPerClutch', 'emotions', 'eye', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt',
+    'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop',
+    'hueRange', 'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
     'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
     'populationCap', 'render', 'speech', 'stage', 'star', 'tail', 'timeScales',
-  ], 'CONFIG 顶层键名（49 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 49);
+  ], 'CONFIG 顶层键名（50 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 50);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -98,6 +107,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.eye',                                                                 // B15 新增（眼睛十行表）
     'CONFIG.colors.eggTints',                                                     // B16 新增（八色蛋的子表）
     'CONFIG.audio', 'CONFIG.audio.joy', 'CONFIG.audio.chirp',                     // B18 新增（叫声表与两张增量行）
+    'CONFIG.api',                                                                 // B19b-i 新增（可选 API 档的形状与默认值，里面没有 key）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -784,6 +794,73 @@ test('叫声表的三十六项齐备（28 个调度量 + 8 张声表子行，nod
     '撒娇那一声的门槛必须高于"它开始看你"，否则陌生人也一直在撒娇');
   assert.equal(W.joyMin, undefined, 'joy 的阈值只许有 CONFIG.mood.happyJoyMin 一处定义');
   assert.equal(W.angerMin, undefined, 'anger 同上（CONFIG.mood.angerMin）');
+});
+
+// ---- B19b-i（2026-10-22）：可选 API 档。分工与上面各组一致 ----
+// 这里钉**数与数之间的上界关系**，"api.js 有没有照这些数算"由 tests/api.test.js 钉。
+// 这一段最特殊的一条要求是**它不该有内容的地方必须真的空着**：endpoint / model 是空串，
+// 而 key 连一个字段都没有（spec §7.2 末：key 绝不进共享存档；CONFIG 又是提交进仓库的）。
+
+test('可选 API 档的十八项旋钮（node 数出来的）：默认关闭、没有存放 key 的位置、两侧上界自洽', () => {
+  const A = CONFIG.api;
+  assert.deepEqual(Object.keys(A).sort(), [
+    'enabled', 'endpoint', 'maxInFlight', 'maxTokensOut', 'maxTokensOutCap', 'model',
+    'nameMaxChars', 'personaLines', 'suggestionMaxChars', 'summaryHeardTop', 'summaryMaxChars',
+    'summaryNeedTop', 'temperature', 'temperatureMax', 'textMaxChars', 'timeoutMaxMs',
+    'timeoutMs', 'wordMaxChars',
+  ], 'CONFIG.api 的十八项键集（node 数出来的）变了 —— 加一项删一项都要在这里说清楚');
+  assert.equal(Object.keys(A).length, 18);
+
+  // 默认关闭：spec §4.13.2 标题逐字「默认关闭」。与文字层那条刻意相反 ——
+  // 文字层默认开（不联网也完整运行），API 档默认关（填了才引入网络依赖，spec §2 那行）。
+  assert.equal(A.enabled, false);
+  assert.equal(CONFIG.speech.enabled, true);
+
+  // **这一段里不许有能装 key 的东西**：任何字符串字段都必须是空串。
+  // 这条比"键名里不许出现 key"更硬 —— 后者挡不住有人加一个 `apiKey: ''` 或者
+  // 把真端点连 token 一起提交进来（那是泄露，不是降级，spec §7.2 末第 4 条）。
+  for (const [k, v] of Object.entries(A)) {
+    if (typeof v === 'string') {
+      assert.equal(v, '', `CONFIG.api.${k} 是非空字符串：端点与 key 都只能由调用方在本机填`);
+    } else {
+      assert.ok(typeof v === 'number' || typeof v === 'boolean',
+        `CONFIG.api.${k} 必须是标量（这一段是形状表，不是状态表）`);
+    }
+  }
+
+  assert.equal(A.timeoutMs, 4000);
+  assert.equal(A.timeoutMaxMs, 15000);
+  assert.deepEqual([A.maxTokensOut, A.maxTokensOutCap], [24, 64]);
+  assert.deepEqual([A.temperature, A.temperatureMax], [0.7, 2]);
+  assert.equal(A.maxInFlight, 2);
+  assert.equal(A.textMaxChars, 40);
+  assert.deepEqual([A.summaryNeedTop, A.summaryHeardTop, A.personaLines], [2, 3, 3]);
+  assert.deepEqual([A.nameMaxChars, A.wordMaxChars, A.suggestionMaxChars], [12, 8, 48]);
+  assert.equal(A.summaryMaxChars, 420);
+
+  // 上界关系：cfg 能覆盖的那三个都必须被夹住，否则"cfg 越界 ⇒ null"那条测试无从谈起
+  assert.ok(A.timeoutMs > 0 && A.timeoutMs <= A.timeoutMaxMs, '默认超时必须落在自己给的上界内');
+  assert.ok(A.maxTokensOut >= 1 && A.maxTokensOut <= A.maxTokensOutCap);
+  assert.ok(A.temperature >= 0 && A.temperature <= A.temperatureMax);
+  assert.ok(Number.isInteger(A.maxInFlight) && A.maxInFlight >= 1
+    && A.maxInFlight <= CONFIG.speech.onscreenMax,
+    `在途请求数不该超过同屏气泡上限（${CONFIG.speech.onscreenMax}）：否则回复会比能显示的多出一截排队`);
+  // max_tokens 必须够写一句 2–5 个词，又不许够写一段散文（spec §4.13.1 的句式纪律）
+  assert.ok(A.maxTokensOutCap > CONFIG.speech.maxTokens * 4,
+    '上限太紧会让合法的短句被服务端截断 —— 截断的回复比拒绝更难查');
+  assert.ok(A.maxTokensOutCap < 200, '上限松到能写一段话，"最多 2 行"就只剩校验在挡');
+  // 摘要条数不许越过来源的条数（四条匮乏度 / 性格九项）
+  assert.ok(A.summaryNeedTop >= 1 && A.summaryNeedTop <= NEED_KEYS.length,
+    `summaryNeedTop 不能超过 NEED_KEYS 的 ${NEED_KEYS.length} 条`);
+  assert.ok(A.personaLines >= 1 && A.personaLines <= 9, '性格九项（spec §4.9 那张表）');
+  // 字符侧的两道闸必须互相容得下合法短句：五个词最窄也要 5×2 字 + 4 个空格
+  assert.ok(A.textMaxChars >= CONFIG.speech.maxTokens * 2 + (CONFIG.speech.maxTokens - 1),
+    'textMaxChars 比合法最短一句还窄 ⇒ 校验会把一切都拒成 too-long');
+  assert.ok(A.nameMaxChars >= 2 && A.wordMaxChars >= 2 && A.suggestionMaxChars >= 2,
+    '夹到 1 个字符等于把那一格删掉，模型会以为它没有');
+  // 逐格上界之和必须落在总预算里（tests/api.test.js 钉的是它的行为侧：尾部字段没被裁掉）
+  assert.ok(A.summaryMaxChars > A.nameMaxChars + A.wordMaxChars + A.suggestionMaxChars
+    + A.summaryHeardTop * A.wordMaxChars, '总预算比逐格上界之和还小 ⇒ 必填字段会被裁掉');
 });
 
 test('NEED_WORDS 的键与 needs 的四条匮乏度是同一份键表（不是各抄一遍）', () => {

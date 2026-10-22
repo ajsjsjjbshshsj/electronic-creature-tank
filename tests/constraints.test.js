@@ -99,7 +99,12 @@ test('约束扫描确实覆盖到了 src/ 下的模块（防空转）', () => {
   // 而语言层与存档层恰恰是最容易被"先写在一个大文件里再说"的诱惑绕过守卫的地方 ——
   // 尤其 speech.js：spec §4.13.2 允许它将来发 fetch，但**只许在 main.js 发**。
   // 这里把它钉进清单，将来谁想给 speech.js 开浏览器 API 的口子，得先改掉这条。
-  for (const expected of ['speech.js', 'lexicon.js', 'heard.js', 'save.js']) {
+  // B19b-i（2026-10-22）同一条扩展到 api.js：可选 API 档的**纯函数层**。它是全项目里
+  // 唯一"描述"一次网络往来的地方（buildRequest 返回 url/headers/body 这么一份数据），
+  // 而发送那一步在 main.js 的接线层（B19b-ii）。把 fetch 写进 api.js 会让规则档失去
+  // "不填 key 也照样完整运行"这条承诺（spec §1 原则 5 / §4.13.2 第 1 条），
+  // 所以这一条就是那道口子的守卫本身。
+  for (const expected of ['speech.js', 'lexicon.js', 'heard.js', 'save.js', 'api.js']) {
     assert.ok(files.includes(join('src', expected)), `扫描清单里没有 src/${expected}`);
   }
   // B13（2026-10-21）：渲染层**必须**留在这条扫描的覆盖范围内。
