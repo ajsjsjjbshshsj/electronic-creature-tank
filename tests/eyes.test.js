@@ -6,7 +6,7 @@ import { CONFIG } from '../src/config.js';
 import { createEmotions, moodOf } from '../src/emotions.js';
 import { createNeeds } from '../src/needs.js';
 import { createMemory, remember, PLAYER_ID, affectionFor } from '../src/memory.js';
-import { blinkInterval } from '../src/body.js';
+import { blinkInterval, starRadius } from '../src/body.js';
 import {
   eyeParamsFor, eyeParamsInto, eyeAnchorsFor, eyeAnchorsInto,
   blushFor, eyeWidthOf, pupilColor, eyeWhiteColor, blushColor,
@@ -585,15 +585,42 @@ test('单只眼睛直径 = 体直径 × CONFIG.eyeWidthRatio（28% 这件事的�
 });
 
 test('eyeSpacing / eyeOffset 各自只动该动的那个轴', () => {
-  const wide = eyeAnchorsFor(Object.assign({}, neutral(), { eyeSpacing: 0.7 }), 26, { x: 1, y: 0 });
+  // ⚠️ 0.55 而不是原来的 0.7：F-2 之后眼睛多了一道**径向兜底**（fitK），超出合法范围的
+  // spacing 会被沿射线收回，而"收回"必然同时动两个轴 —— 于是"只动一个轴"这条契约的
+  // **成立范围是合法参数区间**，不是全体实数。这里探的是合法区间内的上界（表情集合里
+  // 最大的是委屈 0.42+0.04 = 0.46），下面另有一条测越界之后发生什么。
+  // 改这个数不是放宽判据：契约本身一个字没动，动的是探针落在哪一段。
+  const wide = eyeAnchorsFor(Object.assign({}, neutral(), { eyeSpacing: 0.55 }), 26, { x: 1, y: 0 });
   const base = eyeAnchorsFor(neutral(), 26, { x: 1, y: 0 });
   assert.ok(Math.abs(wide.ly) > Math.abs(base.ly), 'eyeSpacing 变大 ⇒ 沿垂直方向分得更开');
   assert.ok(Math.abs(wide.lx - base.lx) < 1e-9, 'eyeSpacing 不许沿 facing 方向挪眼睛');
-  const back = eyeAnchorsFor(Object.assign({}, neutral(), { eyeOffset: -0.2 }), 26, { x: 1, y: 0 });
+  const back = eyeAnchorsFor(Object.assign({}, neutral(), { eyeOffset: -0.10 }), 26, { x: 1, y: 0 });
+  // ⚠️ 探针从 -0.2 降到 -0.10：那是 F-2 之后**合法区间**的最大后移（就是 sadOffset 本身）。
+  // 断言没变（"后移不许越过中心线"），变的只是探针落在哪一段 —— 而这条断言现在同时
+  // 反过来约束 CONFIG.eye.forward：forward×2 必须大于最大后移量，否则眼睛会跑到后脑勺。
   assert.ok(back.lx < base.lx, 'eyeOffset 为负 ⇒ 沿 facing 后移');
   assert.ok(back.lx > 0, `后移也不许把眼睛移到中心线的另一侧（那就成了后脑勺）：${back.lx}`);
   const beg = eyeAnchorsFor(eye({ intent: { kind: 'beg' } }), 26, { x: 1, y: 0 });
   assert.ok(beg.ly < base.ly && beg.ry < base.ry, '卖萌的上望是两只眼睛一起往屏幕上方移');
+});
+
+test('越界的 spacing 被径向收回而不是把眼甩出本体（F-2 兜底与坐标契约的分工）', () => {
+  const r = 26;
+  const facing = { x: 1, y: 0 };
+  const base = eyeAnchorsFor(neutral(), r, facing);
+  const wild = eyeAnchorsFor(Object.assign({}, neutral(), { eyeSpacing: 0.9 }), r, facing);
+  const dist = Math.hypot(wild.lx, wild.ly);
+  const outline = starRadius(Math.atan2(wild.ly, wild.lx)) * r;
+  assert.ok(dist + wild.eyeR <= outline,
+    `越界 spacing 也必须把眼盘留在本体内：${(dist + wild.eyeR).toFixed(2)} > ${outline.toFixed(2)}`);
+  assert.ok(Math.abs(wild.lx) > Math.abs(base.lx) * 0.5,
+    '收回是沿射线的等比缩，facing 方向不该被抹掉（否则脸塌成正中）');
+  // 兜底之外还有一条正向的：基准 forward 必须容得下**最大那次后移**，
+  // 否则不用兜底出场，眼睛就已经跑到中心线后面去了（= 后脑勺）。
+  const maxBackward = Math.max(-CONFIG.eye.sadOffset, -CONFIG.eye.fearOffset);
+  assert.ok(CONFIG.eye.forward * 2 > maxBackward,
+    `forward×2(${(CONFIG.eye.forward * 2).toFixed(2)}) 必须大于最大后移量(${maxBackward.toFixed(2)})，`
+    + '否则那格表情把眼睛挪到脸后面去了');
 });
 
 test('eyeAnchorsInto 写进复用对象且与 eyeAnchorsFor 同值（spec §5.3 零分配）', () => {
@@ -601,6 +628,100 @@ test('eyeAnchorsInto 写进复用对象且与 eyeAnchorsFor 同值（spec §5.3 
   const p = neutral();
   assert.equal(eyeAnchorsInto(out, p, 26, { x: 1, y: 0 }), out);
   assert.deepEqual(out, eyeAnchorsFor(p, 26, { x: 1, y: 0 }));
+});
+
+// ---------------------------------------------------------------- F-2：眼盘不许长在本体之外
+//
+// B20 在**真像素**里量到 8/8 只的眼盘有 9.3–12.4% 落在星形轮廓之外（另有一条像素侧独立
+// 印证：6/8 只的其中一只眼外缘 alpha 只有 4–119，而眼心恒 255）。根因不在常量大小，
+// 在**方向**：`facing` 那个方向本身就是一根星臂的尖（body.js 的 starRadius(0) = outerRatio），
+// 而锚点是"沿 facing 前移 + 垂直分开"，于是两只眼正好落在臂的斜面上 ——
+// 那里轮廓正在从内凹的 0.62 往外 1.0 爬，眼盘就探出去了。
+//
+// 这条把"眼睛长在身体里"写成几何而不是截图：每只眼的圆盘（圆心距 + 眼半径）必须整个落在
+// **该方位上真实的星轮廓之内**，并留 ≥ 0.02r 的余量 —— 软体每帧都在抖、跳一下还要 squash，
+// 零余量等于"有时候在外面"。九种表情/姿态各测一遍：`eyeSpacing` / `eyeOffset` 那几条
+// 修正项（委屈外扩后移、害怕后移、好奇前倾、生气内收）都是把眼睛往边界推的操作。
+const F2_R = 40;
+const F2_MARGIN = 0.02;                       // × 体半径：留给软体抖动的余量
+
+const eyeDiscsInsideBody = (label, p) => {
+  const a = eyeAnchorsInto({ lx: 0, ly: 0, rx: 0, ry: 0, eyeR: 0 }, p, F2_R, { x: 1, y: 0 });
+  const pair = [[a.lx, a.ly, '左'], [a.rx, a.ry, '右']];
+  for (const [x, y, which] of pair) {
+    const dist = Math.hypot(x, y);
+    const outline = starRadius(Math.atan2(y, x)) * F2_R;
+    assert.ok(dist + a.eyeR <= outline - F2_MARGIN * F2_R,
+      `${label} 的${which}眼飘在本体之外（F-2）：圆心距 ${dist.toFixed(2)} + 眼半径 ${a.eyeR.toFixed(2)}`
+      + ` = ${(dist + a.eyeR).toFixed(2)}，而该方位的星轮廓只有 ${outline.toFixed(2)}`
+      + `（角 ${(Math.atan2(y, x) * 180 / Math.PI).toFixed(1)}°）`);
+  }
+  // 同一条测试顺手钉"两只眼不许叠在一起"：把眼睛收回中央团块时，最容易修成斗鸡眼。
+  const sep2 = Math.hypot(a.lx - a.rx, a.ly - a.ry);
+  assert.ok(sep2 >= a.eyeR * 2,
+    `${label} 的两只眼互相重叠（F-2 的反向失败）：圆心距 ${sep2.toFixed(2)} < 两倍眼半径 ${(a.eyeR * 2).toFixed(2)}`);
+};
+
+test('眼盘必须整个落在星形本体的轮廓之内（F-2，B20 真像素确认）', () => {
+  const cases = [
+    ['基准', neutral()],
+    ['快乐 ^^', delighted()],
+    ['幸福 星星眼', eye({ emotions: { joy: 0.75, arousal: 0.4 }, aff: 0.8 })],
+    ['委屈', aggrieved()],
+    ['害怕', scared()],
+    ['生气', eye({ emotions: { anger: 1 } })],
+    ['卖萌', eye({ intent: { kind: 'beg' } })],
+    ['困倦', eye({ emotions: { sleepy: 1 } })],
+    ['好奇前倾', eye({ emotions: { curiosity: 1 } })],
+  ];
+  for (const [label, p] of cases) eyeDiscsInsideBody(label, p);
+});
+
+// 上面两条测的是"当前这十个表情刚好不出界"。但真正的判据应该是**构造上成立**：
+// 表情修正项（委屈外扩、害怕后移、好奇前倾…）是在一个**不随星形旋转**的直角坐标里加的，
+// 而轮廓半径是角的非单调函数（36° 是内凹 0.62、72° 又是臂尖 1.0）——
+// 于是"改一个常量就把某只眼推到臂外面"是这套加法的固有性质，靠挑常量**永远挑不完**。
+// 这条把要求写成：不管修正项被填成什么，眼盘都必须在轮廓之内。
+test('修正项被填成任何值，眼盘都必须在轮廓之内（F-2 的构造性版本）', () => {
+  const r = 40;
+  const facing = { x: 1, y: 0 };
+  const wild = [
+    ['好奇前倾拉满', { eyeSpacing: 0.42, eyeOffset: 0.60, eyeOffsetY: 0, eyeSize: 1 }],
+    ['委屈外扩拉满', { eyeSpacing: 0.95, eyeOffset: -0.40, eyeOffsetY: 0, eyeSize: 1 }],
+    ['大眼 + 前倾', { eyeSpacing: 0.50, eyeOffset: 0.30, eyeOffsetY: 0.20, eyeSize: 1 }],
+    ['卖萌上望', { eyeSpacing: 0.42, eyeOffset: 0.10, eyeOffsetY: -0.30, eyeSize: 1 }],
+    ['害怕后移收缩', { eyeSpacing: 0.42, eyeOffset: -0.55, eyeOffsetY: 0, eyeSize: 0.45 }],
+  ];
+  for (const [label, p] of wild) {
+    const a = eyeAnchorsInto({ lx: 0, ly: 0, rx: 0, ry: 0, eyeR: 0 }, p, r, facing);
+    for (const [x, y, which] of [[a.lx, a.ly, '左'], [a.rx, a.ry, '右']]) {
+      const dist = Math.hypot(x, y);
+      const outline = starRadius(Math.atan2(y, x)) * r;
+      assert.ok(dist + a.eyeR <= outline,
+        `${label}：${which}眼出界（F-2）${(dist + a.eyeR).toFixed(2)} > ${outline.toFixed(2)}`);
+    }
+  }
+});
+
+// 上面那条只测了 facing = +x 的一只眼。角度是这套几何里唯一的"陷阱变量"
+// （轮廓半径是角的函数，而 facing 与星臂的相对朝向恒定），所以再换 facing 扫一圈：
+// 换朝向时眼睛与星臂是**一起转**的（render.js 用同一个 facing 旋转本体点与锚点），
+// 因此这一条测的是"实现没有偷偷只用 x 分量"。
+test('换任意 facing 朝向，眼盘仍然整个在本体内（F-2 的旋转不变性）', () => {
+  for (let k = 0; k < 12; k++) {
+    const ang = k * Math.PI / 6;
+    const facing = { x: Math.cos(ang), y: Math.sin(ang) };
+    const a = eyeAnchorsInto({ lx: 0, ly: 0, rx: 0, ry: 0, eyeR: 0 }, neutral(), F2_R, facing);
+    for (const [x, y] of [[a.lx, a.ly], [a.rx, a.ry]]) {
+      // 锚点是相对体心的位移；本体点在同一帧里也被同一个 facing 旋转，
+      // 所以"眼在身体的哪个方位"与 facing 无关 —— 把绝对角减去 facing 角才是该查的那个角。
+      const local = Math.atan2(y, x) - ang;
+      const dist = Math.hypot(x, y);
+      const outline = starRadius(local) * F2_R;
+      assert.ok(dist + a.eyeR <= outline - F2_MARGIN * F2_R,
+        `facing ${Math.round(ang * 180 / Math.PI)}° 时眼盘出界：${(dist + a.eyeR).toFixed(2)} > ${outline.toFixed(2)}`);
+    }
+  }
 });
 
 // ==================================================== 腮红（第 6 层的后半格）

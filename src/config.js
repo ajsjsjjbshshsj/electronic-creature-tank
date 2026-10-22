@@ -415,8 +415,16 @@ const CONFIG = {
   eye: {
     // 四参数的基准值（spec §4.6：pupilSize / lidOpen / eyeSpacing / eyeOffset）
     neutralPupil: 0.42,        // 中性瞳孔半径 / 眼睛半径
-    spacing: 0.42,             // 两眼圆心间距 / 体直径；单只眼 0.28 ⇒ 边缘几乎相触
-    forward: 0.15,             // 眼睛整体沿 facing 前移 / 体直径（脸长在前半侧）
+    spacing: 0.42,             // 两眼圆心间距 / 体直径。F-6（2026-10-22 复核）：这里原写
+                               // "单只眼 0.28 ⇒ 边缘几乎相触"，而算术是圆心隔 0.84r、
+                               // 两倍眼半径只有 0.56r ⇒ 中间还留着 0.28r 的鼻梁，**不是**几乎相触。
+                               // 一句对不上的注释比没有注释更糟：它是下一个改这个数的人不去复核的理由。
+    forward: 0.09,             // 眼睛整体沿 facing 前移 / 体直径。F-2（2026-10-22 真像素）：
+                               // 0.15 会把两只眼推到**星臂的斜面**上（那里轮廓正从内凹 0.62 爬向臂尖 1.0），
+                               // 0.09 让基准眼角落在 ±72° 的**两根前臂尖**上 —— 那是星形最宽的地方。
+    fitMargin: 0.05,           // F-2：眼盘收进星轮廓时额外留的余量 / 体半径。
+                               // 留余量而不是留到相切，是因为软体每帧都在抖、跳一下还要 squash ——
+                               // 零余量等于"有时候在外面"。
     pupilMin: 0.12,            // 瞳孔下限：再小就在屏幕上塌成一个点
     pupilMax: 0.95,            // 瞳孔上限 = 卖萌那一格（spec 逐字 0.95），婴儿式
     eyeSizeMin: 0.45,          // 害怕收缩的下限（0 半径的路径在 canvas 上是无效绘制）
@@ -439,8 +447,10 @@ const CONFIG = {
     sadLid: 0.55,              // spec 逐字："lidOpen ≈ 0.55"
     sadLowerLid: 0.42,         // spec 逐字："**下眼睑上抬**（不是上眼睑下垂）"
     sadPupil: 0.72,            // "瞳孔放大"（spec 只给方向，数属 §12）
-    sadSpacing: 0.10,          // "eyeSpacing 外扩"
-    sadOffset: -0.18,          // "整只后移"（沿 facing 的负偏移）
+    sadSpacing: 0.10,          // "eyeSpacing 外扩"（spec 逐字）。**试过降到 0.04，被探针退回来了**：
+                               // forward 修好之后 0.10 已经在轮廓之内，再缩就是把这格表情改弱。
+    sadOffset: -0.10,          // "整只后移"（沿 facing 的负偏移）。-0.18 在 forward 降到 0.09 之后
+                               // 会越过中心线（成了后脑勺），既有那条 lx > 0 的断言拦着。
     sadHighlightY: 0.45,       // "高光偏到眼睛下缘"（+y = 屏幕向下 ⇒ 含泪感）
 
     // 第 4 行 anger
@@ -452,13 +462,13 @@ const CONFIG = {
     // 第 5 行 fear
     fearPupil: 0.15,           // spec 逐字："pupilSize ≈ 0.15"
     fearLid: 1.00,             // "瞪到最大"
-    fearOffset: -0.22,         // "eyeOffset 沿 facing 后移"
+    fearOffset: -0.12,         // "eyeOffset 沿 facing 后移"（同上：幅度受"不许越过中心线"约束）
     fearShrink: 0.22,          // 裁定 2 里害怕的"整只收缩"（委屈没有这一项）
 
     // 第 6 行 curiosity
     curiosityAsym: 0.55,       // "一只眼睁大一只微眯"：左右 lidOpen 的差
     curiosityPupil: 0.62,      // "瞳孔放大"
-    curiosityOffset: 0.14,     // "eyeOffset 前倾"
+    curiosityOffset: 0.05,     // "eyeOffset 前倾"。0.14 会把眼从臂尖(72°)推回斜面(53°)而在那里出界。
 
     // 第 7 行 sleepy
     sleepyLid: 0.40,           // "半闭"

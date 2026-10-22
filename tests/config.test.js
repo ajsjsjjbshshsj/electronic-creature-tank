@@ -392,7 +392,7 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
     '眨眼与蹦跳同源的证据：两条公式用的是同一个 activity 地板');
 });
 
-test('眼睛的五十七个旋钮齐备，且十行表的方向性不等式成立（数值侧守，映射侧由 eyes.test.js 负责）', () => {
+test('眼睛的五十八个旋钮齐备（F-2 加了 fitMargin），且十行表的方向性不等式成立（数值侧守，映射侧由 eyes.test.js 负责）', () => {
   // 分工与 mood / tail / blink 三组一样：这里钉**数本身与数之间的排序**，
   // eyes.test.js 钉"eyes.js 有没有照这些数算"。只钉一侧会漏：
   //   只钉行为 → 把 happyLid 从 0.30 改成 0.95 时行为断言仍然绿（它按 CONFIG 比）；
@@ -405,7 +405,7 @@ test('眼睛的五十七个旋钮齐备，且十行表的方向性不等式成�
     'blushAlpha', 'blushBegBoost', 'blushJoyBoost', 'blushMax',
     'blushOffsetX', 'blushOffsetY', 'blushRadius', 'curiosityAsym',
     'curiosityOffset', 'curiosityPupil', 'deathCloseSeconds', 'eyeSizeMin',
-    'fearLid', 'fearOffset', 'fearPupil', 'fearShrink',
+    'fearLid', 'fearOffset', 'fearPupil', 'fearShrink', 'fitMargin',
     'forward', 'handNearRadius', 'happyLid', 'happyPupil',
     'highlightRadius', 'highlightX', 'highlightY', 'leakGain',
     'lookMax', 'lookTrustMin', 'neutralPupil', 'phaseModulus',
@@ -414,7 +414,12 @@ test('眼睛的五十七个旋钮齐备，且十行表的方向性不等式成�
     'sleepyBlinkStretch', 'sleepyLid', 'spacing', 'starPoints',
     'starScaleMax', 'starSpinMax', 'starSpinPeriod', 'trustAffectionMin',
     'trustBlinkStretch',
-  ], '五十七个旋钮，不多不少。⚠️ 这里**没有** sadTopLid 是故意的：spec 逐字"不是上眼睑下垂"');
+  ], '五十八个旋钮，不多不少。⚠️ 这里**没有** sadTopLid 是故意的：spec 逐字"不是上眼睑下垂"');
+  // F-2（2026-10-22）加的第 58 个：fitMargin。它是**标量**，所以 §11 那两条全局计数不动。
+  assert.ok(Y.fitMargin > 0 && Y.fitMargin < 0.2,
+    `fitMargin 必须是正的、且不能大到把两只眼挤到重叠：${Y.fitMargin}`);
+  assert.ok(Y.spacing * 2 > (Y.fitMargin + CONFIG.eyeWidthRatio) * 2,
+    '基准间距必须还容得下两只眼（fitMargin 收进去之后也不许它们相碰）');
 
   // 七格"瞪圆 > 半睁 > 眯成一条"的排序
   assert.ok(Y.fearLid > Y.sadLid && Y.sadLid > Y.sleepyLid && Y.sleepyLid > Y.happyLid,
