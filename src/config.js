@@ -108,6 +108,18 @@ const CONFIG = {
     otherNameChance: 0.35,
     onscreenMax: 2,                     // 同屏气泡上限（性能 + 审美，spec §5.3）
     bubbleTtl: 3,
+    // ---- B19a（2026-10-22）补的显示纪律旋钮（spec §4.13.1 末段；数值侧由
+    // tests/render-bubble.test.js 逐条钉住，行为侧在同一文件）----
+    bubbleFontPx: 14,                   // spec 逐字「字号 ≥14px」，**CSS 像素**（不是位图）
+    bubbleMaxLines: 2,                  // spec 逐字「最多 2 行」⇒ fillText 每帧上界 2×2
+    bubbleQueueMul: 4,                  // 队列容量 = onscreenMax × 该值。spec 只说「其余排队」，
+                                        // 没说排多少 ⇒ 没有上界就是无界增长（world.events 那个教训）
+    bubblePadding: 7,                   // 文本框内边距（也当圆角半径用，不再多一个旋钮）
+    bubbleLineGap: 5,                   // 行距（14px 的字挤在一起读不出两行）
+    bubbleHeadGap: 8,                   // 框底与毛尖的空隙，同时是那条指向脑袋的小三角的高度
+    bubbleFadeHold: 0.4,                // 前 40% 生命满亮，之后 1.8 秒淡到 0（先读得完，再淡出）
+    bubbleMaxWidthFrac: 0.34,           // 文本框最宽 34% 视口：再宽就是横跨整缸的一条弹幕
+    bubbleStroke: 1.5,                  // 描边粗细（CSS px）：1px 在手机上等于没有绣线
   },
 
   // ---- 听进去的话（spec §4.8.1，Task A7）----
