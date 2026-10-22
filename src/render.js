@@ -707,13 +707,28 @@ function drawInnerLightLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, breathe,
 // 每段用本体的光晕 sprite（同一色相的柔和团）软描，根粗尖细。
 const TAIL_ALPHA = 0.92;
 
+// 把"每段画多大、段间隔多远"从绘制路径里剥出来（同 eyes.js 的 anchor、bubble.js 的 wrap 一条路子）：
+// §8.2 那条"尾巴读不读得成**一条**"是相邻圆盘的**重叠**判据，是一个**值**，
+// 混在 drawImage 那三笔里就只剩"贴了 3 次图"这种证据，而次数抓不到"三段之间各留一道缝"。
+// 写进调用方给的复用数组（out.radii / out.spacing），因为这条每帧每只都跑 —— spec §5.3 零分配。
+export function tailSegInto(out, body, r, viewport) {
+  const n = body.tail.nodes.length;
+  const segPx = (body.tailWorldLen * viewport.scale * 0.5) / n;
+  out.count = n;
+  out.spacing = segPx * 2;                    // 链是绷直时相邻节点的真实间距
+  for (let i = 0; i < n; i++) {
+    out.radii[i] = segPx * R.tailSegFactor * (1 - R.tailTaper * i);
+  }
+  return out;
+}
+
 function drawTailLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, viewport) {
   const nodes = body.tail.nodes;
   const n = nodes.length;
   if (n === 0) return;
   const sprite = getGlowSprite(renderer, c.traits.hue);
   const lift = tailLiftPx(body, r);
-  const segPx = (body.tailWorldLen * viewport.scale * 0.5) / n;
+  const seg = tailSegInto(renderer.tailSeg, body, r, viewport);
   ctx.save();
   ga(ctx, TAIL_ALPHA, renderer.fx.alpha);
   for (let i = 0; i < n; i++) {
@@ -721,7 +736,7 @@ function drawTailLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, viewport) {
     const nx = cx + (nd.x * ca - nd.y * sa) * r;
     // 举高沿链递增（根部贴在身上，尖端抬起来）；spec 表里"竖直高举"的那一半
     const ny = cy + (nd.x * sa + nd.y * ca) * r - lift * ((i + 1) / n);
-    const rr = segPx * R.tailSegFactor * (1 - R.tailTaper * i);
+    const rr = seg.radii[i];
     ctx.drawImage(sprite.surface, nx - rr, ny - rr, rr * 2, rr * 2);
   }
   ctx.restore();
@@ -1684,6 +1699,9 @@ export function createRenderer(opts) {
     // 容量在创建时一次定死（onscreenMax × bubbleQueueMul），运行中只改槽位、永不扩容。
     bubbles: createBubbles(bubblePoolCapacity()),
     bubbleRect: { x: 0, y: 0, w: 0, h: 0 },   // 每帧复用的气泡框矩形（bubbleBoxInto 的写入目标）
+    // 第 5 层尾巴的段几何复用槽（tailSegInto 的写入目标）。每帧每只都算一次，
+    // 所以它必须是常驻的一份而不是每次 new —— spec §5.3 运行时零分配。
+    tailSeg: { count: 0, spacing: 0, radii: [0, 0, 0, 0, 0, 0] },
     speechEnabled: true,       // 每帧从 world.speechEnabled 搬过来（**只读**，同 renderer.hand）
     time: 0,
     getPeltSprite(hue, sat, lum) {
