@@ -394,6 +394,10 @@ test('resize 不重映射任何 c.pos（架构决定 5：spec §3.4-2 那句在�
   };
   const makeElement = () => ({
     width: 0, height: 0, clientWidth: 0, clientHeight: 0, getContext: () => createStubCtx(),
+    // B17：main.js 现在会把指针监听听绑到这个元素上（attachInput 靠注入拿目标）。
+    // 这几条测试不关心手，所以收下监听但没人派发事件 —— 空实现即可。
+    // tests/input.test.js 里那个 makeTarget 才是真派发的那一条。
+    addEventListener: () => {}, removeEventListener: () => {},
   });
   const canvasEl = makeElement();
   canvasEl.clientWidth = 1920;
@@ -462,6 +466,7 @@ test('main.js 把 bodies 与**模拟**秒数交给 renderer.draw（4× 下水体
   const handlers = {};
   const makeElement = () => ({
     width: 0, height: 0, clientWidth: 1280, clientHeight: 720, getContext: () => createStubCtx(),
+    addEventListener: () => {}, removeEventListener: () => {},   // B17：attachInput 的注入目标
   });
   const canvasEl = makeElement();
   const fakeWindow = {
@@ -521,6 +526,7 @@ test('render.js 接进 main.js 后能在 Node 里跑起来（真 renderer，不�
   const raf = [];
   const makeElement = () => ({
     width: 0, height: 0, clientWidth: 1024, clientHeight: 640, getContext: () => createStubCtx(),
+    addEventListener: () => {}, removeEventListener: () => {},   // B17：attachInput 的注入目标
   });
   const canvasEl = makeElement();
   const mainCtx = createStubCtx();

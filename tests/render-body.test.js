@@ -694,6 +694,7 @@ test('main.js 接上真 renderer 后，身体真的被画进了主 ctx（每只 
   const raf = [];
   const makeElement = () => ({
     width: 0, height: 0, clientWidth: 1024, clientHeight: 640, getContext: () => createLogCtx(),
+    addEventListener: () => {}, removeEventListener: () => {},   // B17：attachInput 的注入目标
   });
   const canvasEl = makeElement();
   const mainCtx = createLogCtx();

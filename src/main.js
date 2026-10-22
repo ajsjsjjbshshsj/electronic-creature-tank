@@ -30,11 +30,18 @@
 //   createRenderer 靠**依赖注入**拿离屏画布（makeCanvas 工厂），所以 src/render.js
 //   自己一个浏览器全局都不碰、继续在 Node 里被单测（tests/constraints.test.js 的
 //   DOM 扫描因此仍然覆盖它）。本文件是七个浏览器全局名唯一允许出现的地方。
+//
+// B17（2026-10-21）接上的部分：手。
+//   attachInput 同样靠依赖注入拿监听目标，所以 src/input.js 也留在纯度守卫里。
+//   它带来的唯一一条新纪律是**频率解耦**：指针事件只更新一个读数，
+//   下面的 step() 才是消费者（input.poll(t)，每帧一次）。
+//   除此之外本文件仍然只写 world.playerHand 那一个字段 —— 那是内核明文允许的唯一例外。
 
 import { CONFIG } from './config.js';
 import { createWorld, tickWorld } from './sim.js';
 import { updateBodies, reconcileBodies } from './body.js';
 import { createRenderer, consumeEvents } from './render.js';
+import { attachInput } from './input.js';
 
 // ---------------------------------------------------------------- 纯逻辑（可在 Node 测）
 
@@ -150,7 +157,28 @@ export function boot(opts) {
     isMobile: coarse,
   });
   const audio = options.audio || null;
-  const detachInput = options.detachInput || null;
+  // 手（B17）：玩家与缸之间**唯一**的物理通道。
+  //
+  // attachInput 靠**依赖注入**拿监听目标（这里传进来的就是那个全屏绘制元素），
+  // 所以 src/input.js 里一个浏览器全局都不出现、继续在纯度守卫覆盖范围内、
+  // 继续在 Node 里用合成事件单测。本文件是那七个名字唯一允许出现的地方。
+  //
+  // onHand 只做一件事：把 { pos, speed }（或 null）交给那个唯一可写的字段。
+  // 坐标是归一化 [0,1]²、速度是归一化单位/秒 —— 单位口径由 input.js 定义，内核消费。
+  //
+  // ⚠️ 复用 input.js 内部那个 out 对象是**安全的**，但安全性来自两侧各做对了一半：
+  //   · 内核在感知层把 speed 与 dist 拷成**标量**、把 pos 按引用搬过去后立刻在本 tick 用完；
+  //   · 决策层写意图目标点时取的是 .x / .y 两个标量（不是 pos 引用）。
+  //   两件事各由 tests/input.test.js 的一条钉住（「复用同一个对象是安全的」那条）。
+  //   哪天内核改成把 senses.playerHand.pos 存进跨帧结构，这里就必须改成每次交付一份拷贝。
+  const input = options.input || attachInput(canvasEl, (hand) => {
+    world.playerHand = hand;
+  }, {
+    // 尺寸来源用**已有的视口**而不是元素的 clientWidth：
+    // 那样手势期间一次布局读取都没有（input.js 默认会读元素尺寸，那是给
+    // 没有视口对象的调用方用的；这里有更便宜的东西）。
+    getSize: () => viewport,
+  });
 
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
@@ -179,6 +207,15 @@ export function boot(opts) {
     // 第一帧没有"上一帧时刻"，frameDt 取 0 而不是 t（否则第一帧会补算从纪元到现在的秒数）
     const frameDt = state.lastT < 0 ? 0 : Math.min(1, (t - state.lastT) / 1000);
     state.lastT = t;
+
+    // 手：**每帧一次**消费指针读数（B17 的纪律 4）。
+    // 指针事件的上报频率可以远高于 60Hz（手机 120–240Hz、部分鼠标 1000Hz），
+    // 而生物按 CONFIG.fixedDt 走 —— 两者必须解耦，否则每秒上千次采样插入与速度重算。
+    // 事件里只写一个读数（input.js 的 observe），这里才是唯一的消费者，
+    // 所以上界是"重活次数 ≤ 帧数"。那条 1000 事件的测试钉的就是这个形状。
+    // ⚠️ 放在 advanceLoop **之前**：本帧的子步必须看得见最新的手，
+    // 放在之后会让"手进缸"的那一帧里所有生物都还在按旧位置决策（读起来慢半拍）。
+    input.poll(t);
 
     const steps = advanceLoop(loop, frameDt, state.timeScale);
     for (let i = 0; i < steps; i++) {
@@ -220,6 +257,7 @@ export function boot(opts) {
     world,
     viewport,
     bodies,
+    input,           // B17：暴露给 devtools 与测试取证（metrics 里那三个计数器）
     get frame() { return state.frame; },
     setTimeScale(scale) {
       // 只接受 CONFIG.timeScales 里的值：随手写个 3 或 10 会让子步进数暴涨，
@@ -233,7 +271,10 @@ export function boot(opts) {
     stop() {
       state.running = false;
       if (state.rafId) cancelAnimationFrame(state.rafId);
-      if (detachInput) detachInput();
+      // 解绑监听并把那只手从世界里**拿走**（onHand(null) 由 detach 内部送）。
+      // 少这一步的症状：stop 之后 world.playerHand 还留在最后一次按下的位置上，
+      // 而 main.js 已经不推进了 —— 计划 3 若复用同一个 world 做快照/换缸就会带进去。
+      input.detach();
       if (audio && audio.close) audio.close();
       window.removeEventListener('resize', resize);
       if (activeController === controller) activeController = null;
