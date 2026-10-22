@@ -7,6 +7,23 @@ import { KINSHIP, ensure } from './memory.js';
 // 它只用于生成唯一 id，不参与任何模拟决策，因此不影响可复现性。
 let eggSeq = 0;
 
+// 把卵编号**只向前**推到至少 n（读档路径专用，Task C-1 / sim.js 的 restoreWorld）。
+//
+// 上面那句"不影响可复现性"讲的是**同一个进程内**：新进程从 0 起。而存档接上之后出现了
+// 一个新场景 —— 一份跑了 200 分钟的档在新进程里读回来，里面已经有 e1…e87 这些编号，
+// 而计数器从 0 起，于是第一枚新卵就叫 `e1`，孵化出的个体叫 `c-e1`，**与档里已有的一只同名**。
+// byIdIn / memory.get 都按 id 取第一个，症状是"它记得的那只不是它妈"，全程不报错。
+// 把避让做成"从存档内容推导出来的确定值"顺带还回了一条性质：同一份档读十次，
+// 读完后下一个编号是同一个数 —— 这条由 tests/save.test.js 的 boot 级用例钉住。
+// 只前进不回退：回退会让同一进程里两批卵撞上彼此，那比读档更糟。
+export function reserveEggSeq(n) {
+  if (!Number.isInteger(n) || n < 0) {
+    throw new TypeError(`reserveEggSeq: 需要非负整数，收到 ${String(n)}`);
+  }
+  if (n > eggSeq) eggSeq = n;
+  return eggSeq;
+}
+
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 // ---------- 2026-10-20 孤雌改造：求偶整段删除 ----------

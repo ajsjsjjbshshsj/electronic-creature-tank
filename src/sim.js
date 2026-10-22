@@ -36,12 +36,12 @@ import {
   adjust as adjustMemory, decay as decayMemory, ensure as ensureMemory,
   affectionFor, PLAYER_ID, KINSHIP,
 } from './memory.js';
-import { createCreature, ageCreature, canBreed, sizeOf } from './creature.js';
+import { createCreature, ageCreature, canBreed, sizeOf, STAGES } from './creature.js';
 import { maybeSay } from './speech.js';
 import { recall } from './heard.js';
 import { mostUrgent } from './needs.js';
 import {
-  kinshipOf, crowdingFactor, layEggs, tickEgg, hatch, registerKinship,
+  kinshipOf, crowdingFactor, layEggs, tickEgg, hatch, registerKinship, reserveEggSeq,
 } from './breeding.js';
 import { decide, EAT_DIST, HAND_SPEED_POKE } from './behavior.js';
 
@@ -193,6 +193,157 @@ export function addCreature(world, c) {
   // 计划里那三条测试与 perceive 的网格实现互相矛盾，重建网格才让两边同时成立。
   // 代价是 O(n) 一次，而 addCreature 只在开缸与孵化时被调用（24 只的缸可以忽略）。
   rebuildGrid(world);
+}
+
+// ---------------------------------------------------------------- 读档（Task C-1）
+
+// 把一份**已经过 save.js 的 migrate() 与 assertCreatureShape()** 的裸对象装回一个已存在的世界。
+//
+// 为什么必须是**就地改写**而不是返回一个新世界：boot() 里三处握着 world 这一个引用 ——
+// renderer 与 audio 是每帧拿它读、input 的 onHand 回调往 `world.playerHand` 写、
+// API 档的闭包（attachApiTier）捕获的是同一个对象。换成新对象，症状是
+// "缸在跑，但画面、叫声与档位说的是另一缸"，而 world.playerHand 会写到一份没人读的物体上。
+//
+// 为什么这件事必须由内核提供而不是 main.js 自己塞字段（spec §7.2.1 的边界）：
+// "读档"要动的是世界状态的**构造**，而构造规则（哪些字段必须存在、编号怎么避让、
+// 网格要不要重建）全部住在本文件。让页面入口逐字段 poke 就等于把内核的形状契约
+// 复制第二份到唯一被纯度守卫豁免的文件里 —— 那份复制没人会记得同步。
+//
+// ⚠️ 入参必须是迁移过的：没迁移的存档里 memory 是裸数组、traits/thresholds 缺失，
+//    直接塞进世界的症状是第一 tick 由 refreshKinMemory 抛 "memory.entries is not iterable"，
+//    或由 decode 之外的某处读出 undefined。调用方（main.js）的读档路径把 migrate 与
+//    assertCreatureShape 放在同一个 try 里，所以那种 blob 到不了这里 —— 由探针保证这条不是注释。
+export function restoreWorld(world, doc) {
+  if (world === null || typeof world !== 'object' || !Array.isArray(world.creatures)) {
+    throw new TypeError('restoreWorld: 需要一个由 createWorld 造出的世界');
+  }
+  if (doc === null || typeof doc !== 'object' || !Array.isArray(doc.creatures)) {
+    throw new TypeError('restoreWorld: 存档必须是 migrate() 的输出（要有 creatures 数组）');
+  }
+  const w = doc.world || {};
+
+  // 种子与两条随机流：⚠️ **读回来的是一条全新的流**（从存档里那个 seed 重新起头），
+  // 不是"当时那一条流停在哪儿就从哪儿继续"—— save.js 里没有任何一条路径能把
+  // rng 闭包里的那个 `s` 写出去（JSON.stringify 给的是 `{}`）。
+  // 所以"存 → 读 → 跑 N tick"与"连跑 N tick"**不可能逐位相同**，
+  // 而把这句话写在这里而不是藏在测试注释里，是为了让下一个人不再去写那条假的逐位断言。
+  // 详见 spec §7.2.1 R-5。
+  const seed = Number.isFinite(w.seed) ? w.seed : world.seed;
+  world.seed = seed;
+  world.rng = createRng(seed);
+  world.speechRng = world.rng.fork();
+
+  world.time = Number.isFinite(w.time) ? w.time : 0;
+  world.nextDriftAt = Number.isFinite(w.nextDriftAt) ? w.nextDriftAt : world.driftInterval;
+  world.driftInterval = Number.isFinite(w.driftInterval) ? w.driftInterval : CONFIG.drift.interval;
+  world.driftCount = Number.isInteger(w.driftCount) ? w.driftCount : 0;
+
+  // ⚠️ `populationCap` **刻意不读存档**：上限由**这台设备**决定（桌面 24 / 手机 16），
+  // 而 createWorld 处那条"只在开缸时判定一次、之后不随 resize 改"的纪律讲的是同一个进程内。
+  // 跟着存档走会让一份在电脑上写的档把手机也顶到 24 只 —— 那是 §5.3 预算要防的那件事，
+  // 也与 §9.2 第 4 条（同一份档在两种屏上都合适）相反。
+  // 存档里的个体数**多于**本机上限时不杀任何一只：上限由 layEggs 的 `viable` 把关（见 addCreature），
+  // 所以症状是"这一缸暂时不生蛋"，而不是"读个档少了几只"。
+  if (typeof w.speechEnabled === 'boolean') world.speechEnabled = w.speechEnabled;
+
+  world.stats = {
+    births: 0, deaths: 0, hatchFailures: 0, generation: 1, driftIns: 0, emigrations: 0, said: 0,
+    ...(doc.stats || {}),
+  };
+
+  // 三个成员表整份替换（用 length=0 + push 保住数组引用：grid 里存的是下标，
+  // 而任何在 boot 之前就把 world.creatures 存进闭包的调用方都指望这是同一个数组）。
+  world.creatures.length = 0;
+  for (const c of doc.creatures) world.creatures.push(restoreCreature(c));
+  world.eggs.length = 0;
+  for (const e of (Array.isArray(doc.eggs) ? doc.eggs : [])) world.eggs.push({ ...e, pos: { ...e.pos } });
+  // 食物：存档里**有这一层**才替换。老档没这一层时保留 createWorld 撒下的那 12 份初始光藻，
+  // 否则读一个旧档会把缸凭空饿成饥荒 —— 那是"读档后更像会死"的静默劣化。
+  if (Array.isArray(doc.foods)) {
+    world.foods.length = 0;
+    for (const f of doc.foods) world.foods.push({ ...f, pos: { ...f.pos } });
+  }
+
+  // id 编号避让：eggSeq / foodSeq 是**模块级**计数器，新进程从 0 起（见本文件顶部与 breeding.js）。
+  // 不避让的话，读档后新产的卵会拿到 `e1` 这个**已经存在**的编号，孵化出的个体 id
+  // `c-e1` 于是也重复 —— 而 byIdIn / memory.get 都按 id 取**第一个**，
+  // 症状是"它记得的那只不是它妈"，全程不报错。这条正是 §7.2.1 R-1 那一族的兄弟：
+  // 存档接上之后才第一次变得可达，所以它属于"接线"要负责的后果，不是内核的旧账。
+  reserveIdSeqs(world);
+
+  rebuildGrid(world);
+  world.events.length = 0;
+  return world;
+}
+
+// 读档路径的**前置**校验：只查"这只装不装得进去"，一个字节都不改。
+// 为什么单独导出：main.js 的 load() 必须在**动世界之前**问这句话 ——
+// restoreWorld 是就地改写的，让它改到一半才抛，用户得到的是一缸被清掉一半的僵尸，
+// 而不是一缸干净的新缸。导出一份、两处用（load 与 restoreCreature 自己），
+// 免得校验规则长成两份各自漂移的清单。
+// 脏 stage 不拦的症状是"这只永远不能繁殖也不算成年"，跟迁移取默认值一样**完全没有症状**，
+// 所以这道防线必须在读档这条绕过 createCreature 的路上重设一遍。
+export function assertRestorable(doc) {
+  if (doc === null || typeof doc !== 'object' || !Array.isArray(doc.creatures)) {
+    throw new TypeError('restoreWorld: 存档必须是 migrate() 的输出（要有 creatures 数组）');
+  }
+  for (let i = 0; i < doc.creatures.length; i++) {
+    const c = doc.creatures[i];
+    if (c === null || typeof c !== 'object') {
+      throw new TypeError(`restoreWorld: 第 ${i} 个个体不是对象（收到 ${JSON.stringify(c)}）`);
+    }
+    if (typeof c.id !== 'string' || c.id === '') {
+      throw new TypeError(`restoreWorld: 个体缺 id（收到 ${JSON.stringify(c.id)}）`);
+    }
+    if (!STAGES.includes(c.stage)) {
+      throw new TypeError(`restoreWorld: ${c.id} 的 stage "${String(c.stage)}" 不在 STAGES 里：${STAGES.join(' / ')}`);
+    }
+  }
+}
+
+// 一只裸对象 → 一只能跑的生物。补的三类东西各有出处：
+//   · memory / traits / thresholds / speech / heard / catchphrase 由 save.migrate() 备齐，
+//     这里**不重做**（重做就是两份形状定义，正是 save.js 文件头禁止的那件事）；
+//   · 决策层与上升沿寄存器不入档（save.js 的 CREATURE_SKIP_FIELDS），在这里回到出厂值；
+//   · stage 必须是 STAGES 之一：createCreature 对显式 stage 设了这道防（creature.js 那条注释），
+//     而读档路径绕过了 createCreature，所以防线必须搬到这里来。脏 stage 不抛的话，
+//     症状是"这只永远不能繁殖也不算成年"，跟迁移取默认值一样**完全没有症状**。
+function restoreCreature(c) {
+  assertRestorable({ creatures: [c] });
+  const out = { ...c };
+  if (out.pos) out.pos = { ...c.pos };
+  if (out.vel) out.vel = { ...c.vel };
+  if (out.facing) out.facing = { ...c.facing };
+  out.intent = null;
+  out.intentTime = 0;
+  out.moving = false;
+  out.resting = false;
+  out.beingPetted = false;
+  out.beingPoked = false;
+  return out;
+}
+
+// 从 id 里读出已经用过的编号，把两个模块级计数器推到它们之外（只前进，不回退）。
+// 只认 `e<整数>` / `f<整数>` 这两种出厂形状，别的（`c-init-3`、`e-drift-2`）一律不参与：
+// 那些编号的来源是别处（初始投放与漂入计数），把它们混进这套避让就会**误读**。
+function reserveIdSeqs(world) {
+  let eggMax = 0;
+  let foodMax = 0;
+  const bump = (id, re, setter) => {
+    if (typeof id !== 'string') return;
+    const m = re.exec(id);
+    if (m) setter(Number(m[1]));
+  };
+  const eat = (n) => { if (n > eggMax) eggMax = n; };
+  const eatFood = (n) => { if (n > foodMax) foodMax = n; };
+  for (const e of world.eggs) bump(e.id, /^e(\d+)$/, eat);
+  for (const c of world.creatures) {
+    bump(c.id, /^c-e(\d+)$/, eat);         // 由卵孵出的个体：id 里嵌的就是那个卵的编号
+    bump(c.id, /^e(\d+)$/, eat);
+  }
+  for (const f of world.foods) bump(f.id, /^f(\d+)$/, eatFood);
+  if (eggMax > 0) reserveEggSeq(eggMax);
+  if (foodMax > foodSeq) foodSeq = foodMax;   // 本文件自己那一个，直接推
 }
 
 export function spawnFood(world, kind, pos) {

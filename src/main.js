@@ -63,13 +63,30 @@
 //   · **每个注入参数都有测试用它**（决策 E，B18 的反面教训）：options.fetch /
 //     options.storage 两个口子各有一条用例真的走它，另有一条用例证明**不注入**时
 //     走的就是 globalThis 上那两个真货。
+//
+// C-1（2026-10-22）接上的部分：存档落地（spec §7.2.1）。
+//   src/save.js 从计划 1 起就有全绿的 13 条单测，但整个页面**没有一条路径**能把一缸写出去
+//   再读回来 —— 于是 §9.2 第 5 条（关掉三天再打开，它们还在你离开的那一秒）不是"没验证"，
+//   而是结构性做不到。这一层接的就是那根断掉的线。分工照旧：
+//   挑哪些字段进档 = save.js 的 serialize()（纯变换，Node 里可测）；什么时候写、写不进怎么办 = 本文件。
+//   四条裁定各有一条 boot 级用例钉着（tests/save.test.js 末段），其中承重的那条是 R-1：
+//   · **读不懂的档绝不被覆盖**。坏档先**原样**挪进 `tank.save.v2.corrupt`，再开新缸；
+//     连挪都挪不动（存储写不了）就**永不再写主键** —— 症状从"我的缸没了"退成"这次没存上"，
+//     而前者是不可恢复的。`controller.saveState` 是唯一可读的证据。
+//   · **零定时器**（与 B19b-ii 的决策 B 同一条理由）：落盘骑在帧循环上，
+//     每 CONFIG.save.everySimSec **模拟**秒一次，外加 visibilitychange→hidden 与 pagehide 两次即时写。
+//   · **成本下限**：两次写入之间至少隔 minIntervalMs。满缸一次 serialize+stringify 实测
+//     中位 1.86ms / 最坏 4.22ms（约 160KB），而连点标签页会连着发 hidden —— 没有这道下限就是十几次同步写。
+//   · **读档保证的是状态的延续，不是随机流的延续**：rng 闭包里那个私有序列进不了 JSON
+//     （JSON.stringify 给的是 `{}`），所以这里**不许**写"存→读→跑 N tick 与连跑逐位相同"那种假断言。
 
 import { CONFIG } from './config.js';
-import { createWorld, tickWorld } from './sim.js';
+import { createWorld, tickWorld, restoreWorld, assertRestorable } from './sim.js';
 import { updateBodies, reconcileBodies } from './body.js';
 import { createRenderer, consumeEvents } from './render.js';
 import { attachInput } from './input.js';
 import { createAudio } from './audio.js';
+import { serialize, migrate, assertCreatureShape } from './save.js';
 import { tokenBudget } from './lexicon.js';
 import {
   createPending, pushPending, duePending, releasePending, resolvePending, clearGive,
@@ -434,6 +451,291 @@ function attachApiTier(world, opts) {
   };
 }
 
+// ---------------------------------------------------------------- 存档层（C-1，spec §7.2.1）
+
+// 两个键名都在 CONFIG.save 里（裁定 R-2）：键名住在常量表，tests/config.test.js 钉它，
+// 而 API 档那把 key 住在**另一个键**（tank.api.v1）且**永不进存档** —— 那条由
+// tests/api.test.js 的"落盘文本里搜不到 key"钉住，它测的就是下面这一条写入路径。
+const SAVE_KEY = CONFIG.save.key;
+const SAVE_CORRUPT_KEY = CONFIG.save.corruptKey;
+
+// 隔离失败那一类 blocked 值：**人的动作也不许穿过这道守卫**。
+// 'quota' / 'write-failed' 是暂时写不进（腾出空间后 saveNow() 该能重试），
+// 而 'quarantine-failed' / 'store-unreadable' 的含义是"主键下躺着一份我们读不懂、
+// 又挪不动的档" —— 那正是 R-1 要保住的东西，一次 devtools 里的"手滑一按"就能把它盖掉。
+const HARD_SAVED_BLOCKS = ['quarantine-failed', 'store-unreadable'];
+
+const isQuotaError = (err) => !!err && (
+  err.name === 'QuotaExceededError'
+  || err.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+  || err.code === 22 || err.code === 1014
+  || /quota/i.test(String(err.message || ''))
+);
+
+// 降级只许响一次。api 档里那个同名的局部实现是它的先例（§7.7 不许静默，
+// 而每帧刷屏在这个仓库里被抓过两次）；这里写成模块级而**不去改 api 档那一份**，
+// 因为那份的计数住在它自己的 stats.warned 里、有测试钉着，动它属于顺手重构。
+const savedWarnOnce = (bag, slot, msg) => {
+  if (bag[slot] > 0) return;
+  bag[slot] += 1;
+  console.warn(msg);
+};
+
+// 这台设备的存储到底是**根本没有**还是**一摸就抛**。
+// 前者不必吵（`saveState.enabled === false` 就是可读证据，而且用户对它无能为力），
+// 后者是降级（Safari 隐私模式读 localStorage 这个属性本身就抛），必须响一次。
+// globalStore() 把两种情况都归成 null —— 那是 api 档的形状，B19b-ii 的测试钉着它，不改；
+// 存档层需要区分，所以另给一个探针。
+const probeStore = () => {
+  try {
+    const s = globalThis.localStorage;
+    return {
+      store: (s && typeof s.getItem === 'function' && typeof s.setItem === 'function') ? s : null,
+      error: null,
+    };
+  } catch (err) {
+    return { store: null, error: String((err && err.message) || err) };
+  }
+};
+
+// 存档层的全部接线。**它必须在 createWorld 之前跑**：读到的那份档决定了种子用哪一颗
+// （裁定 R-7），而"seed Silently 赢了存档"是这一层最容易被写错的一行。
+// 返回的 doc 要么是一份迁移好的存档（调用方拿它去 restoreWorld），要么是 null（开新缸）。
+function attachSaveTier(probe, options) {
+  const S = CONFIG.save;
+  const store = options.storage !== undefined ? options.storage : probe.store;
+  const enc = new TextEncoder();     // 只用来量字节（saveState.bytes 是那条成本裁定的读数）
+  const warned = {};
+  const state = {
+    // ---- 裁定要求的这七个字段一个不多一个不少地都在（spec §7.2.1）----
+    enabled: options.save !== false && !!store,
+    source: 'fresh',                 // 'fresh' | 'restored' | 'corrupt-moved' | 'unreadable'
+    reason: null,                    // 机器可搜的原文；null = 一切正常
+    bytes: 0,                        // 最近一次**成功写入**的 utf8 字节数
+    writes: 0,
+    writeErrors: 0,
+    quotaHits: 0,
+    // ---- 同一条裁定里"可读的落盘状态"那半句要求的其余读数 ----
+    quarantined: false,              // 隔离区里是否真有一份原档（本次会话判定）
+    quarantineBytes: 0,
+    discarded: 0,                    // 第二次及以后的坏档：只计数，绝不覆盖已有的那份
+    blocked: null,                   // null | 'quarantine-failed' | 'store-unreadable' | 'quota' | 'write-failed'
+    reads: 0,
+    cleared: 0,                      // clearSave() 摘掉了几个键
+    bytesRead: 0,                    // 读到的那一份原文有多少 utf8 字节（诊断隔离区有多大）
+    events: false,                   // 那两条即时落盘的监听是否真的挂上了
+    lastSavedAtSim: 0,               // 最近一次成功落盘时的**模拟秒**
+    lastWriteAtMs: -Infinity,        // 最近一次成功落盘时的**墙上毫秒**（minIntervalMs 的下限就量它）
+    seed: { used: 0, requested: null, source: 'clock' },
+  };
+  // 探针分得出两种"没有存储"：这台设备**根本没有**（不吵，enabled=false 就是证据），
+  // 与**一摸就抛**（Safari 隐私模式）。后者是降级，必须响一次（§7.7）。
+  if (!store && probe.error) {
+    state.enabled = false;
+    state.source = 'unreadable';
+    state.blocked = 'store-unreadable';
+    state.reason = probe.error;
+    savedWarnOnce(warned, 'read',
+      `本机存储一摸就抛（${probe.error}）：存档通道关掉，缸照常跑；本次会话不读也不写任何键。`);
+  }
+
+  // 把一份读不懂的原档**原样**挪进隔离区。R-1 的承重语句在这一段里。
+  const quarantine = (raw) => {
+    let existing = null;
+    try {
+      state.reads += 1;
+      existing = store.getItem(SAVE_CORRUPT_KEY);
+      if (existing === null || existing === undefined || existing === '') {
+        store.setItem(SAVE_CORRUPT_KEY, raw);   // **一个字节都不改**：改了它就不再是证据
+        state.quarantined = true;
+        state.quarantineBytes = enc.encode(raw).length;
+      } else {
+        // 隔离区已经有一份了：**留最早那一份**，这一次挪进来的丢弃并计数。
+        // 一个会被第二次失败覆盖掉的隔离区就不是隔离区了，而"最早那份"恰恰是
+        // 玩家真正失去的那一缸（新的这份本来就写不进第二遍）。
+        state.quarantined = true;
+        state.discarded += 1;
+      }
+      state.source = 'corrupt-moved';
+      state.blocked = null;
+    } catch (err) {
+      // 挪不动 ⇒ 那份读不懂的原档**还躺在主键下**。此时唯一安全的动作是永不再写这个键：
+      // 覆盖它 = 玩家失去唯一的副本，而这正是本条裁定要让它不可能发生的那个序列。
+      const move = String((err && err.message) || err);
+      state.source = 'unreadable';
+      state.blocked = 'quarantine-failed';
+      state.reason = `${state.reason || ''}；坏档挪不开（${move}）：此后不再写主键`;
+      savedWarnOnce(warned, 'quarantine',
+        `存档读不出来、也挪不开（${state.reason}）：这一缸只在内存里跑，落盘已停止 —— 不改写上一次的存档。`);
+    }
+  };
+
+  // 一次读取 + 迁移 + 自检。**"任何一步失败"都算失败**：坏 JSON、比本程序新的版本、
+  // 缺 creatures、过了 migrate 但过不了 assertCreatureShape（缺字段的记忆条目、脏 role）、
+  // 以及被配额截断写到一半的那份。失败之后走的都是 quarantine 那一条路。
+  const load = () => {
+    if (!state.enabled) return null;
+    let raw = null;
+    try {
+      raw = store.getItem(SAVE_KEY);
+      state.reads += 1;
+    } catch (err) {
+      // 连读都读（隐私模式）：整条通道按 save:false 处理，缸照常跑，响一次。
+      state.enabled = false;
+      state.source = 'unreadable';
+      state.blocked = 'store-unreadable';
+      state.reason = String((err && err.message) || err);
+      savedWarnOnce(warned, 'read',
+        `本机存储读不出来（${state.reason}）：存档通道关掉，缸照常跑；本次会话不读也不写任何键。`);
+      return null;
+    }
+    if (raw === null || raw === undefined || raw === '') {
+      state.source = 'fresh';       // 存储里什么都没有 ⇒ 新缸，什么都没被动过
+      return null;
+    }
+    const bytesOfRaw = enc.encode(String(raw)).length;
+    let doc = null;
+    try {
+      doc = migrate(JSON.parse(String(raw)));
+      for (let i = 0; i < doc.creatures.length; i++) assertCreatureShape(doc.creatures[i]);
+      // ⚠️ 这道必须在这里、**动世界之前**：restoreWorld 是就地改写的，
+      // 让它改到一半才抛，玩家拿到的是一缸被清掉一半的僵尸而不是一缸干净的新缸。
+      // 复核时这条测试一写出来就红了 —— 坏档当时能穿过 load()、在 boot 里炸掉整个页面。
+      assertRestorable(doc);
+    } catch (err) {
+      doc = null;
+      state.reason = String((err && err.message) || err);
+    }
+    if (doc) {
+      state.source = 'restored';
+      state.bytesRead = bytesOfRaw;
+      return doc;
+    }
+    state.bytesRead = bytesOfRaw;
+    quarantine(String(raw));
+    return null;
+  };
+
+  const doc = load();
+
+  let world = null;
+  let clockMs = 0;
+  let getPacing = () => 1;           // 倍速的唯一读数在 main 的 state 里；内核不认它，所以由 attach 传进来
+
+  // 一次落盘。`why` 只影响两件事：manual 不受 minIntervalMs 的下限管，
+  // 也不受 'quota'/'write-failed' 那两类**暂时**失败的限制（见 HARD_SAVED_BLOCKS 那条注释）。
+  const write = (why, tMs) => {
+    if (!world || !state.enabled) return 0;
+    if (state.blocked && HARD_SAVED_BLOCKS.includes(state.blocked)) return 0;
+    if (why !== 'manual' && Number.isFinite(state.lastWriteAtMs)
+      && tMs - state.lastWriteAtMs < S.minIntervalMs) return 0;
+    let text;
+    let bytes;
+    try {
+      // serialize 只挑字段、不读时钟（它是纯函数，Node 里可 deepEqual）；
+      // 墙上时间戳由这里给，而 §7.4 明写"恢复时不补算流逝时间"⇒ savedAt 只是给人看的证据。
+      text = JSON.stringify(serialize(world, {
+        savedAt: new Date(Date.now()).toISOString(),
+        timeScale: getPacing(),
+      }));
+      bytes = enc.encode(text).length;
+    } catch (err) {
+      state.writeErrors += 1;
+      state.reason = `序列化失败：${String((err && err.message) || err)}`;
+      savedWarnOnce(warned, 'serialize', `${state.reason}：这一缸落不了盘，其余照常。`);
+      return 0;
+    }
+    try {
+      store.setItem(SAVE_KEY, text);
+    } catch (err) {
+      state.writeErrors += 1;
+      if (isQuotaError(err)) {
+        state.quotaHits += 1;
+        state.blocked = 'quota';
+      } else {
+        state.blocked = 'write-failed';
+      }
+      // **不再重试**：一次 160KB 的同步写失败之后，每 30 模拟秒再撞一次是纯成本；
+      // 更要紧的是"写到一半"的猜想 —— 主键若被截断成一份读不懂的档，下一次开缸就得走
+      // 隔离那条路，而那份档里的这一缸是真的没了。停手 + 把 blocked 挂出来是更诚实的形状。
+      const why2 = `存档写不进本机存储（${String((err && err.message) || err)}）`;
+      // 读档那一步的原因**不许被写盘那一步盖掉**：saveState 是这一层唯一的证据，
+      // 少了前半句就分不清"这份档本来就坏"与"这台设备满了"。
+      state.reason = state.reason ? `${state.reason}；${why2}` : why2;
+      savedWarnOnce(warned, 'write',
+        `${state.reason}：此后停止落盘，缸照常跑；已存的那一份保持原样不动。`);
+      return 0;
+    }
+    state.writes += 1;
+    state.bytes = bytes;
+    state.blocked = null;
+    state.lastWriteAtMs = tMs;
+    state.lastSavedAtSim = world.time;
+    return bytes;
+  };
+
+  // 帧循环里的那一眼（裁定 R-3：**没有 setInterval**）。
+  // 判据是**模拟秒**，所以 4× 倍速不会改变"缸推进了 30 秒才写一次"这件事；
+  // 墙上时钟那道具体的间隔交给 minIntervalMs（R-4），它兜的是事件那两条路。
+  const frame = (tMs) => {
+    clockMs = Number.isFinite(tMs) ? tMs : clockMs;
+    if (!state.enabled || state.blocked) return;
+    if (world.time - state.lastSavedAtSim >= S.everySimSec) write('cadence', clockMs);
+  };
+
+  const onVisibility = () => {
+    // 只在**转去后台**那一刻写。手机切后台太常见了，而 rAF 一到后台就停 ——
+    // 不补这一笔，"最后 30 模拟秒"就永远留在内存里（§7.3 那两句的原样理由）。
+    if (globalThis.document && globalThis.document.visibilityState === 'hidden') write('hidden', clockMs);
+  };
+
+  const onPageHide = () => { write('pagehide', clockMs); };
+
+  const attach = (w, pacing) => {
+    world = w;
+    if (typeof pacing === 'function') getPacing = pacing;
+    state.lastSavedAtSim = w.time;      // 读档进来的缸：从"它当前那一刻"起算下一次落盘
+    if (!state.enabled || state.blocked) return;
+    const d = globalThis.document;
+    const win = globalThis.window;
+    // ⚠️ 两处都要 typeof 守卫：visibilitychange **只挂在 document 上**（挂 window 收不到），
+    // 而测试桩里的 document 未必有 addEventListener —— 少这一行守卫就是整套 boot 测试当场炸。
+    if (d && typeof d.addEventListener === 'function') d.addEventListener('visibilitychange', onVisibility);
+    if (win && typeof win.addEventListener === 'function') win.addEventListener('pagehide', onPageHide);
+    state.events = true;
+  };
+
+  const detach = () => {
+    const d = globalThis.document;
+    const win = globalThis.window;
+    if (d && typeof d.removeEventListener === 'function') d.removeEventListener('visibilitychange', onVisibility);
+    if (win && typeof win.removeEventListener === 'function') win.removeEventListener('pagehide', onPageHide);
+    state.events = false;
+  };
+
+  return {
+    state, doc, attach, detach, frame,
+    saveNow() { return write('manual', clockMs); },
+    clearSave() {
+      if (!store) return 0;
+      let removed = 0;
+      for (const key of [SAVE_KEY, SAVE_CORRUPT_KEY]) {
+        try {
+          if (store.removeItem) { store.removeItem(key); removed += 1; }
+        } catch (err) {
+          savedWarnOnce(warned, 'clear',
+            `清档失败（${String((err && err.message) || err)}）：那一个键可能还在，下一次开缸仍会读到它。`);
+        }
+      }
+      state.cleared = removed;
+      // 主键空了 ⇒ "不许覆盖读不懂的档"这道禁令的前提消失了，允许重新落盘。
+      if (state.blocked === 'quarantine-failed' || state.blocked === 'store-unreadable') state.blocked = null;
+      if (removed > 0) { state.lastSavedAtSim = world ? world.time : 0; state.lastWriteAtMs = -Infinity; }
+      return removed;
+    },
+  };
+}
+
 // ---------------------------------------------------------------- 活动 controller
 
 let activeController = null;
@@ -478,11 +780,40 @@ export function boot(opts) {
   const cap = options.populationCap
     || CONFIG.populationCap[coarse ? 'mobile' : 'desktop'];
 
-  // 种子：不给就用启动时刻。用 Date.now 而不是 Math.random ——
-  // 后者被 tests/constraints.test.js 全局禁止，而"每次开缸都不一样"是想要的行为，
-  // 时间源足以提供它，且计划 3 会把 seed 存进 save.json 以便复现。
-  const seed = options.seed !== undefined ? options.seed : (Date.now() >>> 0);
+  // 存档层**必须跑在 createWorld 之前**（裁定 R-7）：读回来的那份档决定种子用哪一颗。
+  // ⚠️ 探针也要在这一步之后才摸 globalThis：options.save === false 时连**属性访问**都不许有
+  //    （Safari 隐私模式下光是读 globalThis.localStorage 就会抛），而 options.storage 给了就用给的。
+  const probe = (options.save === false || options.storage !== undefined)
+    ? { store: options.storage === undefined ? null : options.storage, error: null }
+    : probeStore();
+  const save = attachSaveTier(probe, options);
+
+  // 种子：存档优先 → boot 传入 → 启动时刻。
+  // ⚠️ 中间那一步是**让位**而不是覆盖：`boot({ seed })` 在有档的时候不能再"总是开新缸"，
+  // 否则计划 3 每次传 seed 都会把玩家那一缸悄悄扔掉（而 saveState 之外没有任何地方看得见）。
+  // 谁赢了要写进 saveState.seed —— 这就是裁定 R-7 要的"记下用的是哪一颗"。
+  // 用 Date.now 而不是 Math.random：后者被 tests/constraints.test.js 全局禁止，
+  // 而"每次开缸都不一样"是想要的行为，时间源足以提供它。
+  const requested = options.seed !== undefined ? options.seed : null;
+  const savedSeed = save.doc && Number.isFinite(save.doc.world.seed) ? save.doc.world.seed : null;
+  const seed = savedSeed !== null ? savedSeed : (requested !== null ? requested : (Date.now() >>> 0));
+  save.state.seed = {
+    used: seed,
+    requested,
+    source: savedSeed !== null ? 'save' : (requested !== null ? 'boot' : 'clock'),
+  };
   const world = createWorld({ seed, populationCap: cap });
+
+  // 读档：把迁移好的那份**装进**刚建好的世界（就地改写，理由见 sim.js 的 restoreWorld 头部）。
+  // 顺序要紧的两点：① 必须晚于 createWorld（那里撒了初始光藻与 8 只个体，restoreWorld 清掉它们）；
+  // ② 必须早于 renderer（它拿的是 world.rng.fork()，读档会把那条流换成新的）。
+  let restoredTimeScale = 1;
+  if (save.doc) {
+    restoreWorld(world, save.doc);
+    // 倍速跟着存档走（§7.2 里 world.timeScale 那一行的唯一消费点）：只认 CONFIG.timeScales 的值，
+    // 脏值就当没写过 —— 静默接受一个 1e6 会把子步进数打爆（setTimeScale 那条守卫同理）。
+    if (CONFIG.timeScales.includes(save.doc.world.timeScale)) restoredTimeScale = save.doc.world.timeScale;
+  }
 
   // viewport 只存几何量（width/height/dpr/scale）。scale 是"世界单位 → CSS 像素"，
   // 由短边推导并 clamp（spec §3.4-2，算法在下面的 createViewport 里，Node 可测）。
@@ -493,7 +824,8 @@ export function boot(opts) {
   // Body 表：id → 软体状态（视状态，不进存档）。一次创建、终身复用同一个 Map，
   // 里面只在出生时增长 —— 见 body.js 的 updateBodies / reconcileBodies 注释。
   const bodies = new Map();
-  const state = { frame: 0, timeScale: 1, lastT: -1, rafId: 0, running: true };
+  // timeScale 的初值来自存档（C-1）：没有档可读时是 1，与 B11 以来的行为逐字节相同。
+  const state = { frame: 0, timeScale: restoredTimeScale, lastT: -1, rafId: 0, running: true };
 
   // 渲染层（B13：水体层；B14：生物六层）。options.renderer 的注入口保留 —— 测试要用 spy 替掉它。
   // makeCanvas 是本文件**唯一**允许创建可绘制对象的地方：render.js 拿到的是
@@ -658,6 +990,13 @@ export function boot(opts) {
     // 等下一帧就晚了一帧），只有减员需要按世界成员身份扫一遍，而它是每帧一次的事。
     if (steps > 0) reconcileBodies(bodies, world);
 
+    // 落盘那一眼（C-1，裁定 R-3）。放在子步循环**之后**：要存的是本帧推进完的世界，
+    // 放之前就会每次都少存一帧（最多差一个 fixedDt = 16.7 模拟毫秒，看不见，但没必要留)。
+    // ⚠️ 这一眼可能吃掉一整帧的成本（实测满缸 serialize+stringify 中位 1.86ms、最坏 4.22ms，
+    //    再加一次同步的 localStorage 写），所以它**必须**由 everySimSec 与 minIntervalMs 两道闸拦住 ——
+    //    这里的分支只是"够不够 30 模拟秒"这一次数值比较，没到点时一个字节都不做。
+    save.frame(t);
+
     state.frame += 1;
 
     // 绘制。canvas 保持透明，水体渐变由 CSS 的 body 背景透出（spec §3.4-5），
@@ -721,6 +1060,17 @@ export function boot(opts) {
       return audio.getMuted();
     },
     get frame() { return state.frame; },
+    // ---- 存档层（C-1，裁定 R-6：计划 2 没有 HUD，所以这三个就是唯一的入口）----
+    // `__tank.saveState` 是这一层**唯一**的可读证据（与 audioState 同形）：
+    // source 说这次开缸读到了什么，bytes/writes/quotaHits 说落盘的代价与失败，
+    // quarantined/discarded 说那份读不懂的档现在在哪儿。
+    save,
+    saveState: save.state,
+    // 立刻落一次盘（跳过 minIntervalMs 那道节流，但**不跳过** R-1 那道守卫：
+    // 'quarantine-failed'/'store-unreadable' 时它返回 0 并什么都不写）。返回写入的字节数。
+    saveNow() { return save.saveNow(); },
+    // 两个键**都**摘掉：只清主键会把隔离区里那份留成孤儿，而它再也没人读了。
+    clearSave() { return save.clearSave(); },
     // ---- 可选 API 档（B19b-ii）----
     // 档位的全部读数：`{ pending, state, stats, getApiConfig, setApiConfig, frame, abandon }`。
     // 计划 2 没有设置页，所以填端点与 key 的入口就是这两个方法（spec §4.13.2.1 第 6 条），
@@ -758,6 +1108,11 @@ export function boot(opts) {
       // 这一步之后不可能再有"迟到的回复把字塞进气泡池"那一幕 —— 因为本文件从头到尾
       // **没有一个定时器**：交付只发生在 step() 里，而 step() 已经不跑了（决策 B）。
       api.abandon();
+      // 存档层（C-1）：**只摘监听，不落盘**（裁定 R-3 的最后一句，spec §7.2.1 里写着理由）。
+      // stop() 是 devtools 与测试的收尾入口，不是浏览器的收尾入口 —— 后者是 pagehide，
+      // 而那条**已经**会落一次盘。让 stop() 也写就会出这样一幕：一缸被测试泵出来的
+      // 假世界盖掉玩家真读过的那一份 —— 恰好是 R-1 禁止的那个形状。
+      save.detach();
       window.removeEventListener('resize', resize);
       if (activeController === controller) activeController = null;
     },
@@ -765,6 +1120,11 @@ export function boot(opts) {
 
   window.addEventListener('resize', resize);
   resize();
+  // 存档层的挂载点在这里而不是别处：`getPacing` 要读的是**上面那个 state**，
+  // 而两条即时落盘的监听必须等到 controller 拼好、world 已经装完才挂（早挂一步，
+  // 监听器就会在一个还没有 bodies / renderer 的世界里落一次盘 —— 那份档本身没问题，
+  // 但 saveState 的读数会指向一个还没装配完的缸，取证时会把自己绕进去）。
+  save.attach(world, () => state.timeScale);
   activeController = controller;
   state.rafId = requestAnimationFrame(step);
   return controller;
