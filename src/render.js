@@ -53,6 +53,12 @@ import {
   eyeParamsInto, eyeAnchorsInto, blushFor,
   pupilColor, eyeWhiteColor, eyeHighlightColor, blushColor,
 } from './eyes.js';
+// 第 8 层（B19a）：排队、折行、淡出曲线的**全部算术**在 src/bubble.js（纯函数、Node 里全测），
+// 本文件只做事件入口与绘制。分工与上面 eyes.js 那条完全同形，理由也一样：
+// 「同屏最多 2 个」「溢出丢最旧的」「最多 2 行」是**值**层面的判据，混进绘制路径就只剩次数证据。
+import {
+  bubblePoolCapacity, createBubbles, pushSay, advanceBubbles, bubbleFade,
+} from './bubble.js';
 
 // ⚠️ B14 交付**分层身体的第 1/2/3/4/5/7 层**，B15（2026-10-21）补上第 6 层（spec §5.1 由内到外）：
 //   1 光晕 → 2 不透明本体 → 3 花纹（绣在毛里）→ 4 体内亮区（透过毛看到的一片）
@@ -1097,13 +1103,20 @@ export function consumeEvents(renderer, events) {
       case 'eggFailed':                          // sim.js:879 / 919
         burst(renderer, ev.pos.x, ev.pos.y, 3, 5);
         break;
+      case 'say':                                // sim.js:627 —— 第 8 层气泡（B19a）
+        // 只有 kind/id/text/tokens/mood 五个字段被用；mood **不**参与气泡样式
+        // （spec §4.13.1 说样式跟 fluff 走，而「跟着心情变色」会把文字通道又变成
+        //  身体通道的复读机，那正是 §9.2 第 7 条要防的）。所以这里刻意不读它。
+        // ⚠️ 关掉文字层时**连队列都不进**：不然静音期间攒下的旧句子会在重新打开的
+        // 那一帧一次性喷出来 —— 那是弹幕，而弹幕是这个项目最该避免的东西。
+        if (renderer.speechEnabled) pushSay(renderer.bubbles, ev, renderer.time);
+        break;
       // 以下六种在**这一层**没有对应的画面，各有各的理由（不是漏掉）：
       case 'laid':                               // 没有 pos（只有 id 与枚数）；卵本身就画在缸底
       case 'dissolved':                          // 个体已被 splice，溶散动画早播完了
       case 'emigrate':                           // 漂走不是死亡（不记 deaths、不发 death）
       case 'drift':                              // 漂入的是**卵**，由 drawEggs 画；事件里没 pos
       case 'eat':                                // 进食的读出通道是需求条与情绪，不是粒子
-      case 'say':                                // 那是第 8 层气泡的活（B19）
         break;
       default:
         break;
@@ -1328,6 +1341,11 @@ const FLUFF_RGB = (() => {
   const n = parseInt(CONFIG.colors.mote.slice(1), 16);
   return [String((n >> 16) & 255), String((n >> 8) & 255), String(n & 255)];
 })();
+// 描边那一档比碎边更浅（同样是 CONFIG 里的既有颜色，从它推导而不是再抄一份字面量）。
+const EYE_WHITE_RGB = (() => {
+  const n = parseInt(CONFIG.colors.eyeWhite.slice(1), 16);
+  return [String((n >> 16) & 255), String((n >> 8) & 255), String(n & 255)];
+})();
 const FLUFF_TIPS = 120;
 
 function buildFluffSprites(renderer) {
@@ -1372,6 +1390,191 @@ function buildFluffSprites(renderer) {
   }
 }
 
+
+// ---------------------------------------------------------------- 第 8 层：语言气泡（B19a）
+//
+// spec §5.1 的层序里它在最上面（第 8 层），§4.13.1 那句「显示纪律」是它唯一的需求来源：
+//   浮在头顶 / 最多 2 行 / 字号 ≥14px / 3 秒淡出 / 样式跟 fluff 走（浅色描边，像绣在毛上）/
+//   同一时刻屏上最多 2 个，其余排队。
+// **排队、折行、淡出曲线全部在 src/bubble.js（纯函数，Node 里直接断值）**，本文件只做两件事：
+// 把事件送进池子（consumeEvents）、把池子里那两条画出来。分工与 B15 的 eyes.js 同形。
+//
+// ⚠️ 四条账单，每条都有测试钉着：
+//   · `fillText` 每帧 ≤ onscreenMax × bubbleMaxLines = **4 笔**（超出就是弹幕）。
+//   · **零 `drawImage`、零新建 sprite**：给每条气泡预渲染一张贴图会动 B14 立的「每只每帧恰好
+//     7 次贴图」上界，而那三条是 spec §5.3 的机器证据。文本走 measureText + 路径 + fillText。
+//   · **零 `quadraticCurveTo`**、贝塞尔只来自身体轮廓那一段 ⇒ 圆角用 `arc` 画。
+//   · **不写世界一个字节**：`c.bubble` / `world.bubbles` 都不存在（spec §7.2 明文，
+//     唯一例外是 catchphrase，它不归这层管）。状态在 renderer.bubbles 那份池子里，
+//     每帧从 say 事件与 renderer.time 推导。
+//
+// ⚠️ 颜色常量**必须**在 FLUFF_RGB 之后定义（模块求值顺序，TDZ）：样式跟 fluff 走的字面实现
+// 就是「气泡底与毛尖碎边取同一个浅色」，所以在同一个文件里推导、不再抄一份十六进制。
+
+const BUBBLE_S = CONFIG.speech;
+// 字号是 **CSS 像素**：main.js 每帧先把上下文缩放到 dpr，所以绘制坐标与字号
+// 都已经在 CSS 空间里。写成模块常量而不是每次拼字符串，同时钉住了两件事：
+// 每帧零分配，以及 dpr 永远进不了字号（手机上 14px 被乘成 4.7px 那种错法在这里做不到）。
+export const BUBBLE_FONT = `${BUBBLE_S.bubbleFontPx}px "PingFang SC", "Hiragino Sans GB", `
+  + '"Microsoft YaHei", system-ui, sans-serif';
+export const BUBBLE_FILL = `rgba(${FLUFF_RGB[0]}, ${FLUFF_RGB[1]}, ${FLUFF_RGB[2]}, 0.86)`;
+export const BUBBLE_STROKE = `rgba(${EYE_WHITE_RGB[0]}, ${EYE_WHITE_RGB[1]}, ${EYE_WHITE_RGB[2]}, 0.95)`;
+// 墨色取瞳孔那一档深靛紫（与眼睛同源）：浅底深字才读得完那两行。
+export const BUBBLE_INK = (() => {
+  const n = parseInt(CONFIG.colors.pupil.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, 1)`;
+})();
+
+// 身体包围盒的**顶边**（屏幕 CSS 像素）。与 writeBodyScreen 用同一条变换公式
+// （sy = cy + (p.x·sin + p.y·cos) · r · squashV），所以它就是画出来的那一圈点的最高点。
+// 为什么不复用 renderer.sx/sy 里那份现成的坐标：那是**逐只覆盖**的复用数组（绘制不可重入），
+// 生物循环走完之后里面只剩最后一只。重算是这里唯一的选择，而代价是有界的：
+// 每帧最多 2 条气泡 × 24 点 = 48 次算术，零分配。
+export function bodyTopY(body, cx, cy, r, ca, sa, squashV) {
+  const vy = Number.isFinite(squashV) && squashV > 0 ? squashV : 1;
+  const pts = body.points;
+  let top = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const y = cy + (p.x * sa + p.y * ca) * r * vy;
+    if (Number.isFinite(y) && y < top) top = y;
+  }
+  return Number.isFinite(top) ? top : cy;
+}
+
+// 气泡底边（毛尖之上）的锚点 y。
+//
+// ⚠️ 这是设计判断 5 的全部：位置跟的是**绘制几何**，不是 c.pos。B16 之后身体会竖向抬升
+// （跳）与上浮（溶散），钉在 c.pos 上的气泡会留在原地 —— 症状是「它跳起来了，话掉在地上」。
+// 这里的 lift / rise / expand / squashV 与 drawCreature 走**同一组纯函数**，
+// 所以它不是第二条时钟、也不是第二套公式，只是把那些公式对这一只重跑一遍。
+export function bubbleAnchorY(renderer, c, body, viewport) {
+  const worldR = radiusPx(c, viewport);
+  if (!(worldR > 0.5)) return Number.NaN;
+  const cx = screenX(c.pos.x, viewport);
+  const worldCy = screenY(c.pos.y, viewport);
+  if (!Number.isFinite(cx) || !Number.isFinite(worldCy)) return Number.NaN;
+  const t = dissolveT(c);
+  const dying = t > 0;
+  const p = hopProgress(c);
+  const squashV = hopSquashAt(p);
+  const activity = c.traits && c.traits.personality ? c.traits.personality.activity : 0;
+  const lift = hopLiftAt(p, hopImpulse(activity)) * worldR;
+  const rise = dying ? dissolveLiftOf(t) * viewport.height : 0;
+  const r = worldR * (dying ? dissolveExpandOf(t) : 1);
+  const cy = worldCy - lift - rise;
+  const ca = Number.isFinite(c.facing.x) ? c.facing.x : 1;
+  const sa = Number.isFinite(c.facing.y) ? c.facing.y : 0;
+  // 毛尖还要伸出 body.points 之外（碎边 sprite 的半径），不然第一行字会压在毛上。
+  return bodyTopY(body, cx, cy, r, ca, sa, squashV) - (fluffOuterRadius(r, body.fluffLen) - r);
+}
+
+// 把气泡框夹回视口内（原地写 out，返回新对象就是每帧一次分配）。
+// 贴边的个体不该被裁掉半句话 —— 而「裁掉」在桩里看不见，所以这条只能断值，不断像素。
+export function bubbleBoxInto(out, x, y, w, h, viewport) {
+  const ww = Number.isFinite(w) && w > 0 ? w : 0;
+  const hh = Number.isFinite(h) && h > 0 ? h : 0;
+  let bx = Number.isFinite(x) ? x : 0;
+  let by = Number.isFinite(y) ? y : 0;
+  if (bx + ww > viewport.width) bx = viewport.width - ww;
+  if (bx < 0) bx = 0;
+  if (by + hh > viewport.height) by = viewport.height - hh;
+  if (by < 0) by = 0;
+  out.x = bx;
+  out.y = by;
+  out.w = ww;
+  out.h = hh;
+  return out;
+}
+
+// 圆角矩形：四条直边 + 四个 `arc`。**不用** quadraticCurveTo（B14 那条「恒 0」的上界）
+// 也不用 ctx.roundRect（老 Safari 没有，而 spec §7.7 要求这条路在手机上照样成立）。
+function traceBubbleBox(ctx, x, y, w, h, rad) {
+  const rr = Math.max(0, Math.min(rad, w * 0.5, h * 0.5));
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.arc(x + w - rr, y + rr, rr, -Math.PI * 0.5, 0);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.arc(x + w - rr, y + h - rr, rr, 0, Math.PI * 0.5);
+  ctx.lineTo(x + rr, y + h);
+  ctx.arc(x + rr, y + h - rr, rr, Math.PI * 0.5, Math.PI);
+  ctx.lineTo(x, y + rr);
+  ctx.arc(x + rr, y + rr, rr, Math.PI, Math.PI * 1.5);
+  ctx.closePath();
+}
+
+const findCreature = (creatures, id) => {
+  for (let i = 0; i < creatures.length; i++) if (creatures[i].id === id) return creatures[i];
+  return null;
+};
+
+// 第 8 层，画在**所有东西之后**（spec §5.1：气泡是最上面那一层）。
+// 关掉文字层时这一层直接收摊：一条都不画、一个字都不量，其余七层逐笔不变 ——
+// 那是 spec §9.2 第 7 条在这一层的落点，由 tests/render-bubble.test.js 的序列前缀断言守住。
+function drawBubbleLayer(ctx, renderer, world, bodies, viewport) {
+  const b = renderer.bubbles;
+  if (!renderer.speechEnabled) { b.count = 0; return; }
+  if (b.count === 0) return;
+  const S = CONFIG.speech;
+  // 文本框的可用宽度：视口宽的一个比例，减掉左右内边距。按视口而不是按像素写死，
+  // 是为了让手机上那句「两行」真的还能是两行（而不是被裁成一行的半截）。
+  const textW = Math.max(S.bubbleFontPx, viewport.width * S.bubbleMaxWidthFrac - 2 * S.bubblePadding);
+  const on = advanceBubbles(b, renderer.time, textW, ctx);
+  const box = renderer.bubbleRect;
+  const lineH = S.bubbleFontPx + S.bubbleLineGap;
+  for (let rel = 0; rel < on; rel++) {
+    const idx = rel;                    // 稠密池子：第 rel 条就在第 rel 格（见 bubble.js 头）
+    const c = findCreature(world.creatures, b.id[idx]);
+    // 说话的那只已经不在了（刚被 splice 掉）：这句不画，剩下的活由 TTL 收尸，不抛。
+    if (c === null || !bodies || !bodies.get) continue;
+    const body = bodies.get(c.id);
+    if (!body) continue;
+    const lines = b.lineCount[idx];
+    if (lines <= 0) continue;
+    const anchor = bubbleAnchorY(renderer, c, body, viewport);
+    if (!Number.isFinite(anchor)) continue;
+    const alpha = bubbleFade(renderer.time - b.shownAt[idx]);
+    if (!(alpha > 0)) continue;
+    const cx = screenX(c.pos.x, viewport);
+    const bw = b.boxW[idx];
+    const bh = lines * S.bubbleFontPx + (lines - 1) * S.bubbleLineGap + 2 * S.bubblePadding;
+    // 框底落在毛尖之上，中间那一段空隙由一个小三角填掉：两条气泡同时挂在一缸头上时，
+    // 「这句是谁说的」必须靠几何而不是靠猜。
+    const bottom = anchor - S.bubbleHeadGap;
+    bubbleBoxInto(box, cx - bw * 0.5, bottom - bh, bw, bh, viewport);
+    const rad = S.bubblePadding;
+    ctx.save();
+    ctx.fillStyle = BUBBLE_FILL;
+    ctx.strokeStyle = BUBBLE_STROKE;
+    ctx.lineWidth = S.bubbleStroke;
+    ctx.font = BUBBLE_FONT;
+    ga(ctx, alpha, 1);
+    traceBubbleBox(ctx, box.x, box.y, box.w, box.h, rad);
+    ctx.fill();
+    ctx.stroke();
+    // 指向脑袋的那三笔：三角尖正好落在毛尖上（anchor），底边贴在框底。
+    const tx = Math.min(Math.max(cx, box.x + rad), box.x + box.w - rad);
+    ctx.beginPath();
+    ctx.moveTo(tx - S.bubbleHeadGap * 0.6, bottom);
+    ctx.lineTo(tx, anchor);
+    ctx.lineTo(tx + S.bubbleHeadGap * 0.6, bottom);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = BUBBLE_INK;
+    const ws = b.widths[idx];
+    const ls = b.lines[idx];
+    const baseline0 = box.y + S.bubblePadding + S.bubbleFontPx;
+    for (let k = 0; k < lines; k++) {
+      const t = ls[k];
+      if (t === '') continue;
+      // 每行自己居中，不用 textAlign：桩与老浏览器的 textAlign 支持不一致，而这里是三次减法。
+      ctx.fillText(t, box.x + (box.w - ws[k]) * 0.5, baseline0 + k * lineH);
+    }
+    ctx.restore();
+  }
+}
 
 // ---------------------------------------------------------------- 微粒对象池
 
@@ -1475,6 +1678,13 @@ export function createRenderer(opts) {
       stretchH: 1,        // 它的横向补偿 = 1/squashV（体积守恒）
     },
     bursts: createBursts(CONFIG.render.burstPool),   // 溶散/孵化/卵失败的对象池（环形写入，永不扩容）
+    // ---- 第 8 层（B19a）：语言气泡的池子。⚠️ 它是**表现层状态**，不在 world / creature 上 ----
+    // spec §7.2 明文「表现层的身体状态（…当前气泡）一律不入档」，而把它挂在这里
+    // 就是那条话的实现形状：每帧从 say 事件与 renderer.time 推导，关页面就什么都不剩。
+    // 容量在创建时一次定死（onscreenMax × bubbleQueueMul），运行中只改槽位、永不扩容。
+    bubbles: createBubbles(bubblePoolCapacity()),
+    bubbleRect: { x: 0, y: 0, w: 0, h: 0 },   // 每帧复用的气泡框矩形（bubbleBoxInto 的写入目标）
+    speechEnabled: true,       // 每帧从 world.speechEnabled 搬过来（**只读**，同 renderer.hand）
     time: 0,
     getPeltSprite(hue, sat, lum) {
       const key = peltKey(hue, sat, lum);
@@ -1513,6 +1723,10 @@ export function createRenderer(opts) {
       // 第 6 层要读手在哪（瞳孔朝向 + slow blink 的触发条件）。这是**只读**赋值：
       // world.playerHand 由 input 层写（sim.js 模块头明文的那唯一例外），这里只搬个引用。
       renderer.hand = world.playerHand;
+      // 第 8 层要读文字层开没开（spec §9.2 第 7 条）。同样是**只读**赋值：
+      // 开关是 world.speechEnabled 这个运行时状态（§4.13.1.1 第 3 条：CONFIG 只是默认值），
+      // 表现层不许为了「关掉之后什么都不画」而去改 CONFIG 或往世界里写任何东西。
+      renderer.speechEnabled = world.speechEnabled !== false;
       // 水体的摆动时钟挂在视口对象上（updateMotes 读 viewport.time）。
       // 同一个对象被 main.js 原地改写，所以这里写回去不会造成任何额外分配。
       viewport.time = renderer.time;
@@ -1538,6 +1752,10 @@ export function createRenderer(opts) {
       // 溶散/孵化的微粒在生物**之上**：它们是叠加光效，不是水里的实物
       // （微粒在身体下面画会被毛绒不透明的本体整个盖掉，等于没有那场散开）。
       drawBursts(ctx, renderer, viewport);
+      // 第 8 层（spec §5.1）：语言气泡在**所有东西之上**，而它是本帧最后一段调用。
+      // 这个位置是有判据的：tests/render-bubble.test.js 拿「关掉文字层之后的调用序列
+      // 必须是开启那份序列的前缀」来断言其余七层逐笔不变 —— 气泡插在中间那条就废了。
+      drawBubbleLayer(ctx, renderer, world, bodies, viewport);
     },
   };
   buildStatics(renderer);

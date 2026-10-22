@@ -60,6 +60,11 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   // 而"位点加了一色、色表忘了补"的症状是那颗卵静默沿用上一颗的颜色（tests/render-fx.test.js 钉）。
   // 同一 Task 还往 CONFIG.render / CONFIG.tail 里加了若干**标量**旋钮：标量不是节点，
   // 所以只动了下面两条键名清单，没动这里计数。
+  // ⚠️ 47 不变、48 不变（2026-10-22 B19a）：气泡层加了 **12 个标量**进已有的 CONFIG.speech。
+  // 这里刻意**不**给 speech 加子表：那 12 个旋钮之间没有「逐键比对」这类结构关系
+  // （eggTints 那种子表是为了和遗传位点比键集），把它们包成一个 bubble 子节点只会多一个节点、
+  // 换来零判据。代价如实记在这里：新增标量不会让上面两条计数变红，
+  // 所以 speech 的**键集**改由下面那条 deepEqual 单独钉（那是本段唯一的护栏）。
   assert.equal(visited.length, 47, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
@@ -251,11 +256,23 @@ test('五档心情的八个阈值被字面量钉住（两侧取值由 emotions.t
   assert.ok(m.sadSocialMin > m.blissNeedMax, '社交匮乏线必须远高于"需求已满足"线');
 });
 
-test('语言层的十二个旋钮被字面量钉住（行为两侧由 speech.test.js 负责）', () => {
+test('语言层的三十个旋钮（数出来的）：键集钉死，数值两侧分工', () => {
   // 分工同 §4.5.1 那组：这里钉**数值本身**，speech.test.js 钉它造成的比值与宽度差。
   // 只钉行为的话，把 sayGain 从 0.8 调到 0.08 会让整缸几乎不出词而没有任何一条测试报警；
   // 只钉数值的话，改公式形状（比如把 talk 从概率里拿掉）不会报警 —— 所以两边都要有。
   const s = CONFIG.speech;
+  // ⚠️ B19a（2026-10-22）补的键集守卫：speech 是 8 个标量段里唯一没有 deepEqual 的一个，
+  // 而它的 12 个气泡旋钮**不会**让上面那两条节点/顶层键计数变红（标量不是节点）。
+  // 没有这一条，「加一个没人读的旋钮」在这段是完全静默的 —— 那正是本项目反复清账的那类债。
+  assert.deepEqual(Object.keys(s).sort(), [
+    'addressAffMin', 'addressChance', 'bubbleFadeHold', 'bubbleFontPx', 'bubbleHeadGap',
+    'bubbleLineGap', 'bubbleMaxLines', 'bubbleMaxWidthFrac', 'bubblePadding', 'bubbleQueueMul',
+    'bubbleStroke', 'bubbleTtl', 'catchphraseChance', 'cooldownMax', 'cooldownMin',
+    'cutePoolFloor', 'enabled', 'heardBase', 'heardGain', 'maxTokens', 'middlePoolFloor',
+    'misspeakMax', 'needSpeakMin', 'onscreenMax', 'otherNameChance', 'sayBase', 'sayGain',
+    'talkFloor', 'tokensBase', 'tokensGain',
+  ], 'CONFIG.speech 的键集（30 个，node 数出来的）变了 —— 加一项删一项都要在这里说清楚');
+  assert.equal(Object.keys(s).length, 30);
   assert.equal(s.enabled, true, '默认必须开着：关掉是设置页的动作，不是出厂状态');
   assert.equal(s.cooldownMin, 6);
   assert.equal(s.cooldownMax, 18);
