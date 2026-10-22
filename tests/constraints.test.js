@@ -111,7 +111,10 @@ test('约束扫描确实覆盖到了 src/ 下的模块（防空转）', () => {
   // B17（2026-10-21）同一条按意图扩展到 input.js：监听目标由 attachInput 的**形参**传入，
   // Pointer Events 的 API 名（addEventListener / pointerdown / pointerId / setPointerCapture）
   // 不在这七个禁用名里，所以它既绑得到真元素，又不需要 document 也不需要 window。
-  for (const expected of ['body.js', 'render.js', 'input.js']) {
+  // B18（2026-10-22）扩展到 audio.js：音频图（那个以 A-u-d 开头的构造器的**实例**）由
+  // createAudio({ graph }) 注入，本文件里连那个名字都不出现，所以整个叫声层
+  // —— 嗓音映射、六声表、跨越判据、冷却、发声上限、节点收支 —— 继续在 Node 里可单测。
+  for (const expected of ['body.js', 'render.js', 'input.js', 'audio.js']) {
     assert.ok(files.includes(join('src', expected)), `纯度守卫没有覆盖 src/${expected}`);
     assert.ok(!BROWSER_MODULES.includes(join('src', expected)),
       `src/${expected} 不该在浏览器模块白名单里（它靠注入，Node 里可单测）`);
@@ -155,9 +158,17 @@ test('白名单没有腐烂：main.js 确实存在，且确实用到了浏览器
     // 白名单的正例必须钉到 main.js 的**身份**上：它是页面入口，入口的充要条件是
     // 自己取 DOM 节点（document）并自己驱动帧循环（requestAnimationFrame）。
     // 没有这两条，"白名单"就可能是靠"main.js 恰好没写别的"侥幸通过的。
-    for (const required of ['document', 'requestAnimationFrame']) {
+    //
+    // B18（2026-10-22）加上第三个：AudioContext **必须**在这里被用到。
+    // 白名单一直是那七个名的**唯一**豁免口子，而 src/audio.js 刻意一个都不碰（音频图靠注入）。
+    // 于是"创建上下文"这件事如果不在 main.js，就只可能在两个地方：
+    //   · 搬进了 audio.js ⇒ 那条模块当场掉出纯度守卫（本文件第一条测试会红，这是想要的）；
+    //   · 根本没人创建 ⇒ 缸永远没声音，而**没有任何一条测试会红**（B17c 抓过的那类"接线没接到"）。
+    // 这一条拦的是第二种。它和 tests/audio.test.js 里那两条 boot 用例是同一个约束的两面：
+    // 这里查"源码里有这个构造"，那里查"真的在首次手势上跑起来了"。
+    for (const required of ['document', 'requestAnimationFrame', 'AudioContext']) {
       assert.ok(used.includes(required),
-        `${rel} 没有用到 ${required}：它要么不是页面入口（该移出白名单），要么主循环没接线`);
+        `${rel} 没有用到 ${required}：它要么不是页面入口（该移出白名单），要么那条通道没接线`);
     }
   }
 });

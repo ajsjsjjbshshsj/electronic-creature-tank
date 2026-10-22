@@ -36,12 +36,24 @@
 //   它带来的唯一一条新纪律是**频率解耦**：指针事件只更新一个读数，
 //   下面的 step() 才是消费者（input.poll(t)，每帧一次）。
 //   除此之外本文件仍然只写 world.playerHand 那一个字段 —— 那是内核明文允许的唯一例外。
+//
+// B18（2026-10-22）接上的部分：叫声。
+//   src/audio.js 与 render/input 同形：一个浏览器全局都不碰，音频图由**注入**得到，
+//   于是整个叫声层（嗓音映射、六声表、跨越判据、冷却、发声上限、节点收支）在 Node 里可单测。
+//   本文件因此多出三样别处没有的东西：
+//   · 那两个构造名（一个以 A-u-d 开头、一个以 w-e-b 开头）**只许出现在这里**，
+//     而 tests/constraints.test.js 的正例守卫现在也盯着这一点；
+//   · **懒创建**：AudioContext 在首次 pointerdown 上创建并 resume（见 boot 里那段注释），
+//     失败就降级 —— 缸的其余部分照常，`controller.audioState` 是可读的证据；
+//   · 静音 API 与倍速同形（模块级 setMuted/getMuted + controller 上那两个方法），
+//     计划 2 没有 HUD，所以右上角那颗静音按钮属计划 3（裁定记在 spec §5.4.1 第 8 条）。
 
 import { CONFIG } from './config.js';
 import { createWorld, tickWorld } from './sim.js';
 import { updateBodies, reconcileBodies } from './body.js';
 import { createRenderer, consumeEvents } from './render.js';
 import { attachInput } from './input.js';
+import { createAudio } from './audio.js';
 
 // ---------------------------------------------------------------- 纯逻辑（可在 Node 测）
 
@@ -101,6 +113,20 @@ export function getTimeScale() {
   return activeController.getTimeScale();
 }
 
+// B18：静音与倍速走同一条路 —— 计划 2 没有 HUD，所以这两个只能在 devtools 里调
+// （globalThis.__tank.setMuted(true)）。spec §5.4 那句"右上角有静音按钮"属 HUD，
+// 按计划 2 的范围**不落地**，裁定记在 spec §5.4.1 第 8 条。
+// 刻意**不抛错**而返回一个布尔：静音按钮的置灰状态要能在缸没跑起来时也读一次。
+export function setMuted(value) {
+  if (!activeController) return !!value;
+  return activeController.setMuted(value);
+}
+
+export function getMuted() {
+  if (!activeController) return true;
+  return activeController.getMuted();
+}
+
 // ---------------------------------------------------------------- 装配（浏览器侧）
 
 export function boot(opts) {
@@ -156,7 +182,63 @@ export function boot(opts) {
     viewport,
     isMobile: coarse,
   });
-  const audio = options.audio || null;
+  // 声音（B18）。三条接线纪律，全部落在这一段：
+  //
+  // 1. **懒创建**：AudioContext 只在**首次 pointerdown** 那一刻创建。
+  //    开缸就 new 的话，手机浏览器会给一个 suspended 上下文（iOS Safari 连构造都可能拒绝），
+  //    症状是"桌面有声、手机上永远没声"，而且不报错。
+  //    它挂在自己的那条 addEventListener 上，而不是复用 input 的 onHand 回调：
+  //    onHand 由 step() 里的 input.poll() 触发，那是 rAF 的调用栈、**不是**手势的调用栈，
+  //    而 resume() 只在手势调用栈内才被移动端认可。
+  //    这与 B17 的"每帧一次读数"不打架：这条监听器一次都不读指针坐标，
+  //    且在第一次按下时就把自己摘掉，此后零成本。
+  // 2. **一次定终身**：`tried` 为真之后不再尝试 —— 连按 24 下不许 new 出 24 个上下文，
+  //    console 也只响一次。降级不静默靠的是 `controller.audioState`（计划 3 的静音按钮
+  //    读它决定显示与否），而不是往刷屏。
+  // 3. **options.audio 注入优先**：测试用替身整个换掉叫声层时，本文件连那条手势监听都不许加。
+  const audioState = { tried: false, ok: false, reason: null };
+  let audio = options.audio || null;
+
+  // 默认的上下文工厂。**整个 src/ 里那两个以 A-u-d 与 w-e-b 开头的构造名只出现在这两行**，
+  // 而本文件是 tests/constraints.test.js 唯一豁免的模块（那条白名单正例守卫现在也盯着这里）。
+  // ⚠️ 这里刻意**不**开 options.makeAudioContext 那个注入口：真实测试用例把构造器挂在
+  // 那个假 window 上就能替（tests/audio.test.js 的三条 boot 用例走的都是这条路），
+  // 多一个没人读的注入参数就是本项目反复清账的那类债。
+  const makeContext = () => {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) throw new Error('unsupported');
+    return new Ctor();
+  };
+
+  const unlockAudio = () => {
+    if (audioState.tried || audio) return;
+    audioState.tried = true;
+    try {
+      const ctx = makeContext();
+      // resume() 的 Promise **不等**：等就把创建推到了微任务上，而那一刻已经不在手势栈里。
+      if (ctx && typeof ctx.resume === 'function' && ctx.state === 'suspended') ctx.resume();
+      audio = createAudio({ graph: ctx });
+      audioState.ok = true;
+      audioState.reason = ctx && ctx.state === 'suspended' ? 'suspended' : null;
+    } catch (err) {
+      // 构造失败 ⇒ 叫声层整个不启动，缸的其余部分照常（spec §7.7 表里"AudioContext 被阻止"那一行）。
+      // reason 挂在 controller 上可读 —— 这就是"不静默"：玩家/开发者都查得到为什么没声音。
+      audio = null;
+      audioState.ok = false;
+      audioState.reason = String((err && err.message) || err);
+      console.warn(`音频已降级（${audioState.reason}）：缸的其余部分照常运行。`);
+    }
+  };
+
+  // 首次手势解锁音频。挂在**绘制元素**而不是 window 上：那样本文件不必为了音频
+  // 再多摸一个浏览器对象，且页面别处的点击不会白白点亮一个上下文。
+  // options.audio 已注入（测试替身）时不加这条监听 —— 替身不该被真实手势点亮第二个图。
+  let gestureTarget = null;
+  if (!audio && canvasEl && typeof canvasEl.addEventListener === 'function') {
+    gestureTarget = canvasEl;
+    canvasEl.addEventListener('pointerdown', unlockAudio);
+  }
+
   // 手（B17）：玩家与缸之间**唯一**的物理通道。
   //
   // attachInput 靠**依赖注入**拿监听目标（这里传进来的就是那个全屏绘制元素），
@@ -240,7 +322,7 @@ export function boot(opts) {
     const simDt = loop.steps * CONFIG.fixedDt;
     if (renderer) renderer.draw(ctx, world, bodies, viewport, simDt);
 
-    // 事件消费（B16 接溶散粒子、B18 接叫声、B19 接气泡）。
+    // 事件消费（B16 接溶散粒子、B18 接叫声、B19a 接气泡）。
     // ⚠️ 必须每帧清空：world.events 是**无界增长**的（sim.js 只写不读、不代为清理），
     // 开一小时的标签页会把它涨到几十万条，然后每帧遍历它。
     // ⚠️ 清空由**这里**做、消费方一律不清空：renderer 与 audio 读同一批事件，
@@ -248,8 +330,16 @@ export function boot(opts) {
     // 这就是 B16 已经在接、而 audio 要到 B18 才存在也不能改成"audio 自己清"的原因。
     if (world.events.length > 0) {
       if (renderer) consumeEvents(renderer, world.events);
-      if (audio) audio.consume(world.events, world);
     }
+    // ⚠️ audio.consume 刻意**不在**上面那个 `events.length > 0` 的守卫里 —— 这是 B18 接线上
+    // 唯一一处非对称，理由值得写全：
+    // renderer 只读事件，没有事件的帧它确实无事可做；而叫声层有**第二条通道**——
+    // 内核不发明"情绪事件"（spec §5.4.1 第 1 条），所以"开心/生气/困倦/撒娇"那几声与
+    // hop 落地那记闷响全靠每帧巡检 world 的现量、判阈值跨越。
+    // 把它放进 if 里的症状不是报错，而是"这缸只在有 eat/hatch/死掉的那些帧里才可能叫"，
+    // 而那样的帧在 60 分钟里占不到百分之几 —— 玩家听到的是一缸哑巴。
+    // 这一条由 tests/audio.test.js 的「audio.consume 不在事件守卫之内（它还有第二通道）」钉住。
+    if (audio) audio.consume(world.events, world);
     world.events.length = 0;
   };
 
@@ -258,6 +348,16 @@ export function boot(opts) {
     viewport,
     bodies,
     input,           // B17：暴露给 devtools 与测试取证（metrics 里那三个计数器）
+    get audio() { return audio; },        // B18：懒创建，所以按之前是 null、按之后是那个实例
+    audioState,      // { tried, ok, reason } —— 降级是否发生的**唯一**可读证据
+    getMuted() { return audio ? audio.getMuted() : true; },
+    setMuted(value) {
+      // 没有音频可控制时**返回当前事实**（true = 听不见），而不是抛错：
+      // 计划 3 的静音按钮在降级缸里也得能把按钮自己置灰，靠的是这个返回值而不是异常。
+      if (!audio) return true;
+      audio.setMuted(value);
+      return audio.getMuted();
+    },
     get frame() { return state.frame; },
     setTimeScale(scale) {
       // 只接受 CONFIG.timeScales 里的值：随手写个 3 或 10 会让子步进数暴涨，
@@ -275,6 +375,12 @@ export function boot(opts) {
       // 少这一步的症状：stop 之后 world.playerHand 还留在最后一次按下的位置上，
       // 而 main.js 已经不推进了 —— 计划 3 若复用同一个 world 做快照/换缸就会带进去。
       input.detach();
+      // 那条一次性的手势监听也要摘掉：缸停了还留一个会创建 AudioContext 的回调，
+      // 就是"关掉页面之后第一下点击把音频图又点亮"。
+      if (gestureTarget) {
+        gestureTarget.removeEventListener('pointerdown', unlockAudio);
+        gestureTarget = null;
+      }
       if (audio && audio.close) audio.close();
       window.removeEventListener('resize', resize);
       if (activeController === controller) activeController = null;
@@ -291,7 +397,8 @@ export function boot(opts) {
 // 自动启动。守卫让本模块在 Node 里 import 时**不执行**任何 DOM 代码 ——
 // tests/loop.test.js 依赖这一点。
 //
-// ⚠️ globalThis.__tank 是计划 2 的临时手段：没有 HUD，所以倍速/静音只能在 devtools 里调。
+// ⚠️ globalThis.__tank 是计划 2 的临时手段：没有 HUD，所以倍速与静音只能在 devtools 里调
+// （__tank.setTimeScale(4) / __tank.setMuted(true) / __tank.audio.stats 取证）。
 // 计划 3 加了 HUD 之后应当删掉它（或者留着当调试入口，但要写进文档）。
 if (typeof globalThis.document !== 'undefined') {
   globalThis.__tank = boot();

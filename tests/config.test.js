@@ -65,18 +65,27 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   // （eggTints 那种子表是为了和遗传位点比键集），把它们包成一个 bubble 子节点只会多一个节点、
   // 换来零判据。代价如实记在这里：新增标量不会让上面两条计数变红，
   // 所以 speech 的**键集**改由下面那条 deepEqual 单独钉（那是本段唯一的护栏）。
-  assert.equal(visited.length, 47, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 47 → 56、48 → 49（2026-10-22 B18）：新增 **CONFIG.audio 一段 + 八张声表子行**
+  // （joy / beg / anger / sleepy / hatch / death / thud / chirp = 8 个节点，加本体 1 个 = 9）。
+  // 与 B19a 相反，这一次**必须**用子表而不是平铺标量：八行各有 9–13 个同形字段
+  // （fromHz / toHz / noteSec / attack / peak / pitchMix …），"每一行形状一样"这件事
+  // 只有子表能被逐行比对（tests/config.test.js 的"八行共同形状"那条）。
+  // 两个新数还是**用 node 数出来的**，不是估的：
+  //   node -e "import('./src/config.js').then(({CONFIG})=>{let n=0;const w=x=>{if(x===null\
+  //   ||typeof x!=='object')return;n++;for(const k of Object.keys(x))w(x[k])};w(CONFIG);\
+  //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 56 keys 49
+  assert.equal(visited.length, 56, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
-    'affectionDecay', 'affectionDecayKin', 'behavior', 'blink', 'body', 'bodyPoints', 'broody',
+    'affectionDecay', 'affectionDecayKin', 'audio', 'behavior', 'blink', 'body', 'bodyPoints', 'broody',
     'colors', 'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize', 'eggTint',
     'eggsPerClutch', 'emotions', 'eye', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt', 'fluff',
     'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hueRange',
     'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
     'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
     'populationCap', 'render', 'speech', 'stage', 'star', 'tail', 'timeScales',
-  ], 'CONFIG 顶层键名（48 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 48);
+  ], 'CONFIG 顶层键名（49 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 49);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -88,6 +97,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.render',                                                              // B13 新增（水体与缩放）
     'CONFIG.eye',                                                                 // B15 新增（眼睛十行表）
     'CONFIG.colors.eggTints',                                                     // B16 新增（八色蛋的子表）
+    'CONFIG.audio', 'CONFIG.audio.joy', 'CONFIG.audio.chirp',                     // B18 新增（叫声表与两张增量行）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -667,6 +677,113 @@ test('软体弹簧的二十八个常量齐备，且两端都欠阻尼（spec §4
   assert.ok(B.impactEps > CONFIG.motion.baseSpeed * CONFIG.fixedDt,
     'impactEps 必须高于匀速单步位移，否则平滑游动会被判成连续冲击');
   assert.ok(B.impactFullDent > B.impactEps);
+});
+
+// ---- B18（2026-10-22）：叫声表。分工与 eye / render 两组完全一致 ----
+// 这里钉**数本身与数之间的排序**（spec §5.4 那张表的逐字数只有这一处能钉），
+// "audio.js 有没有照这些数算"由 tests/audio.test.js 负责。只钉一侧会漏：
+//   只钉行为 → 把 joy.toHz 从 900 改成 600 时行为断言仍然全绿（它按 CONFIG 比）；
+//   只钉数值 → 把音高因子写成常数时数值全对，而"小只高、大只低"那条承诺没了。
+
+test('叫声表的三十五项齐备（27 个调度量 + 8 张声表子行，node 数出来的），且 spec §5.4 逐字那几个数被钉死', () => {
+  const W = CONFIG.audio;
+  assert.deepEqual(Object.keys(W).sort(), [
+    'affectionMin', 'anger', 'beg', 'chirp', 'cooldownSec', 'death', 'fallbackSampleRate',
+    'filterQ', 'filterRatioMax', 'filterRatioMin', 'hatch', 'hueBuckets', 'hueTurn', 'joy',
+    'lfoSeedModulus', 'lfoSeedSpread', 'lookaheadSec', 'masterGain', 'maxVoices',
+    'noiseBufferSec', 'noiseStepSec', 'overtoneMix', 'overtoneRatioMax', 'overtoneRatioMin',
+    'pitchMax', 'pitchMin', 'refSize', 'releaseSec', 'silenceGain', 'sleepy', 'sleepyMin',
+    'thud', 'thudGapSec', 'thudPerSec', 'tiredMin',
+  ], 'CONFIG.audio 的三十五项键集（node 数出来的），不多不少：27 个调度量 + 八张声表子行');
+
+  // 八行的**共同形状**：少了任何一项都会让某一行听得出差别而测不出来（"短促"变长、"极轻"变响），
+  // 所以整行 deepEqual 键集而不是只抽查 fromHz。noise*/lfo* 是可选附加层，允许多出来。
+  const CORE = ['attack', 'fromHz', 'gapSec', 'noteSec', 'peak', 'pitchMix', 'reps', 'toHz', 'wave'];
+  for (const key of ['joy', 'beg', 'anger', 'sleepy', 'hatch', 'death', 'thud', 'chirp']) {
+    const extra = Object.keys(W[key]).filter((k) => !CORE.includes(k));
+    assert.deepEqual(Object.keys(W[key]).filter((k) => CORE.includes(k)).sort(), CORE,
+      `${key} 那一行缺了核心字段`);
+    for (const k of extra) {
+      assert.ok(/^(noise|lfo)/.test(k), `${key} 那一行多出一个不认识字段 ${k} —— 只许 noise*/lfo* 这两类附加层`);
+    }
+  }
+  assert.deepEqual(Object.keys(W.beg).filter((k) => /^(noise|lfo)/.test(k)).sort(),
+    ['noiseCount', 'noiseDur', 'noiseGap', 'noisePeak'], '卖萌那一行必须带气泡噪声层（spec 逐字）');
+  assert.deepEqual(Object.keys(W.hatch).filter((k) => /^(noise|lfo)/.test(k)).sort(),
+    ['noiseCount', 'noiseDur', 'noiseGap', 'noisePeak'], '孵化那一行必须带细碎裂声层（spec 逐字）');
+  assert.deepEqual(Object.keys(W.anger).filter((k) => /^(noise|lfo)/.test(k)).sort(),
+    ['lfoDepthHz', 'lfoRateBase'], '生气那一行必须带"轻微抖动"，而抖动是 LFO 而不是噪声');
+
+  // ---- spec §5.4 表里的逐字数（改它们要先改 spec）----
+  assert.deepEqual([W.joy.fromHz, W.joy.toHz, W.joy.reps, W.joy.wave], [600, 900, 2, 'sine'],
+    'spec 逐字："咐咐 两声短促上滑正弦，600→900Hz"');
+  assert.ok(W.joy.toHz > W.joy.fromHz, '上滑');
+  assert.deepEqual([W.beg.fromHz, W.beg.toHz, W.beg.wave], [400, 200, 'triangle'],
+    'spec 逐字："啵 快速下滑 400→200Hz + 一点气泡噪声"');
+  assert.ok(W.beg.toHz < W.beg.fromHz, '下滑');
+  // "低沉咕噜 90–140Hz"：两端都必须落在这个区间里，而这一行是全表最低的一档音区
+  assert.ok(W.anger.fromHz >= 90 && W.anger.fromHz <= 140, `anger.fromHz ${W.anger.fromHz} 出界`);
+  assert.ok(W.anger.toHz >= 90 && W.anger.toHz <= 140, `anger.toHz ${W.anger.toHz} 出界`);
+  assert.ok(W.anger.lfoDepthHz > 0 && W.anger.lfoDepthHz < W.anger.toHz,
+    '"轻微"抖动：深度必须远小于基频，否则那是颤音不是呼噜');
+
+  // 三条只有方向没有数的行（spec 逐字："长缓慢下滑，柔和起音" / "极轻的下滑，几乎听不见" /
+  // "细碎裂声 + 一个上扬小音"）—— 方向在这里钉成不等式，读起来才不至于全靠 audio.test.js 的相对断言
+  assert.ok(W.sleepy.toHz < W.sleepy.fromHz, '困倦必须是下滑');
+  assert.ok(W.sleepy.noteSec > W.joy.noteSec * 4, `"长"：${W.sleepy.noteSec} 必须明显长于短促那几行`);
+  assert.ok(W.sleepy.attack / W.sleepy.noteSec > 0.2, '"柔和起音"：attack 要占音长的可观一段');
+  assert.ok(W.death.toHz < W.death.fromHz, '死亡必须是下滑');
+  const peaks = ['joy', 'beg', 'anger', 'sleepy', 'hatch', 'death', 'thud', 'chirp']
+    .map((k) => W[k].peak);
+  assert.equal(W.death.peak, Math.min(...peaks), '"几乎听不见"：peak 必须是全表最低一档');
+  assert.ok(W.hatch.toHz > W.hatch.fromHz, '孵化那记小音是上扬的');
+  assert.ok(W.hatch.noiseCount >= 3, '"细致"= 多个短段，不是连续一段噪声');
+  for (const k of ['beg', 'hatch']) {
+    assert.ok(W[k].noisePeak < W[k].peak, `${k} 的噪声是从属层，不许盖过那一声明本身`);
+  }
+
+  // 两条计划 2 增量（spec §5.4.1 第 5 条）：数在这里，**为什么加**在 spec 里
+  assert.ok(W.thud.toHz < W.thud.fromHz && W.thud.toHz >= 40, '落地闷响：下滑且不跌进次声');
+  assert.equal(W.thud.pitchMix, 0.5, '只有落地这一行打折 —— 它已经贴地，全额乘音高会把大只推出可听范围');
+  assert.ok(W.chirp.noteSec < Math.min(W.joy.noteSec, W.beg.noteSec), '「啾」必须是全表最短（spec 逐字"极短"）');
+
+  // 音高随体型：clamp 两端与参考体型
+  assert.equal(W.refSize, (CONFIG.minSize + CONFIG.maxSize) / 2,
+    '参考体型就是 needs 那段算出来的中性成体（26），表里的 Hz 是给这只定的');
+  assert.ok(W.pitchMin < 1 && W.pitchMax > 1, '因子必须横跨 1：小只往上、大只往下');
+  assert.ok(W.pitchMax * W.chirp.toHz < 8000, `最高的一记不许推近超声：${W.pitchMax * W.chirp.toHz}Hz`);
+  assert.ok(W.pitchMin * W.thud.toHz > 30, '最小的因子也不许把落地声推出可听范围（手机扬声器）');
+  // 音色分桶：桶数与 needs 的色相区间必须能整除得开（每桶 ≥ 2° 才谈得上"家族"）
+  assert.ok(W.hueBuckets >= 2 && 70 / W.hueBuckets >= 2,
+    `每桶只有 ${(70 / W.hueBuckets).toFixed(2)}°，同一家族会被切成两副嗓子`);
+  assert.ok(W.filterRatioMin > 1, '低通中心必须在基频之上，否则砍掉的是基频（变成音量而不是音色）');
+  assert.ok(W.filterRatioMax > W.filterRatioMin);
+  assert.ok(W.overtoneRatioMin > 1 && W.overtoneRatioMax > W.overtoneRatioMin,
+    '倍音必须高于基频一个整数量级，两端之间才有"拍频可分辨"的余地');
+  assert.ok(W.overtoneRatioMin > 2 && W.overtoneRatioMax < 3,
+    '倍音比要留在"略偏的八度"这一带：过 3 就变成五度，那是另一个音程而不是另一种嗓子');
+  assert.ok(W.overtoneMix > 0 && W.overtoneMix < 0.5, '倍音是从属共鸣');
+  // 上界与节流：这三条是"不许机关枪"与"不许无界增长"的数值前提
+  assert.ok(Number.isInteger(W.maxVoices) && W.maxVoices >= 1 && W.maxVoices <= 16,
+    `同时发声数必须是个小整数：${W.maxVoices}`);
+  assert.ok(W.cooldownSec > 0, '冷却为 0 ⇒ 跨越判据在阈值沿线抖动时会连发');
+  assert.ok(W.thudGapSec > 0 && W.thudPerSec > W.thudGapSec,
+    '每只的落地间隔必须**大于**全局间隔，否则全局那道闸形同虚设');
+  assert.ok(W.masterGain > 0 && W.masterGain < 0.5, 'spec §5.4 逐字"音量很小"');
+  assert.ok(W.silenceGain > 0 && W.silenceGain < 0.01, '包络终点的"零"必须非零（exponentialRamp 遇 0 抛）');
+  assert.ok(W.lookaheadSec > 0 && W.lookaheadSec < 0.1, '提前量太短会截起音，太长会听出延迟');
+  assert.ok(W.releaseSec > 0 && W.releaseSec < W.joy.noteSec, '释音段必须短于最短的那一行');
+  assert.ok(W.noiseBufferSec > W.noiseStepSec * 6,
+    '共享 buffer 必须盖过最大偏移（noiseCount 上限 6 × step）+ 最长一段，否则后面的段读成静音');
+  assert.ok(Number.isInteger(W.lfoSeedModulus) && W.lfoSeedModulus >= 2, '抖动速率的个体差靠这个取模');
+  assert.ok(W.lfoSeedSpread > 0 && W.lfoSeedSpread * W.lfoSeedModulus < 1,
+    '抖动速率的偏移之和必须小于一倍，否则两只"生气"呼噜得完全不像同一声明');
+  // 检测阈值：三条自己的（另两条读 CONFIG.mood，唯一定义点，不许在这里重抄）
+  assert.ok(W.sleepyMin > 0 && W.sleepyMin < 1 && W.tiredMin > 0 && W.tiredMin < 1, '都是 [0,1] 的分量');
+  assert.ok(W.affectionMin > CONFIG.behavior.lookTowardAffection,
+    '撒娇那一声的门槛必须高于"它开始看你"，否则陌生人也一直在撒娇');
+  assert.equal(W.joyMin, undefined, 'joy 的阈值只许有 CONFIG.mood.happyJoyMin 一处定义');
+  assert.equal(W.angerMin, undefined, 'anger 同上（CONFIG.mood.angerMin）');
 });
 
 test('NEED_WORDS 的键与 needs 的四条匮乏度是同一份键表（不是各抄一遍）', () => {
