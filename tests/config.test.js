@@ -86,7 +86,12 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   //   node -e "import('./src/config.js').then(({CONFIG})=>{let n=0;const w=x=>{if(x===null\
   //   ||typeof x!=='object')return;n++;for(const k of Object.keys(x))w(x[k])};w(CONFIG);\
   //   console.log('nodes',n,'keys',Object.keys(CONFIG).length)})"      →  nodes 57 keys 50
-  assert.equal(visited.length, 57, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 57 → 58、50 → 51（2026-10-22 Task C-1）：新增 **CONFIG.save 一段**（一个节点、4 个标量：
+  //    everySimSec / minIntervalMs / key / corruptKey）。这一段是"存档落地"那四条裁定的数值侧，
+  //    两个时间常数各有一条 boot 级用例钉着行为（tests/save.test.js 末段的节奏与下限那两条），
+  //    两个键名由 R-2 钉死 —— 键名带版本号，所以 SAVE_VERSION 变了必须同时改这里（那是故意的摩擦）。
+  // 数出来的，不是推的：上面那行 node -e 的遍历抄过来跑一遍 →  nodes 58 keys 51
+  assert.equal(visited.length, 58, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'api', 'audio', 'behavior', 'blink', 'body', 'bodyPoints',
@@ -95,9 +100,9 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop',
     'hueRange', 'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
     'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
-    'populationCap', 'render', 'speech', 'stage', 'star', 'tail', 'timeScales',
-  ], 'CONFIG 顶层键名（50 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 50);
+    'populationCap', 'render', 'save', 'speech', 'stage', 'star', 'tail', 'timeScales',
+  ], 'CONFIG 顶层键名（51 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 51);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -111,6 +116,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.colors.eggTints',                                                     // B16 新增（八色蛋的子表）
     'CONFIG.audio', 'CONFIG.audio.joy', 'CONFIG.audio.chirp',                     // B18 新增（叫声表与两张增量行）
     'CONFIG.api',                                                                 // B19b-i 新增（可选 API 档的形状与默认值，里面没有 key）
+    'CONFIG.save',                                                                // C-1 新增（存档落地的两个常数 + 两个键名）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -953,4 +959,42 @@ test('抚摸通道的两个旋钮被字面量钉住，且好感速率与淡忘�
   const halfLife = Math.log(2) / CONFIG.affectionDecay;
   assert.ok(tenSeconds / halfLife < 0.03,
     '十秒的收获量级必须远小于"半衰期秒数"，否则好感会只进不出、攒成永久封顶');
+});
+
+// ---- C-1（2026-10-22）：存档落地（spec §7.2.1）。分工同前：
+// 这里钉**数与数之间的关系**，"main.js 有没有照这些数落盘"由 tests/save.test.js 末段那组
+// boot 级用例钉。这一段最容易做错的是那两个**键名**：它们带版本号，而版本号的含义就是
+// "格式变了就别再读旧的那一个" —— 键名与 SAVE_VERSION 脱钩等于把两代存档搅在一起。
+
+test('存档落地的四项常数：节奏用模拟秒、下限严格低于最坏节奏、两个键名各住一处且都带版本号', () => {
+  const S = CONFIG.save;
+  assert.deepEqual(Object.keys(S).sort(), ['corruptKey', 'everySimSec', 'key', 'minIntervalMs'],
+    'CONFIG.save 的键集（node 数出来的）变了 —— 加一项删一项都要在这里说清楚');
+  // 键名：两个都在**同一个命名空间**里，且都带 v2 那个后缀（裁定 R-2）。
+  // ⚠️ 断言里写的是字面量而不是模板串：拼出来就测不到"有人把版本号从名字里删掉"这件事。
+  assert.equal(S.key, 'tank.save.v2');
+  assert.equal(S.corruptKey, 'tank.save.v2.corrupt');
+  assert.notEqual(S.key, S.corruptKey, '主键与隔离区共用一个键 ⇒ 隔离这一步本身就是那次覆盖');
+  assert.ok(S.key.includes('.v2'), '键名里没有版本号：SAVE_VERSION 改了旧档还会被当新档读');
+  assert.ok(S.corruptKey.startsWith(S.key), '隔离区必须留在同一个前缀下，否则"清掉这一缸"清不干净');
+  // 与 API 档那把 key **必须**是两个键（R-2 的后半句：那一份永不进存档）。
+  assert.notEqual(S.key, 'tank.api.v1');
+
+  // 落盘节奏：**模拟秒**（裁定 R-3）。取 30 的依据写在 config.js 那段注释里（实测数在 §7.2.1 R-4）。
+  assert.equal(S.everySimSec, 30);
+  assert.ok(Number.isFinite(S.everySimSec) && S.everySimSec > 0, 'everySimSec 必须是正数模拟秒');
+  // 一条上界关系：一次落盘之间至少要走完 200 个子步，否则"每写一次 = 一次 160KB 同步写"
+  // 就会被摊到肉眼可见的频率上（fixedDt 是 1/60，所以 30 秒 = 1800 步）。
+  assert.ok(S.everySimSec / CONFIG.fixedDt >= 200,
+    `每 ${S.everySimSec} 模拟秒只落 ${S.everySimSec / CONFIG.fixedDt} 次盘都算不上"几次一写"，节奏太密`);
+
+  // 墙上时钟下限（裁定 R-4）：它兜的是事件那两条路（连点标签页会连着发 visibilitychange）。
+  assert.equal(S.minIntervalMs, 2000);
+  assert.ok(S.minIntervalMs > 0, '下限必须是正毫秒');
+  // ⚠️ 这条是**关系**断言，也是这一段唯一会拦住调参的：
+  // 下限若高到"4× 倍速下 30 模拟秒都等不齐一次写"，计划内的落盘就会被它挤掉，
+  // 于是存档密度反过来受节流控制 —— 那与 R-3 把节奏定成模拟秒的意图正相反。
+  const fastestWallMs = (S.everySimSec / Math.max(...CONFIG.timeScales)) * 1000;
+  assert.ok(S.minIntervalMs < fastestWallMs,
+    `minIntervalMs(${S.minIntervalMs}) 必须严格小于最快倍速下的自然节奏(${fastestWallMs}ms)，否则节流会吃掉计划内的落盘`);
 });
