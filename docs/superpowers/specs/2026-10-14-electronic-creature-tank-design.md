@@ -809,9 +809,46 @@ beg 了 3 秒没被理睬 → 升一级：hop 到手的正前方 / 挡在指针�
    而 `CONFIG.api.enabled = false` 只当默认值。这一层已经按那个形状写好了：
    本模块不读本机存储（那是 main.js 的口子，`localStorage` 这个名字在 src/ 里只许出现在 main.js），
    它只接一个调用方传来的 `cfg`。`buildRequest` 返回的是**一段纯数据描述**
-   `{ url, method, headers, body, timeoutMs }` —— 请求本身、中止控制器、定时器都在 B19b-ii。
+   `{ url, method, headers, body, timeoutMs }` —— 发请求与掐它在 `src/main.js`（B19b-ii 已落地），
+   而**定时器一个都没有**：到期扫描本身就是超时机制，见下面第 8 条。
    这条分界不是洁癖：正因为 api.js 一个网络名字都不出现，它才在 Node 里全程可测，
    而 `fetch` 仍然被 `tests/constraints.test.js` 钉在 main.js 一个文件里。
+7. **那一拍是"有界地按住"，不是"事后换字"（`API_HOLD_MS = 1200`）。** 接线层（`src/main.js` 的
+   `attachApiTier`）遇到 `say` 时**不当帧交付**，而是连原文案一起放进暂存队列，上界 `apiHoldMs`；
+   落地（模型成功 / 任何失败 / 到期）时把**当下手上那句**交出去。为什么不选"先按规则档画出来、
+   回复到了再换"：§4.13.1 的显示纪律是 3 秒淡出，而实测一缸最坏**单秒 5 句**（B18 那轮量的同一批数），
+   4× 下换算是 20 拍/真实秒 ⇒ "回复迟到"是常态而不是边缘情况，事后换字大多数时候换在一个已经淡完的气泡上，
+   玩家看到的是"这一档几乎没效果"，而它照样要付每一次往返。
+   **代价就只有一句**：开了这一档，那句话最多晚 1200 毫秒出现。它由 `tests/config.test.js` 钉成两条硬不等式：
+   `apiHoldMs ≤ 1200` 且**严格小于** `bubbleTtl × 1000` —— 按住比气泡整个生命还久等于把已经要说的一句话
+   按到看不见，那仍然是"取消"而不是"延后"。
+   **这一处也解释了 `consumeEvents` 的一个连带变化**：那一拍被按住时是整条事件被按住，
+   所以「啾」（B18 那条唯一允许的耦合）与气泡**一起**晚一点出现，而不是各响一次。
+   这是表现层的时序，世界状态一个字节不动 —— 决策 1 那条"旁路不是开关"仍然成立。
+8. **没有定时器：到期扫描就是超时机制。** `src/main.js` 里没有一处 `setTimeout` / `setInterval`，
+   队列每帧按 `duePending(p, 时钟毫秒)` 收一次，`api.frame` 同时完成"接管新拍 + 到期释放 + 交付"三件事。
+   这样 `stop()` 没有定时器要摘、后台标签页回来不会攒下一堆到期的回调，
+   而"迟到的回复"由**代号（token）对不上**判掉并计数（`late`），不会写进后来那一拍。
+   缸停了之后还挂着的请求一律 `abandon()` 掐掉，两条读数都留（`aborted` / `droppedStaged`）。
+9. **交付数组只有一处非对称，且关掉时是零额外动作。** `step()` 里 `let events = world.events;`
+   —— 缺省就是那个数组**本身**（引用，不是拷贝：写成拷贝就每帧一次分配，而 §5.3 禁这个），
+   只有 `api.state.active` 为真时才换成 `api.frame(...)` 的产出数组。
+   renderer 与 audio 读的**都是** `events`，`world.events.length = 0` 仍由本文件在两个消费方之后做。
+   两处源码级守卫（`tests/audio.test.js`「audio.consume 不在事件数守卫里」、
+   `tests/render-bubble.test.js`「say 仍然每帧被喂给 renderer」）跟着改读这个局部名，
+   并各自**加了一条更硬的**：`events` 的缺省必须是 `world.events` 本身 ——
+   否则"关掉 ⇒ 零额外动作"那条断言就成了假话。
+10. **暂存队列有上界，而装不下不等于不 说。** `API_PENDING_CAP = 8`，
+    刻意**不借** `bubble.js` 的 `bubblePoolCapacity()`：那个函数说的是"屏幕上能挂几条"，
+    这里要的是"最多按着几拍等回复"，两回事；借过来还会让页面入口 import 绘制层（`tests/render-bubble.test.js`
+    正有一条拦这个）。`pushPending` 返回 0（形状不对、或腾不出位）时，那一拍**当场原样交付**，
+    并分别进 `badShape` / `notTaken` 计数；同一只第二次开口时旧的那拍让位（`superseded`）并当场出去。
+    于是"这一档开着的时候反而少说话"这一类事故在结构上写不出来 —— 它是 §4.13.2 第 1 条的最后一道。
+11. **key 住在本机存储的一个命名空间里，而读数永远脱敏。** `localStorage` 的键是 `tank.api.v1`，
+    值是 `{enabled, endpoint, model, key, timeoutMs, maxInFlight}`；读它在 `main.js` 里包 `try/catch`
+    （隐私模式下的 Safari 一碰 `localStorage` 就抛），读不出来就**按关着处理**、缸照常跑、
+    并且只 `console.warn` 一次。`controller.getApiConfig()` **永远不返回 key 的值**，只返回 `hasKey: true|false`
+    与 `source`；写则通过 `setApiConfig(patch)` 落回同一个键。计划 3 的设置页读的就是这两个口。
 
 **如实记录：本轮一次真实端点都没调用过。** 仓库里没有 key，也没有可打的服务，
 所以上面每一条都是**桩验证**（stub-verified）：请求形状是断言出来的，不是发出去被服务端接住的。
@@ -1370,6 +1407,10 @@ API_MAX_TOKENS_OUT_CAP = 64       // 再大就是允许它写散文，与「最�
 API_TEMPERATURE      = 0.7        // 同一处境要给一点换词的自由，不给到胡话档
 API_TEMPERATURE_MAX  = 2
 API_MAX_IN_FLIGHT    = 2          // 与 SPEECH_ONSCREEN_MAX 同量：在途数不该超过能显示的气泡数
+API_HOLD_MS          = 1200       // 那一拍最多被按住的毫秒（§4.13.2.1 第 7 条）。
+                                  // 硬不等式两条由 tests/config.test.js 钉：≤1200 且**严格小于** BUBBLE_TTL×1000
+API_PENDING_CAP      = 8          // 暂存队列槽位数（§4.13.2.1 第 10 条）。不借 bubblePoolCapacity()：
+                                  // 那是"屏幕上挂几条"，这是"按着几拍"。装不下就当帧原样交付 + 计数
 API_TEXT_MAX_CHARS   = 40         // 一条替换文案的字符上限（先比它再比 token 数，见 §4.13.2.1 第 4 条）
 API_SUMMARY_NEED_TOP = 2          // 摘要的四条匮乏度里只给最紧的两条
 API_SUMMARY_HEARD_TOP = 3         // 摘要只给"当前最强的三条"听进去的话

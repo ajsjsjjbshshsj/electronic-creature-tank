@@ -965,8 +965,14 @@ test('main.js 那条路没断：say 仍然每帧被喂给 renderer，而 events 
   // B19a **没有**改 main.js —— consumeEvents 这条既有路径本来就覆盖 say（B16 就这么设计了），
   // 所以这里守的是「别把它改掉」，而不是「我加了它」。
   const src = readFileSync(fileURLToPath(new URL('../src/main.js', import.meta.url)), 'utf8');
-  assert.ok(/consumeEvents\(renderer, world\.events\)/.test(src),
-    'main.js 不再把 world.events 交给 renderer ⇒ 气泡与溶散一起没');
+  // ⚠️ B19b-ii 之后 renderer 读的是局部名 `events`（关档时它 `= world.events`，同一个数组引用；
+  // 开档时它是"本帧该出现的那批"，含刚从暂存队列放出来的）。这条守卫跟着改名的同时，
+  // 多加一条更硬的：那个局部名的**缺省**必须是 world.events 本身 ——
+  // 写成拷贝的话"关掉 ⇒ 零额外动作"就变成假话，而且每帧多一次分配（spec §5.3）。
+  assert.ok(/consumeEvents\(renderer, events\)/.test(src),
+    'main.js 不再把这一帧的事件交给 renderer ⇒ 气泡与溶散一起没');
+  assert.ok(/let events = world\.events;/.test(src),
+    'events 必须默认就是 world.events 本身（引用，不是拷贝）');
   assert.ok(/world\.events\.length\s*=\s*0/.test(src),
     'main.js 必须仍然每帧清空 events（无界增长那个教训）');
   assert.ok(!/bubble/i.test(src.replace(/\/\/[^\n]*/g, '')),

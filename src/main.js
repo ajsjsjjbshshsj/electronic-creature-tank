@@ -47,6 +47,22 @@
 //     失败就降级 —— 缸的其余部分照常，`controller.audioState` 是可读的证据；
 //   · 静音 API 与倍速同形（模块级 setMuted/getMuted + controller 上那两个方法），
 //     计划 2 没有 HUD，所以右上角那颗静音按钮属计划 3（裁定记在 spec §5.4.1 第 8 条）。
+//
+// B19b-ii（2026-10-22）接上的部分：可选 API 档（spec §4.13.2 / §4.13.2.1，默认关闭）。
+//   src/api.js 里装着"算"的那一半（摘要、请求描述、回复校验、超时判据、暂存队列），
+//   本文件只装"碰"的那一半：本机存储、f-e-t-c-h、AbortController、每帧把队列排空。
+//   四条纪律都落在这一段，且每条都有 boot 级测试钉着（tests/api.test.js 末段）：
+//   · **输出侧旁路，不是门**（§4.13.2.1 第 1 条）：内核照旧决定说不说、照旧发那条带规则
+//     文案的 say 事件；本文件只在档位开着时把那一拍**按住最多 apiHoldMs 毫秒**，
+//     然后无论手上是什么文案都交出去。档位关掉时**一个字节都不多做**（零延时、零请求、
+//     交付缓冲都不分配）—— 那是断言，不是注释。
+//   · **零定时器**（决策 B）：超时机制是帧循环里 duePending 那一趟扫描，
+//     所以 stop() 之后没有回调会把字塞进气泡池，也没有定时器要收拾。
+//   · **key 只住 localStorage**（决策 C / §7.2 末第 4 条）：save.json 是多设备共享的
+//     明文文件，一个字符都不许进去；对外只给 getApiConfig() 那份脱敏读数（决策 D）。
+//   · **每个注入参数都有测试用它**（决策 E，B18 的反面教训）：options.fetch /
+//     options.storage 两个口子各有一条用例真的走它，另有一条用例证明**不注入**时
+//     走的就是 globalThis 上那两个真货。
 
 import { CONFIG } from './config.js';
 import { createWorld, tickWorld } from './sim.js';
@@ -54,6 +70,13 @@ import { updateBodies, reconcileBodies } from './body.js';
 import { createRenderer, consumeEvents } from './render.js';
 import { attachInput } from './input.js';
 import { createAudio } from './audio.js';
+import { tokenBudget } from './lexicon.js';
+import {
+  createPending, pushPending, duePending, releasePending, resolvePending, clearGive,
+  dropAllPending,
+  buildSummary, buildRequest, configIssue, validateReply, maySend, deadlineFor,
+  PUSH_REASONS,
+} from './api.js';
 
 // ---------------------------------------------------------------- 纯逻辑（可在 Node 测）
 
@@ -96,6 +119,319 @@ export function advanceLoop(loop, frameDt, timeScale) {
   loop.acc = acc;
   loop.steps = steps;
   return steps;
+}
+
+// ---------------------------------------------------------------- 可选 API 档（B19b-ii）
+
+// 本机存储里那一个键。⚠️ key 只住在这里，**绝不住进 save.json** ——
+// 后者是局域网内多设备共享的明文文件（spec §7.2 末第 4 条），写进去等于把 key 广播。
+// 这也是 tests/api.test.js 那条"存档里搜不到 key 的子串"的守卫对象。
+const API_STORE_KEY = 'tank.api.v1';
+
+// 补丁里认识的字段。名单之外的键一律忽略：不然设置页哪天传个 `world` 进来就能改世界了。
+const API_FIELDS = ['enabled', 'endpoint', 'model', 'key', 'timeoutMs', 'maxInFlight'];
+
+const str = (v) => (typeof v === 'string' ? v : '');
+const posNum = (v, dflt) => (Number.isFinite(v) && v > 0 ? v : dflt);
+const posInt = (v, dflt) => (Number.isInteger(v) && v >= 0 ? v : dflt);
+
+// 默认的存储与默认的发请求能力。两行都读 globalThis 上那两个名字，
+// 而 tests/constraints.test.js 的正例守卫现在也盯着 main.js 里这两个名字 —— 拦的是
+// B18 记过的那一类"根本没接线"：接线没接上时它必须红，而不是安静地一缸哑巴。
+// ⚠️ 私有模式 / Safari 读 localStorage 这个属性**本身就会抛**，所以整个读取包在 try 里。
+const globalStore = () => {
+  try {
+    const s = globalThis.localStorage;
+    return s && typeof s.getItem === 'function' && typeof s.setItem === 'function' ? s : null;
+  } catch (err) { return null; }
+};
+
+const globalFetcher = () => {
+  try {
+    const f = globalThis.fetch;
+    // 包一层而不是直接返回：`fetch` 绑在 window 上，裸着当回调传出去会 Illegal invocation。
+    return typeof f === 'function' ? (input, init) => f(input, init) : null;
+  } catch (err) { return null; }
+};
+
+// 档位的全部接线。它是**输出侧的旁路**：世界照旧决定说不说，这里只决定那一句
+// 晚多久出现、以及出现的是谁的措辞。关掉时（默认、或 cfg 不合格）它一个字节都不多做。
+function attachApiTier(world, opts) {
+  const options = opts || {};
+  const A = CONFIG.api;
+  const p = createPending(A.pendingCap);
+  // 注入优先（决策 E：两个口子都有测试真的走它）；不注入就走 globalThis 上的真货。
+  const store = options.storage !== undefined ? options.storage : globalStore();
+  const send = options.fetch !== undefined ? options.fetch : globalFetcher();
+
+  const cfg = {
+    enabled: A.enabled, endpoint: '', model: '', key: '',
+    timeoutMs: A.timeoutMs, maxInFlight: A.maxInFlight,
+  };
+  const state = {
+    active: false,        // 本帧是否参与交付（= 唯一那条"要不要按住"的读数的缓存）
+    status: 'off',        // 'off' | 'ready' | 机器可读的拒绝原因（configIssue.reason 那一张表）
+    storage: store ? 'ok' : 'absent',
+    fetcher: send ? 'ok' : 'absent',
+    reason: null,         // 存储读不出来时的原文（不含值，只含报错消息）
+  };
+  const stats = {
+    sent: 0, delivered: 0, inFlight: 0, inFlightMax: 0, fetchCalls: 0,
+    gateClosed: 0, badShape: 0, notTaken: 0, noCreature: 0, summaryFailed: 0, noRequest: 0,
+    httpFailed: 0, bodyFailed: 0, networkFailed: 0, replyRejected: 0,
+    replyAccepted: 0, aborted: 0, errors: 0, frames: 0,
+    warned: { read: 0, write: 0 },      // 两条降级各只许响一次（§7.7 不静默，也不刷屏）
+  };
+  // 每个槽位一份的接线侧账（与队列同宽、一次建满、运行中只改值）：
+  // req[i] 1 = 那一拍还挂着一个请求；ctrl[i] 就是那个中止控制器。
+  // ⚠️ 这里**不留代号**：代号只有队列那份 `p.token` 一处，两处各存就会各漂。
+  const req = new Uint8Array(p.n);
+  const ctrl = new Array(p.n).fill(null);
+
+  // 帧时刻的缓存：本文件的时钟只有一个来源（step(t) 里那个 rAF 读数）。
+  // 回复的回调落在两帧之间，那一刻没有"当下"可用 —— 用上一帧的时刻，
+  // 于是那一拍在**下一帧**的扫描里出去（延后一帧，不是延后无限，也不许设定时器）。
+  let clockMs = 0;
+  const nowMs = () => clockMs;
+
+  // 一次请求的终点。**每个**终局分支都只许从这里结在途的账，而 req[i] 那个坑保证只结一次：
+  // 队列交付那一拍时也会结束它（超时先到那一支），两边谁先到都只减一遍（决策 F）。
+  const endFlight = (i) => {
+    if (i < 0 || i >= p.n || req[i] !== 1) return 0;
+    req[i] = 0;
+    stats.inFlight -= 1;
+    const c = ctrl[i];
+    ctrl[i] = null;
+    if (c) { try { c.abort(); } catch (err) { stats.errors += 1; } }
+    return 1;
+  };
+
+  // 降级只许响一次：静默是 §7.7 禁止的，而每帧刷屏同样是被抓过两次的老毛病。
+  const warnOnce = (slot, msg) => {
+    if (stats.warned[slot] > 0) return;
+    stats.warned[slot] += 1;
+    console.warn(msg);
+  };
+
+  const readStore = () => {
+    if (!store) return;                       // 没有存储 ⇒ cfg 停在 CONFIG 的形状上（关闭）
+    try {
+      const raw = store.getItem(API_STORE_KEY);
+      if (raw === null || raw === undefined || raw === '') return;
+      const o = JSON.parse(String(raw));
+      if (!o || typeof o !== 'object' || Array.isArray(o)) return;
+      if (typeof o.enabled === 'boolean') cfg.enabled = o.enabled;
+      cfg.endpoint = str(o.endpoint);
+      cfg.model = str(o.model);
+      cfg.key = str(o.key);
+      cfg.timeoutMs = posNum(o.timeoutMs, A.timeoutMs);
+      cfg.maxInFlight = posInt(o.maxInFlight, A.maxInFlight);
+      state.storage = 'localStorage';
+    } catch (err) {
+      // 读不出来就当档位关着 —— 缸照常跑，而且**只响一次**（§7.7 不许静默，也不许刷屏）。
+      cfg.enabled = false;
+      state.storage = 'unreadable';
+      state.reason = String((err && err.message) || err);
+      warnOnce('read', `API 档的本机存储读不出来（${state.reason}）：这一档按关着处理，缸照常跑。`);
+    }
+  };
+
+  const refresh = () => {
+    const bad = configIssue(cfg);
+    if (!cfg.enabled) { state.active = false; state.status = 'off'; state.reason = null; return; }
+    if (!send) { state.active = false; state.status = 'no-fetcher'; state.reason = null; return; }
+    if (bad) { state.active = false; state.status = bad.reason; state.reason = bad.field; return; }
+    state.active = true;
+    state.status = 'ready';
+    state.reason = null;
+  };
+
+  const redacted = () => ({
+    // 决策 D：这份读数**永远不许有 key 那个键**。测试用 JSON.stringify 搜子串钉它。
+    enabled: cfg.enabled,
+    endpoint: cfg.endpoint,
+    model: cfg.model,
+    hasKey: cfg.key !== '',
+    timeoutMs: cfg.timeoutMs,
+    maxInFlight: cfg.maxInFlight,
+    source: state.storage === 'localStorage' ? 'localStorage' : 'default',
+  });
+
+  const setConfig = (patch) => {
+    const src = patch && typeof patch === 'object' ? patch : {};
+    for (const k of API_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(src, k)) continue;
+      const v = src[k];
+      if (k === 'enabled') cfg.enabled = !!v;
+      else if (k === 'endpoint' || k === 'model' || k === 'key') cfg[k] = str(v);
+      else if (k === 'timeoutMs') cfg.timeoutMs = posNum(v, A.timeoutMs);
+      else cfg.maxInFlight = posInt(v, A.maxInFlight);
+    }
+    // 落盘：整份（含 key）只写进 localStorage 那一个键下。写失败 ⇒ 本次改动只在内存里，
+    // 也照样要说出来（静默的"设置了但没生效"是最难查的那类）。
+    if (store) {
+      try {
+        store.setItem(API_STORE_KEY, JSON.stringify({
+          enabled: cfg.enabled, endpoint: cfg.endpoint, model: cfg.model,
+          key: cfg.key, timeoutMs: cfg.timeoutMs, maxInFlight: cfg.maxInFlight,
+        }));
+        state.storage = 'localStorage';
+        state.reason = null;
+      } catch (err) {
+        state.storage = 'unwritable';
+        state.reason = String((err && err.message) || err);
+        warnOnce('write', `API 档写不进本机存储（${state.reason}）：本次设置只在这一个页面里生效。`);
+      }
+    } else {
+      state.reason = 'no-store';
+    }
+    refresh();
+    return redacted();
+  };
+
+  // 给已经接管的那一拍发一个请求。返回 1 = 真的发出去了，0 = 一个字节都没动
+  // （调用方必须当场交付那一拍 —— 这就是"发不出去也照旧说话"的那条路）。
+  const dispatch = (i, s, c, ev) => {
+    if (!maySend(stats.inFlight, cfg)) { stats.gateClosed += 1; return 0; }
+    let summary;
+    try {
+      summary = buildSummary(c, world, { mood: ev.mood, suggestion: ev.text });
+    } catch (err) {
+      stats.summaryFailed += 1;
+      return 0;                      // 摘要都拼不出来 ⇒ 不接管，规则档那句照旧说
+    }
+    const r = buildRequest(summary, cfg);
+    if (!r) { stats.noRequest += 1; return 0; }
+    const budget = tokenBudget(c.traits.personality.talk);
+    let controller = null;
+    try {
+      // 老 Safari 没有这个构造器就**不带 signal**：那一拍的超时仍由帧循环的到期扫描兜住
+      // （决策 B），少一个 signal 只是连接可能多活一会儿，绝不影响缸。
+      if (typeof AbortController === 'function') controller = new AbortController();
+    } catch (err) { stats.errors += 1; }
+    req[i] = 1;
+    ctrl[i] = controller;
+    stats.inFlight += 1;
+    if (stats.inFlight > stats.inFlightMax) stats.inFlightMax = stats.inFlight;
+    stats.sent += 1;
+    stats.fetchCalls += 1;
+    let promise = null;
+    try {
+      const init = {
+        method: r.method,
+        headers: r.headers,          // authorization 头里那个 key 只在这一处出门
+        body: JSON.stringify(r.body),
+      };
+      if (controller) init.signal = controller.signal;
+      promise = send(r.url, init);
+    } catch (err) {
+      promise = null;                // 同步就抛（非法 URL、能力被策略挡掉）⇒ 走回落
+    }
+    if (!promise || typeof promise.then !== 'function') {
+      endFlight(i);
+      stats.networkFailed += 1;
+      return 0;
+    }
+    // 一次请求的唯一终点：先结在途的账（只结一次），再问队列那一拍还在不在。
+    // 迟到的那一份会在 resolvePending 里被丢掉并计数，绝不塞进后来那句话（决策 F）。
+    const settle = (utterance, why) => {
+      endFlight(i);
+      const applied = resolvePending(p, i, utterance, nowMs(), s);
+      if (utterance && applied === 1) stats.replyAccepted += 1;
+      if (why) stats[why] += 1;
+    };
+    promise.then((res) => {
+      if (!res || res.ok !== true) { settle(null, 'httpFailed'); return; }   // 非 2xx 不可能产出替换
+      let jsonish;
+      try { jsonish = res.json(); } catch (err) { settle(null, 'bodyFailed'); return; }
+      if (!jsonish || typeof jsonish.then !== 'function') { settle(null, 'bodyFailed'); return; }
+      jsonish.then((json) => {
+        let v = null;
+        try { v = validateReply(json, budget, c); } catch (err) { stats.errors += 1; }
+        if (v && v.ok === true) settle(v.utterance, null);
+        else { if (v) stats.replyRejected += 1; settle(null, null); }
+      }, () => settle(null, 'bodyFailed'));
+    }, () => settle(null, 'networkFailed'));
+    return 1;
+  };
+
+  // 把交付缓冲区里的那几拍交回消费路径。交付的那一刻，还没落地的请求就地掐掉并结账。
+  const drainGive = (out) => {
+    if (p.giveCount === 0) return;
+    for (let i = 0; i < p.giveCount; i++) {
+      endFlight(p.giveIdx[i]);
+      out.push(p.give[i]);
+      stats.delivered += 1;
+    }
+    clearGive(p);
+  };
+
+  // 一帧的全部工作：① 接管这一帧新说的句子（能发才按，发不了就照旧当帧交付）
+  // ② 到期扫描（**这就是超时机制**，本文件没有任何定时器）③ 把该出现的字交出去。
+  const frame = (events, tMs, out) => {
+    clockMs = Number.isFinite(tMs) ? tMs : clockMs;
+    stats.frames += 1;
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      if (!ev || ev.kind !== 'say') { out.push(ev); continue; }
+      // 按住的上界 = min(暂存预算, 请求预算)：存储里填了个比 apiHoldMs 还短的 timeoutMs 时，
+      // 提前松手才是对的 —— 那一拍等的东西已经不可能再来了。"最多晚 apiHoldMs 毫秒"
+      // 这条上界因此仍然成立（只会更早，不会更晚）。
+      // ⚠️ 用 deadlineFor 而不是自己相加：它对"时钟回拨"那一支有处理（api.js 里那条注释），
+      // 照抄 start + timeout 会把 deadline 留在过去、每条都当场被判超时，
+      // 症状恰好就是 spec §4.13.2 第 1 条禁止的"填了 key 反而不说话了"。
+      const holdUntil = deadlineFor(clockMs, clockMs, A.apiHoldMs);
+      const reqUntil = deadlineFor(clockMs, clockMs, cfg.timeoutMs);
+      if (pushPending(p, ev, reqUntil < holdUntil ? reqUntil : holdUntil) === 0) {
+        // 队列没收这一拍：形状不对，或腾不出位（give 满而槽位全占）。
+        // 两种都当场原样交付 —— 返回值 0 的含义是"这一拍不归队列管"，不是"这一拍不说了"。
+        if (p.lastReason === PUSH_REASONS.BAD_SHAPE) stats.badShape += 1;
+        else stats.notTaken += 1;
+        out.push(ev);
+        continue;
+      }
+      const idx = p.lastIdx;
+      const s = p.lastToken;
+      let c = null;
+      for (let k = 0; k < world.creatures.length; k++) {
+        if (world.creatures[k].id === ev.id) { c = world.creatures[k]; break; }
+      }
+      let sent = 0;
+      if (!c) stats.noCreature += 1;              // 说话的那只已经不在缸里了
+      else sent = dispatch(idx, s, c, ev);
+      drainGive(out);                // 顶位/挤出来的那几条也是在这一刻交出去的
+      // 没发出去 ⇒ 按着它毫无意义，当场交付规则档那一句（**附加延时为零**）。
+      if (sent === 0) resolvePending(p, idx, null, clockMs, s);
+    }
+    const n = duePending(p, clockMs);
+    for (let j = 0; j < n; j++) {
+      const idx = p.due[j];
+      endFlight(idx);                // 请求还挂着 ⇒ 掐掉并结掉在途的账
+      releasePending(p, idx);        // 到期就带着**当下手上的文案**出去
+    }
+    drainGive(out);
+    return out;
+  };
+
+  // 缸停了：还挂着的请求一律掐掉，还按着的话不再交付（屏幕已经不画了），两条都留读数。
+  const abandon = () => {
+    let requests = 0;
+    for (let i = 0; i < p.n; i++) {
+      if (req[i] === 1 && endFlight(i) === 1) { stats.aborted += 1; requests += 1; }
+    }
+    return { requests, beats: dropAllPending(p) };
+  };
+
+  readStore();
+  refresh();
+
+  return {
+    pending: p, state, stats,
+    getApiConfig: redacted,
+    setApiConfig: setConfig,
+    frame,
+    abandon,
+  };
 }
 
 // ---------------------------------------------------------------- 活动 controller
@@ -262,6 +598,20 @@ export function boot(opts) {
     getSize: () => viewport,
   });
 
+  // 可选 API 档（B19b-ii）。它住在本文件而不是 api.js 的理由写在 tests/constraints.test.js：
+  // 那两个名字（本机存储与发请求的能力）在 src/ 里只许出现在这里。
+  //
+  // ⚠️ 关掉时（出厂默认，或存储里的 cfg 不合格）它在帧循环里**一个字节都不多做**：
+  // 下面 step() 里那个 `api.state.active` 是唯一的分支，false 时连交付数组都不碰。
+  // 这条不是注释 —— tests/api.test.js 拿"零次请求 + 世界指纹与对照缸逐位相同"钉它。
+  //
+  // ⚠️ 交付顺序：档位开着时，那一拍的 say 事件被**两个消费方一起晚收到**（气泡与「啾」
+  // 同时出现，只是晚一点，最多晚 apiHoldMs 毫秒）。这是表现侧的时序，世界状态一个字节没变
+  // （spec §4.13.2.1 第 7 条把这条代价如实记着）。
+  const api = attachApiTier(world, { storage: options.storage, fetch: options.fetch });
+  // 只有档位开着时才用的交付缓冲（复用，每帧清空，不在关闭路径上分配）。
+  const delivery = [];
+
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
     const cssW = canvasEl.clientWidth || window.innerWidth;
@@ -322,14 +672,23 @@ export function boot(opts) {
     const simDt = loop.steps * CONFIG.fixedDt;
     if (renderer) renderer.draw(ctx, world, bodies, viewport, simDt);
 
-    // 事件消费（B16 接溶散粒子、B18 接叫声、B19a 接气泡）。
+    // 事件消费（B16 接溶散粒子、B18 接叫声、B19a 接气泡、B19b-ii 接 API 档的暂存交付）。
     // ⚠️ 必须每帧清空：world.events 是**无界增长**的（sim.js 只写不读、不代为清理），
     // 开一小时的标签页会把它涨到几十万条，然后每帧遍历它。
     // ⚠️ 清空由**这里**做、消费方一律不清空：renderer 与 audio 读同一批事件，
     // 谁先清空谁就把事件从另一个人手里抢走了（render.js 的 consumeEvents 顶部那条）。
     // 这就是 B16 已经在接、而 audio 要到 B18 才存在也不能改成"audio 自己清"的原因。
-    if (world.events.length > 0) {
-      if (renderer) consumeEvents(renderer, world.events);
+    //
+    // ⚠️ 档位开着时消费者读的是 `delivery`（= 本帧该出现的那些话，含刚从暂存队列放出来的），
+    // 关掉时读的就是 `world.events` 本身 —— 同一个数组引用，一次拷贝都没有。
+    // 那条 `api.state.active` 是这一段唯一的分支，也是"关掉 ⇒ 零额外动作"那条断言的对象。
+    let events = world.events;
+    if (api.state.active) {
+      delivery.length = 0;
+      events = api.frame(world.events, t, delivery);
+    }
+    if (events.length > 0) {
+      if (renderer) consumeEvents(renderer, events);
     }
     // ⚠️ audio.consume 刻意**不在**上面那个 `events.length > 0` 的守卫里 —— 这是 B18 接线上
     // 唯一一处非对称，理由值得写全：
@@ -339,7 +698,10 @@ export function boot(opts) {
     // 把它放进 if 里的症状不是报错，而是"这缸只在有 eat/hatch/死掉的那些帧里才可能叫"，
     // 而那样的帧在 60 分钟里占不到百分之几 —— 玩家听到的是一缸哑巴。
     // 这一条由 tests/audio.test.js 的「audio.consume 不在事件守卫之内（它还有第二通道）」钉住。
-    if (audio) audio.consume(world.events, world);
+    // ⚠️ B19b-ii 之后它读的也是 `events`（档位开着时那份"本帧该出现的"而不是原始那批）：
+    // 还回 world.events 的话，被按住的那一拍会在按住它的那几帧里**先响一声**，
+    // 而决策 A 说得很清楚：气泡与「啾」要一起晚一点出现，而不是各响一次。
+    if (audio) audio.consume(events, world);
     world.events.length = 0;
   };
 
@@ -359,6 +721,16 @@ export function boot(opts) {
       return audio.getMuted();
     },
     get frame() { return state.frame; },
+    // ---- 可选 API 档（B19b-ii）----
+    // 档位的全部读数：`{ pending, state, stats, getApiConfig, setApiConfig, frame, abandon }`。
+    // 计划 2 没有设置页，所以填端点与 key 的入口就是这两个方法（spec §4.13.2.1 第 6 条），
+    // 而 `globalThis.__tank` 就是下面这个 controller —— 于是 devtools 里
+    // `__tank.setApiConfig({enabled:true, endpoint:'https://…', model:'…', key:'…'})` 是唯一的通道。
+    api,
+    // ⚠️ 决策 D：这份读数**永远不许含 key 的值**（它只报 hasKey）。tests/api.test.js
+    // 拿"JSON.stringify 里搜不到那条子串"钉它 —— 靠注释挡不住下一个改这里的人。
+    getApiConfig: api.getApiConfig,
+    setApiConfig(patch) { return api.setApiConfig(patch); },
     setTimeScale(scale) {
       // 只接受 CONFIG.timeScales 里的值：随手写个 3 或 10 会让子步进数暴涨，
       // 而 spec §3.4-1 的固定步长保证也就跟着失效了。
@@ -382,6 +754,10 @@ export function boot(opts) {
         gestureTarget = null;
       }
       if (audio && audio.close) audio.close();
+      // 档位（B19b-ii）：把还挂着的请求一律掐掉、把还按着的话一律收走（都带计数）。
+      // 这一步之后不可能再有"迟到的回复把字塞进气泡池"那一幕 —— 因为本文件从头到尾
+      // **没有一个定时器**：交付只发生在 step() 里，而 step() 已经不跑了（决策 B）。
+      api.abandon();
       window.removeEventListener('resize', resize);
       if (activeController === controller) activeController = null;
     },

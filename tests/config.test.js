@@ -77,6 +77,9 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   // ⚠️ 56 → 57、49 → 50（2026-10-22 B19b-i）：新增 **CONFIG.api 一段**（一个节点、18 个标量）。
   // 与 B18 的八张声表相反，这一段只需要一个节点：18 个旋钮之间没有"逐键比对"的结构关系
   // （它们各自的两侧取值由 tests/api.test.js 钉行为），而子表会让节点数与顶层键数各加一 ——
+  // ⚠️ 57 / 50 **不变**（2026-10-22 B19b-ii）：那一段加了**两个**标量（18 → 19 → 20 项：apiHoldMs、pendingCap）。
+  // 标量不是节点，段名也不是新段，所以这两条计数纹丝不动 —— 这个"不动"是**实测**出来的
+  // （把上面那行 node -e 的遍历抄过来数一遍），不是按"加标量不影响计数"这条规律推的。
   // 那正是这里要的摩擦：加一段就必须在下面那张段名清单里说清楚。
   // ⚠️ 这一段里**永远不许出现 API key 的值**（spec §7.2 末）：CONFIG 深冻结且提交进仓库，
   //    而 key 只住本机存储。endpoint / model 两个默认值是空字符串，就是这条的形状证据。
@@ -801,15 +804,17 @@ test('叫声表的三十六项齐备（28 个调度量 + 8 张声表子行，nod
 // 这一段最特殊的一条要求是**它不该有内容的地方必须真的空着**：endpoint / model 是空串，
 // 而 key 连一个字段都没有（spec §7.2 末：key 绝不进共享存档；CONFIG 又是提交进仓库的）。
 
-test('可选 API 档的十八项旋钮（node 数出来的）：默认关闭、没有存放 key 的位置、两侧上界自洽', () => {
+test('可选 API 档的二十项旋钮（node 数出来的）：默认关闭、没有存放 key 的位置、两侧上界自洽', () => {
   const A = CONFIG.api;
   assert.deepEqual(Object.keys(A).sort(), [
-    'enabled', 'endpoint', 'maxInFlight', 'maxTokensOut', 'maxTokensOutCap', 'model',
-    'nameMaxChars', 'personaLines', 'suggestionMaxChars', 'summaryHeardTop', 'summaryMaxChars',
-    'summaryNeedTop', 'temperature', 'temperatureMax', 'textMaxChars', 'timeoutMaxMs',
-    'timeoutMs', 'wordMaxChars',
-  ], 'CONFIG.api 的十八项键集（node 数出来的）变了 —— 加一项删一项都要在这里说清楚');
-  assert.equal(Object.keys(A).length, 18);
+    'apiHoldMs', 'enabled', 'endpoint', 'maxInFlight', 'maxTokensOut', 'maxTokensOutCap', 'model',
+    'nameMaxChars', 'pendingCap', 'personaLines', 'suggestionMaxChars', 'summaryHeardTop',
+    'summaryMaxChars', 'summaryNeedTop', 'temperature', 'temperatureMax', 'textMaxChars',
+    'timeoutMaxMs', 'timeoutMs', 'wordMaxChars',
+  ], 'CONFIG.api 的二十项键集（node 数出来的）变了 —— 加一项删一项都要在这里说清楚');
+  assert.equal(Object.keys(A).length, 20);
+  // ⚠️ 18 → 19 → 20（2026-10-22 B19b-ii）：加的两个都是**标量**（apiHoldMs、pendingCap），不是子表，
+  // 所以上面那两条全局计数（节点 57 / 顶层键 50）都不动 —— 实测过，不是推断。
 
   // 默认关闭：spec §4.13.2 标题逐字「默认关闭」。与文字层那条刻意相反 ——
   // 文字层默认开（不联网也完整运行），API 档默认关（填了才引入网络依赖，spec §2 那行）。
@@ -861,6 +866,31 @@ test('可选 API 档的十八项旋钮（node 数出来的）：默认关闭、�
   // 逐格上界之和必须落在总预算里（tests/api.test.js 钉的是它的行为侧：尾部字段没被裁掉）
   assert.ok(A.summaryMaxChars > A.nameMaxChars + A.wordMaxChars + A.suggestionMaxChars
     + A.summaryHeardTop * A.wordMaxChars, '总预算比逐格上界之和还小 ⇒ 必填字段会被裁掉');
+
+  // ---- B19b-ii（2026-10-22）新增的那一个旋钮：一句话最多被按多久 ----
+  // 它是这一档**唯一的代价**，所以两侧都得有闸：
+  //   · 上限 1200ms 是"玩家还看得见这只在说话"与"别把缸打成延迟一截的哑剧"之间的折中；
+  //   · **严格小于** bubbleTtl×1000 是显示纪律（spec §4.13.1「3 秒淡出」）：按到比整条气泡
+  //     的命还久，那句话一出场就该开始淡出了，等于把它按住到看不见 —— 而那仍然是"取消"，
+  //     不是"延后"。一个能被填成破坏显示纪律的值的旋钮，必须有一条写着它不许那样的闸。
+  assert.equal(A.apiHoldMs, 1200);
+  assert.ok(Number.isInteger(A.apiHoldMs) && A.apiHoldMs > 0, 'apiHoldMs 必须是正整数毫秒');
+  assert.ok(A.apiHoldMs <= 1200, `apiHoldMs 越过了 1200 毫秒的天花板：${A.apiHoldMs}`);
+  assert.ok(A.apiHoldMs < CONFIG.speech.bubbleTtl * 1000,
+    `apiHoldMs(${A.apiHoldMs}) 必须严格小于 bubbleTtl×1000(${CONFIG.speech.bubbleTtl * 1000})`);
+  // 与请求预算的关系不是等式而是** min()**：接线层按住的那一拍到期时就把请求掐掉，
+  // 所以默认值下（timeoutMs 4000 > apiHoldMs 1200）"迟到的回复"是常态而不是边缘情况 ——
+  // 这条由 tests/api.test.js 的 boot 级用例钉住行为侧，这里只钉"两个数各是什么"。
+  assert.ok(A.timeoutMs !== A.apiHoldMs, '请求预算与按住时长是两件事，不许合成一个数');
+
+  // pendingCap：暂存队列的槽位数。它是 main.js 那个接线层的**唯一**内存上界，
+  // 所以必须自己成立，不许借绘制层的 bubblePoolCapacity()（那是"屏幕上能挂几条"，不是"按着几拍"）。
+  // 下界由 maxInFlight 决定：在途的每一个都必须有自己的槽位，否则刚发出去就被顶掉，
+  // 症状是"开了这一档反而几乎换不到词"，而且不报错。
+  assert.equal(A.pendingCap, 8);
+  assert.ok(Number.isInteger(A.pendingCap) && A.pendingCap > 0, 'pendingCap 必须是正整数');
+  assert.ok(A.pendingCap >= A.maxInFlight,
+    `pendingCap(${A.pendingCap}) 至少装得下 maxInFlight(${A.maxInFlight}) 个在途请求，否则发出去就被顶掉`);
 });
 
 test('NEED_WORDS 的键与 needs 的四条匮乏度是同一份键表（不是各抄一遍）', () => {

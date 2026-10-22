@@ -1016,15 +1016,21 @@ test('audio.js 只 import 既有模块，且复用的是 sizeOf / begLevelOf / a
 
 // ======================================================== 五、main.js 接线
 
-test('main.js 每帧都喂 audio.consume（它不在 events.length>0 的守卫里 —— 第二通道要每帧巡检）', () => {
+test('main.js 每帧都喂 audio.consume（它不在事件数守卫里 —— 第二通道要每帧巡检）', () => {
   const src = SRC('main.js');
   assert.ok(/from '\.\/audio\.js'/.test(src), 'main.js 没有 import audio.js');
-  assert.ok(/audio\.consume\(world\.events, world\)/.test(src), 'audio.consume(events, world) 没接上');
+  // ⚠️ B19b-ii 之后消费方读的是 `events` 这个**局部名**（档位开着时它是"本帧该出现的那批"，
+  // 关着时 `= world.events` —— 同一个数组引用，一次拷贝都没有）。守卫跟着改名，
+  // 但它保护的东西一个字没减：audio 仍然必须每帧被喂、仍然不许待在事件数守卫里、
+  // 清空仍然在所有消费方之后。
+  assert.ok(/audio\.consume\(events, world\)/.test(src), 'audio.consume(events, world) 没接上');
+  assert.ok(/let events = world\.events;/.test(src),
+    'events 的缺省必须是 world.events 本身（写成拷贝就每帧一次分配，"关掉 ⇒ 零额外动作"那条也随之变假）');
   assert.ok(/world\.events\.length = 0/.test(src), '清空仍必须由 main.js 做（renderer 与 audio 读同一批事件）');
-  // 取出 `if (world.events.length > 0) { ... }` 那一整块（大括号配对，先例见 tests/body.test.js
+  // 取出 `if (events.length > 0) { ... }` 那一整块（大括号配对，先例见 tests/body.test.js
   // 那条「updateBodies 必须在子步循环里」），要求它**含** consumeEvents 而**不含** audio.consume。
-  const m = src.match(/if\s*\(world\.events\.length > 0\)\s*\{/);
-  assert.ok(m, 'main.js 里找不到事件守卫 if (world.events.length > 0)');
+  const m = src.match(/if\s*\(events\.length > 0\)\s*\{/);
+  assert.ok(m, 'main.js 里找不到事件守卫 if (events.length > 0)');
   const start = m.index + m[0].length - 1;
   let depth = 0;
   let end = -1;

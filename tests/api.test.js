@@ -25,10 +25,15 @@ import { NEED_KEYS } from '../src/needs.js';
 import { NEED_WORDS, tokenBudget } from '../src/lexicon.js';
 import { createMemory, remember, PLAYER_ID } from '../src/memory.js';
 import { createWorld, tickWorld, aliveCreatures } from '../src/sim.js';
+import { boot } from '../src/main.js';
+import { createBubbles, bubblePoolCapacity } from '../src/bubble.js';
+import { createBursts } from '../src/render.js';
 import {
-  REASONS, CONFIG_REASONS, MOOD_LABELS, PERSONA_WORDS,
+  REASONS, CONFIG_REASONS, MOOD_LABELS, PERSONA_WORDS, PUSH_REASONS, RELEASE_WHY,
   buildSummary, buildRequest, configIssue, validateReply,
   deadlineFor, shouldAbort, maySend,
+  createPending, pushPending, duePending, releasePending, resolvePending,
+  clearGive, dropAllPending,
 } from '../src/api.js';
 
 const A = CONFIG.api;
@@ -684,9 +689,15 @@ test('src/api.js 里没有网络、没有 DOM、没有本机存储，也没有�
   // 与 tests/speech.test.js 里那条同形，但**扫原文不剥注释**（比 constraints 那条更严）：
   // 本模块的职责边界就是"什么都不碰"，连提一嘴都不许 —— 于是注释里要写那个名字时
   // 一律写成 f-e-t-c-h（src/bubble.js 文件头的先例）。
+  //
+  // B19b-ii（2026-10-22）往后两个名字进这张表：**定时器**。暂存队列的超时机制是
+  // "帧循环里 duePending 那一趟扫描"（决策 B），所以本模块既没有定时器可设，
+  // 也没有定时器需要在 stop() 时收拾 —— 那两个名字一旦出现，就说明有人把超时
+  // 挪出了帧循环，症状是"缸停了还在回调里改状态"与"标签页挂后台时整排句子卡死"。
   const body = SRC('api.js');
   for (const banned of ['fetch', 'document', 'window', 'canvas', 'AudioContext',
-    'localStorage', 'requestAnimationFrame', 'AbortController', 'XMLHttpRequest', 'Headers']) {
+    'localStorage', 'requestAnimationFrame', 'AbortController', 'XMLHttpRequest', 'Headers',
+    'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval']) {
     assert.ok(!new RegExp(`\\b${banned}\\b`).test(body), `api.js 出现了 ${banned}`);
   }
   assert.ok(!/Math\.random\s*\(/.test(body), 'api.js 不得调用 Math.random()');
@@ -707,3 +718,888 @@ test('性格三行只进提示词，不进信息卡：render.js 与 bubble.js �
   const render = SRC('render.js');
   for (const p of phrases) assert.ok(!render.includes(p), `render.js 里出现了性格措辞 ${p}`);
 });
+
+// ================================================================ 暂存队列（B19b-ii）
+//
+// 这一节测的是"把已经要说出口的那一拍按住的这只手"。它住在 api.js 而不是 main.js 的理由
+// 与整个文件的分工同一条：这里的语义（先进先出、到期先出、有上界、每个出口都有计数）
+// 全是**值**，能在 Node 里逐条断言。而它们每一条都对应一句失败形式：
+//   · 「不交付」= 让一只生物闭嘴（§4.13.2 第 1 条禁止的那件事，也是探针 2 要抓的）；
+//   · 「迟到回复改到别人嘴里」= 决策 F 禁止的那件事（探针 3 要抓的）；
+//   · 「静默丢弃」= §7.7 禁止的那件事。
+// 所以下面每一节都不是"形状检查"，而是那三句话的机器形式。
+
+const HOLD = 1200;                        // 与 CONFIG.api.apiHoldMs 同值（那条不等式由 config 钉）
+
+const beat = (id, text = '喵喵 饿了', mood = 'happy') => ({
+  kind: 'say', id, text, tokens: text.split(' '), mood,
+});
+const utt = (text) => ({ text, tokens: text.split(' ') });
+// 把交付缓冲区抽成数组（只有测试里这么用；运行中一律原地读写 give/giveCount）
+const drained = (p) => {
+  const list = [];
+  for (let i = 0; i < p.giveCount; i++) list.push(p.give[i]);
+  clearGive(p);
+  return list;
+};
+const push = (p, ev, deadlineMs) => {
+  const code = pushPending(p, ev, deadlineMs);
+  return { code, idx: p.lastIdx, stamp: p.lastToken, reason: p.lastReason };
+};
+
+test('createPending：容量有下限、槽位表同宽、所有读数从 0 开始', () => {
+  for (const cap of [0, -3, NaN, undefined, 1, 8]) {
+    const p = createPending(cap);
+    assert.ok(p.n >= 1, `容量必须有下限（收到 ${String(cap)} ⇒ ${p.n}）`);
+    assert.equal(p.count, 0);
+    assert.equal(p.give.length, p.n + 1, '交付缓冲区比槽位多一格：见"溢出也不吞字"那条');
+    for (const key of ['ev', 'id', 'text', 'tokens', 'mood', 'changed', 'due']) {
+      assert.equal(p[key].length, p.n, `${key} 这张表与槽位不同宽，越界写就会静默长到别的槽上`);
+    }
+    assert.equal(p.deadlineMs.length, p.n);
+    for (const c of ['accepted', 'rejected', 'superseded', 'overCap', 'expired', 'resolved',
+      'refused', 'released', 'replaced', 'fellBack', 'late', 'dropped', 'giveOverflow', 'peak']) {
+      assert.equal(p[c], 0, `${c} 必须从 0 开始（读数是证据，不是装饰）`);
+    }
+  }
+  assert.deepEqual(Object.keys(RELEASE_WHY).length > 0, true);
+});
+
+test('pushPending：接管成功返回 1，槽里存的是**同一条事件对象**（不复制、不改写）', () => {
+  const p = createPending(4);
+  const ev = beat('a1', '喵喵 饿饿');
+  const r = push(p, ev, 1000 + HOLD);
+  assert.equal(r.code, 1);
+  assert.equal(r.reason, PUSH_REASONS.OK);
+  assert.equal(p.count, 1);
+  assert.equal(p.accepted, 1);
+  assert.equal(p.peak, 1);
+  assert.equal(p.ev[r.idx], ev, '队列必须存那条事件的引用：自己 new 一份就是每拍一次分配');
+  assert.equal(ev.text, '喵喵 饿饿', '接管那一刻不许改字');
+  assert.equal(p.text[r.idx], ev.text);
+  assert.deepEqual(p.tokens[r.idx], ev.tokens);
+  assert.equal(p.id[r.idx], 'a1');
+  assert.equal(p.mood[r.idx], 'happy', '心情是内核定的，API 档不换它（只换措辞）');
+  assert.ok(r.stamp >= 1, '每一次占用槽位都要发一个新的代号');
+});
+
+test('pushPending：形状不对 ⇒ 0 且不进队列，而调用方必须照旧交付那一句（探针 2 的另一半）', () => {
+  const p = createPending(4);
+  for (const bad of [null, undefined, {}, { id: '', text: '喵喵' }, { id: 'a1' },
+    { id: 'a1', text: '' }, { id: 7, text: '喵喵' }]) {
+    const before = p.accepted + p.count;
+    assert.equal(pushPending(p, bad, 100), 0, `${JSON.stringify(bad)} 不该被接管`);
+    assert.equal(p.count, 0);
+    assert.equal(p.accepted, before);
+  }
+  assert.equal(p.rejected, 7, '每一条拒绝都要留下读数（§7.7）');
+  assert.equal(p.lastReason, PUSH_REASONS.BAD_SHAPE);
+  // 返回值 0 的含义由接线层兑现：main.js 那条分支把这一句原样推给消费方，绝不因为
+  // "队列没收"就让它消失。那一条行为断言在 boot 级用例里（见下面的"零额外动作"节）。
+});
+
+test('pushPending：脏 deadline 当场到期 —— 宁可不按住，也绝不把一句话永远按着', () => {
+  const p = createPending(2);
+  for (const bad of [NaN, Infinity, undefined, null, '123']) {
+    const r = push(p, beat('a1'), bad);
+    assert.equal(r.code, 1);
+    assert.equal(duePending(p, 0), 1, `收到 ${String(bad)}：这一拍必须立刻可交付`);
+    assert.equal(releasePending(p, p.due[0]), 1);
+    assert.equal(p.count, 0);
+    drained(p);                        // 交付契约：每推一条就抽干一次（下面溢出那条测的是违约）
+  }
+  assert.ok(p.expired >= 5);
+});
+
+test('duePending：到点才算、等得最久的先出、同刻按入队先后 —— 这就是超时机制', () => {
+  const p = createPending(4);
+  const a = push(p, beat('a1'), 100);
+  const b = push(p, beat('b2'), 50);
+  push(p, beat('c3'), 100);            // 与 a 同刻，但 a 先到
+  assert.equal(duePending(p, 49), 0, '一个都没到点');
+  assert.equal(duePending(p, 50), 1);
+  assert.equal(p.due[0], b.idx, '到期先出');
+  assert.equal(duePending(p, 100), 3, 'deadline 恰好等于 now 就算到期（shouldAbort 那把判据）');
+  assert.deepEqual(p.due.slice(0, 3), [b.idx, a.idx, p.lastIdx], '同刻按入队先后（代号升序）');
+  assert.equal(duePending(p, 1000), 3);
+  assert.ok(p.due.length <= p.n, '到期清单本身必须有界（与槽位同宽）');
+});
+
+test('releasePending：交出去的是规则档原句，三个读数各 +1；同一槽位释放第二次给 0', () => {
+  const p = createPending(2);
+  const ev = beat('a1', '困困 饿饿');
+  const r = push(p, ev, 10);
+  duePending(p, 20);
+  assert.equal(releasePending(p, p.due[0]), 1);
+  const out = drained(p);
+  assert.equal(out.length, 1);
+  assert.equal(out[0], ev, '交付的就是接管那条事件对象');
+  assert.equal(out[0].text, '困困 饿饿', '没等到回复 ⇒ 原句站着（这就是"回落"）');
+  assert.equal(p.released, 1);
+  assert.equal(p.fellBack, 1);
+  assert.equal(p.replaced, 0);
+  assert.equal(p.expired, 1);
+  assert.equal(p.count, 0);
+  assert.equal(releasePending(p, r.idx), 0, '空槽不许被交付第二次（那会把一句话变两句）');
+  assert.equal(p.released, 1, '第二次释放不留 released 读数');
+});
+
+test('resolvePending：通过的文案换成模型的，交出去的那条就是模型那句', () => {
+  const p = createPending(2);
+  const ev = beat('a1', '喵喵 饿饿');
+  const r = push(p, ev, 900);
+  assert.equal(resolvePending(p, r.idx, utt('肚肚 空空 喵喵'), 500, r.stamp), 1);
+  assert.equal(p.resolved, 1);
+  assert.equal(p.released, 1);
+  assert.equal(p.replaced, 1);
+  assert.equal(p.fellBack, 0);
+  const out = drained(p);
+  assert.equal(out.length, 1);
+  assert.equal(out[0], ev, '交出去的还是同一条对象（零分配）');
+  assert.equal(out[0].text, '肚肚 空空 喵喵');
+  assert.deepEqual(out[0].tokens, ['肚肚', '空空', '喵喵']);
+  assert.equal(out[0].id, 'a1', '只换措辞：id 与心情都是内核的，模型改不到');
+  assert.equal(out[0].mood, 'happy');
+  assert.equal(p.count, 0);
+  assert.equal(duePending(p, 9999), 0, '已经落地的拍不许再被到期扫到第二次');
+});
+
+test('resolvePending：模型那句被拒（utterance=null）⇒ 原句站着、当场交付，绝不延后也不闭嘴', () => {
+  const p = createPending(2);
+  const ev = beat('a1', '喵喵 饿饿');
+  const r = push(p, ev, 900);
+  assert.equal(resolvePending(p, r.idx, null, 300, r.stamp), 1);
+  assert.equal(p.refused, 1);
+  assert.equal(p.fellBack, 1);
+  assert.equal(p.replaced, 0);
+  const out = drained(p);
+  assert.equal(out[0].text, '喵喵 饿饿');
+  assert.equal(p.count, 0);
+  // 形状不对的 utterance（缺 tokens / 空 text）按"被拒"处理，而不是把半个字段写进去
+  const r2 = push(p, beat('a2', '困困'), 900);
+  assert.equal(resolvePending(p, r2.idx, { text: '', tokens: [] }, 400, r2.stamp), 1);
+  assert.equal(p.refused, 2);
+  assert.equal(drained(p)[0].text, '困困');
+});
+
+test('迟到的回复：那一拍早就走了就丢弃并计数，更不许写进下一只生物的嘴里（探针 3）', () => {
+  const p = createPending(1);                     // 一格：逼它复用槽位
+  const first = push(p, beat('a1', '喵喵 饿饿'), 100);
+  duePending(p, 500);
+  releasePending(p, p.due[0]);
+  const late = drained(p)[0];
+  assert.equal(late.text, '喵喵 饿饿', '到期交付的是规则文案');
+
+  const second = push(p, beat('b2', '困困 抱抱'), 800);
+  assert.equal(second.idx, first.idx, '前置条件：槽位确实被复用了');
+  assert.notEqual(second.stamp, first.stamp, '前置条件：代号必须换，否则迟到回复能冒充现任');
+
+  assert.equal(resolvePending(p, second.idx, utt('坏坏 迟到的话'), 600, first.stamp), 0);
+  assert.equal(p.late, 1, '丢一份迟到回复要留下读数');
+  assert.equal(p.released, 1, '丢掉的那份不许变成第二次交付');
+  assert.equal(second.idx >= 0 && p.ev[second.idx] !== undefined, true);
+  assert.equal(p.ev[second.idx].text, '困困 抱抱', '现任那句话一个字都没被改');
+  assert.equal(p.count, 1);
+
+  // 现任自己落地 ⇒ 正常换词，且与迟到的那份互不干扰
+  assert.equal(resolvePending(p, second.idx, utt('困困 谁来抱抱'), 700, second.stamp), 1);
+  assert.equal(drained(p)[0].text, '困困 谁来抱抱');
+  assert.equal(p.late, 1);
+});
+
+test('同一只第二次说话：旧的那拍让位并**当场交付**，队列里同 id 不许叠加', () => {
+  const p = createPending(4);
+  const old = push(p, beat('a1', '喵喵 饿饿'), 10_000);
+  const fresh = push(p, beat('a1', '肚肚 空空'), 10_001);
+  assert.equal(fresh.reason, PUSH_REASONS.SUPERSEDED);
+  assert.equal(p.superseded, 1);
+  assert.equal(p.count, 1, '话痨一只也不许把队列摞起来（与 bubble.js 的 pushSay 同一条规矩）');
+  const out = drained(p);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].text, '喵喵 饿饿', '让位 = 交出去，不是丢掉（探针 2 抓的就是这里）');
+  assert.equal(p.released, 1);
+  assert.equal(p.fellBack, 1);
+  assert.equal(fresh.idx, old.idx, '腾出来的那个槽位正好给新任用（容量没被顶位吃掉）');
+  // 已经挂上模型文案的那条被顶掉时，交出去的是**模型那句**：换好的字不许作废
+  const withModel = push(p, beat('a1', '困困 抱抱'), 10_002);
+  resolvePending(p, withModel.idx, utt('困困 谁来抱抱'), 200, withModel.stamp);
+  drained(p);
+  push(p, beat('a1', '喵喵 饿饿'), 10_003);
+  assert.equal(p.replaced, 1, '被顶掉之前已经落地 ⇒ 那一条按 replaced 计');
+});
+
+test('队列满：把等得最久的那条挤出去交付并计数，新的照样进（永不静默丢）', () => {
+  const p = createPending(2);
+  const a = push(p, beat('a1', '喵喵 饿饿'), 100);
+  push(p, beat('b2', '困困 抱抱'), 200);
+  assert.equal(p.count, 2);
+  const c = push(p, beat('c3', '开心 吃饭'), 300);
+  assert.equal(c.code, 1);
+  assert.equal(c.reason, PUSH_REASONS.OVER_CAP);
+  assert.equal(p.overCap, 1);
+  assert.equal(p.count, 2, '有上界是硬要求：挤掉一条才能进一条');
+  const out = drained(p);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].text, '喵喵 饿饿', '被挤掉的是最早到期的那条（等得最久，先给它出路）');
+  assert.equal(a.idx, c.idx, '它腾出的槽位就是新那条占的');
+  assert.equal(p.released, 1);
+  // 再挤一次：现在最旧的是 b2
+  push(p, beat('d4', '哼', 'calm'), 400);
+  assert.equal(drained(p)[0].text, '困困 抱抱');
+});
+
+test('交付缓冲区腾不出位时宁可**不收这一拍**：绝不覆盖一个还没交出去的句子', () => {
+  // 契约是"每次 pushPending 之后调用方把 give 抽干"（main.js 的 frame 就是这么写的）。
+  // 这条测试故意**违约**连续 push 不抽干，为的是钉住违约之后的行为顺序：
+  //   ① 能安全腾位 ⇒ 挤掉最早到期那条并接管（overCap 计数）；
+  //   ② 腾不出位 ⇒ **拒收新来的这一拍**（notTaken 计数），由调用方原样交付它 ——
+  //      而留在槽里的那条一个字节都没被覆盖。反过来的写法（先覆盖再计数）就是静默吞字。
+  const q = createPending(1);                 // give 长度 = n+1 = 2
+  push(q, beat('x1', '喵喵 饿饿'), 10);
+  assert.equal(push(q, beat('x2', '困困 抱抱'), 20).code, 1);   // 挤掉 x1
+  assert.equal(q.overCap, 1);
+  assert.equal(q.giveCount, 1);
+  assert.equal(push(q, beat('x3', '开心 吃饭'), 30).code, 1);   // 挤掉 x2 ⇒ give 满
+  assert.equal(q.giveCount, 2);
+  const fourth = push(q, beat('x4', '哼 走开'), 40);
+  assert.equal(fourth.code, 0, 'give 满了 ⇒ 这一拍不接管（而不是把 x3 覆盖掉）');
+  assert.equal(fourth.reason, PUSH_REASONS.OVER_CAP);
+  assert.equal(q.notTaken, 1, '拒收也要留下读数');
+  assert.equal(q.giveOverflow, 0, '预检查挡住了就越界写一次都没有（那个计数器该永远是 0）');
+  assert.equal(q.stuck, 0, '同上：stuck 是 handOff 里的兜底，走到就说明预检查写错了');
+  assert.equal(q.count, 1);
+  assert.equal(q.ev[0].text, '开心 吃饭', '槽里那句还是 x3：它没有被 x4 覆盖掉');
+  // 调用方对返回 0 的那一条的义务：自己交付它（下面这一行就是 main.js 那条分支的等价写法）
+  const out = [fourth.code === 0 ? beat('x4', '哼 走开') : null];
+  assert.equal(out[0].text, '哼 走开', '被拒收的那句照样出现在交付里 —— 没有消失');
+  // 抽干之后一切恢复正常
+  const handed = drained(q);
+  assert.deepEqual(handed.map((e) => e.text), ['喵喵 饿饿', '困困 抱抱']);
+  assert.equal(push(q, beat('x5', '肚肚 空空'), 50).code, 1);
+  assert.equal(q.notTaken, 1);
+});
+
+test('dropAllPending：停缸收走悬着的话并计数；此后任何回复都只能算迟到', () => {
+  const p = createPending(4);
+  const a = push(p, beat('a1'), 10_000);
+  push(p, beat('b2'), 10_000);
+  push(p, beat('c3'), 10_000);
+  assert.equal(p.count, 3);
+  assert.equal(dropAllPending(p), 3);
+  assert.equal(p.count, 0);
+  assert.equal(p.dropped, 3, '唯一一条不交付的去路：整缸停了，屏幕上一个字都不画（计数，不静默）');
+  assert.equal(p.released, 0, '停缸的收走不算交付：那几句确实没能出现在气泡里');
+  assert.equal(p.giveCount, 0);
+  assert.equal(resolvePending(p, a.idx, utt('晚到的话'), 11_000, a.stamp), 0);
+  assert.equal(p.late, 1);
+  assert.equal(duePending(p, 99_999), 0);
+  // 收走之后队列还能继续用（同一个 controller 里 stop 之后不该再有帧，但结构不许烂）
+  assert.equal(push(p, beat('d4'), 5).code, 1);
+  assert.equal(p.count, 1);
+});
+
+test('计数器守恒：500 次随机操作之后，每一拍的去处都对得上号', () => {
+  const rng = createRng(20261022);
+  const p = createPending(4);
+  const ids = ['a', 'b', 'c', 'd', 'e', 'f'];
+  let t = 0;
+  let made = 0;
+  for (let i = 0; i < 500; i++) {
+    t += 1 + Math.floor(rng.next() * 9);
+    const roll = rng.next();
+    if (roll < 0.55) {
+      const id = ids[Math.floor(rng.next() * ids.length)];
+      const ev = beat(id, `词${i} 喵喵`);
+      pushPending(p, ev, t + 20);
+      made += 1;
+    } else if (roll < 0.75) {
+      const n = duePending(p, t);
+      for (let j = 0; j < n; j++) releasePending(p, p.due[j]);
+    } else if (roll < 0.92) {
+      // 找一个在飞的槽位，模拟一次回复落地（成功与拒绝各半）
+      let idx = -1;
+      for (let k = 0; k < p.n; k++) if (p.used[k] === 1) { idx = k; break; }
+      if (idx >= 0) {
+        const ok = rng.next() < 0.5;
+        resolvePending(p, idx, ok ? utt('模型 那句') : null, t, p.token[idx]);
+      }
+    } else {
+      drained(p);
+    }
+    clearGive(p);
+    assert.ok(p.count <= p.n, `第 ${i} 步：队列越过了上界 ${p.n} < ${p.count}`);
+    assert.ok(p.giveCount <= p.give.length, '交付缓冲区必须有界');
+  }
+  drained(p);
+  // 守恒式一：进来的每一拍要么已经交付、要么还在槽里、要么被停缸收走。
+  assert.equal(p.accepted, p.released + p.count + p.dropped,
+    `守恒破了：accepted ${p.accepted} ≠ released ${p.released} + count ${p.count} + dropped ${p.dropped}`);
+  // 守恒式二：交付出去的每一拍要么换了词、要么原句站着 —— **没有第三种**（= 静默丢）。
+  assert.equal(p.released, p.replaced + p.fellBack,
+    `交付去向不闭合：released ${p.released} ≠ replaced ${p.replaced} + fellBack ${p.fellBack}`);
+  assert.ok(made > 100, `防空转：这一轮必须真的推过很多拍，实测 ${made}`);
+  assert.ok(p.released > 50, '防空转：也要真的交付过很多拍');
+  assert.ok(p.peak >= 1 && p.peak <= p.n);
+  assert.ok(p.rejected === 0);
+});
+
+test('队列稳态零分配：容器长度与字段集恒定，运行一千年也不长出新键', () => {
+  const p = createPending(3);
+  const keys = Object.keys(p).sort().join(',');
+  const shape = (x) => [x.n, x.count, x.ev.length, x.give.length, x.due.length,
+    x.deadlineMs.length, x.token.length, x.used.length, x.changed.length].join('|');
+  const s0 = shape(p);
+  for (let i = 0; i < 2000; i++) {
+    pushPending(p, beat(`id${i % 7}`, `词${i} 喵喵`), i * 3);
+    const n = duePending(p, i * 3);
+    for (let j = 0; j < n; j++) releasePending(p, p.due[j]);
+    clearGive(p);
+  }
+  assert.equal(Object.keys(p).sort().join(','), keys,
+    '队列长出了新字段（p.stuck 那种"第一次用到才建"的写法在这里是每帧分配）');
+  assert.equal(shape(p), s0, '任何一张表都不许在运行中变长');
+});
+
+test('apiHoldMs 有生产者：main.js 真的按 CONFIG.api.apiHoldMs 算 deadline', () => {
+  // 与"每一种事件种类都要有生产者"同一条纪律：加一个没人读的旋钮就是埋一个死字段。
+  const main = SRC('main.js');
+  assert.ok(/CONFIG\.api\.apiHoldMs|A\.apiHoldMs/.test(main),
+    'main.js 没读 CONFIG.api.apiHoldMs：那一拍按多久是由接线层定的，没读就是这条通道没接');
+  assert.ok(/createPending\(/.test(main) && /pushPending\(/.test(main) && /duePending\(/.test(main),
+    'main.js 必须真的用队列的三个动作：接管、到期扫、交付');
+  assert.ok(/resolvePending\(/.test(main) && /releasePending\(/.test(main),
+    'main.js 必须真的会交付：只 push 不 release 的写法会让每一句都憋死在队列里');
+  assert.ok(!/setTimeout\(|setInterval\(/.test(main),
+    'main.js 里出现定时器：超时机制必须是帧循环里 duePending 那一趟扫描（决策 B）');
+  assert.deepEqual(Object.keys(PUSH_REASONS).sort(), ['BAD_SHAPE', 'OK', 'OVER_CAP', 'SUPERSEDED']);
+  assert.deepEqual(Object.keys(RELEASE_WHY).sort(), ['DUE', 'OVER_CAP', 'RESOLVED', 'SUPERSEDED'],
+    '交付的去路只有这四种；停缸收走与缓冲区拒收各走各的计数器（它们都不是交付）');
+});
+
+// ================================================================ boot 级接线（B19b-ii）
+//
+// 上面那 41 + 16 条测的是**纯函数**，而"纯函数被测到了、调用点没人调"是本项目在
+// B16 / B17c / B18 抓过三次的同一类事故（src/api.js 与 tests/constraints.test.js 都记着）。
+// 所以这一节把真的 boot() 跑起来，逐条钉那个行为矩阵：谁在什么时候说话、说的是谁的措辞、
+// 一个请求都没发时缸是不是照常跑。
+//
+// 手法照 tests/input.test.js 末段与 tests/audio.test.js 末段的先例：把 document / window /
+// requestAnimationFrame / cancelAnimationFrame（本轮再加 globalThis.fetch 与
+// globalThis.localStorage 两条）挂到 globalThis 上，自己驱动帧，finally 里**逐条还原** ——
+// 少还原一条就会让整套测试变成顺序相关的，那个教训也在仓库里记着。
+
+const EL_W = 1280;
+const EL_H = 720;
+
+function makeCanvasEl() {
+  const listeners = new Map();
+  return {
+    clientWidth: EL_W, clientHeight: EL_H, width: 0, height: 0,
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const arr = listeners.get(type);
+      if (!arr) return;
+      const k = arr.indexOf(fn);
+      if (k >= 0) arr.splice(k, 1);
+    },
+    setPointerCapture() {},
+    releasePointerCapture() {},
+    // 本文件只需要绘制上下文能被取到（渲染层整个被替掉了），所以这两个方法就够。
+    getContext: () => ({ setTransform() {}, clearRect() {} }),
+    emit(type, ev) {
+      const arr = listeners.get(type);
+      if (arr) for (const fn of arr.slice()) fn(ev);
+    },
+  };
+}
+
+// 本机存储的桩。**默认不抛**：抛的那一条用例自己换一个新桩。
+function makeStore(initial = {}) {
+  const data = new Map(Object.entries(initial));
+  return {
+    data, reads: 0, writes: 0, lastWrite: null,
+    getItem(k) { this.reads += 1; return data.has(k) ? data.get(k) : null; },
+    setItem(k, v) { this.writes += 1; this.lastWrite = String(v); data.set(k, String(v)); },
+    removeItem(k) { data.delete(k); },
+  };
+}
+
+const boomStore = () => ({
+  getItem() { throw new Error('SecurityError：隐私模式下读 localStorage 就抛'); },
+  setItem() { throw new Error('SecurityError：隐私模式下写 localStorage 就抛'); },
+});
+
+// 一个回复体（OpenAI 那个形状）。
+const reply = (content) => ({ choices: [{ message: { content } }] });
+
+// 请求桩：自己数并发（**独立于档位自己的 stats.inFlight** —— 用被观测方自己的账来
+// 证观测方，那条断言才有意义），并把落地权交给测试：手动 settle/reject 才能测超时竞赛。
+function makeFetcher(mode = 'manual', content = '肚肚 空空 喵喵') {
+  const calls = [];
+  let concurrent = 0;
+  const f = (url, init) => {
+    calls.push({ url, init, signal: init && init.signal });
+    const at = calls.length - 1;
+    concurrent += 1;
+    f.concurrent = concurrent;
+    if (concurrent > f.peak) f.peak = concurrent;
+    if (mode === 'throwSync') throw new Error('同步就抛的 fetch');
+    return new Promise((resolve, reject) => {
+      const release = () => { concurrent -= 1; f.concurrent = concurrent; };
+      const done = {
+        ok: () => resolve({
+          ok: true, status: 200,
+          json: () => Promise.resolve(typeof content === 'function' ? content(at) : reply(content)),
+        }),
+        status: (code) => resolve({ ok: false, status: code, json: () => Promise.resolve({}) }),
+        badBody: () => resolve({
+          ok: true, status: 200, json: () => Promise.reject(new Error('body 不是合法 JSON')),
+        }),
+        network: () => reject(new Error('TypeError: Failed to fetch')),
+      };
+      f.settlers.push(done);
+      if (mode === 'ok') done.ok();
+      else if (mode === 'reject') done.network();
+      else if (mode === 'status401') done.status(401);
+      else if (mode === 'status429') done.status(429);
+      else if (mode === 'badBody') done.badBody();
+      f.last = done;
+      if (init && init.signal && typeof init.signal.addEventListener === 'function') {
+        init.signal.addEventListener('abort', () => { done.network(); });
+      }
+    });
+  };
+  f.calls = calls;
+  f.settlers = [];
+  f.peak = 0;
+  f.concurrent = 0;
+  f.last = null;
+  return f;
+}
+
+// 跑起一缸。opts: { store, fetcher, seed, enable }
+// ⚠️ 这个 helper 必须是 **async** 并在 finally 里等完：回复的落地是 promise 回调，
+// 同步的 try/finally 会在微任务跑完之前就把缸 stop() 掉，那些用例就全成了测"没发生的事"。
+async function withTank(opts, fn) {
+  const o = opts || {};
+  const g = globalThis;
+  const saved = {
+    document: g.document, window: g.window,
+    requestAnimationFrame: g.requestAnimationFrame, cancelAnimationFrame: g.cancelAnimationFrame,
+    fetch: g.fetch, localStorage: g.localStorage, warn: console.warn,
+  };
+  const raf = [];
+  const warns = [];
+  const el = makeCanvasEl();
+  g.document = { createElement: () => makeCanvasEl() };
+  g.window = {
+    devicePixelRatio: 1, innerWidth: EL_W, innerHeight: EL_H,
+    matchMedia: () => ({ matches: false }),
+    addEventListener: () => {}, removeEventListener: () => {},
+  };
+  g.requestAnimationFrame = (cb) => { raf.push(cb); return raf.length; };
+  g.cancelAnimationFrame = () => {};
+  console.warn = (...args) => { warns.push(args.join(' ')); };
+
+  // 真的气泡池与真的粒子池：consumeEvents 是 main.js 调的那个函数，所以这里必须是真池子，
+  // 否则"气泡池收到的形状与规则档逐字同形"那条断言就成了一场空转。
+  const bubbles = createBubbles(bubblePoolCapacity());
+  const bursts = createBursts(CONFIG.render.burstPool);
+  const renderer = { bubbles, bursts, speechEnabled: true, time: 0, draw() {}, onResize() {} };
+  // 叫声层的替身：只记"本帧我看到了哪些 say"，用来钉「啾 与气泡一起晚一点」那条代价。
+  const heard = [];
+  const audio = {
+    consume(events) {
+      for (let i = 0; i < events.length; i++) {
+        if (events[i] && events[i].kind === 'say') heard.push({ text: events[i].text, t: lastT });
+      }
+    },
+    close() {}, getMuted: () => true, setMuted() {}, stats: {},
+  };
+  let lastT = 0;
+  let controller = null;
+  const frame = (dt) => {
+    lastT += dt === undefined ? 1000 / 60 : dt;
+    raf[raf.length - 1](lastT);
+    return lastT;
+  };
+  // 微任务放干：回复的落地是 promise 回调，而测试主体是同步的 —— 不 await 就看不见它。
+  const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+  try {
+    // ⚠️ **网络绊线**：Node 24 自带 globalThis.fetch，而 withTank 不注入 fetcher 时 main.js 用的就是它
+    // —— 那等于"某条用例填了个真端点，测试就替这台设备发一次真请求"。
+    // 所以没注入时把它换成一根会响的绊线：谁真去发，谁就当场炸出一条可读的错。
+    if (!('fetcher' in o)) {
+      g.fetch = () => { throw new Error('测试没注入 fetcher 却试图发请求 —— 这条用例要么补桩，要么把档位关掉'); };
+    }
+    const bootOpts = {
+      canvas: el, seed: o.seed === undefined ? 20261027 : o.seed,
+      renderer, audio,
+    };
+    if ('store' in o) bootOpts.storage = o.store;
+    if ('fetcher' in o) bootOpts.fetch = o.fetcher;
+    controller = boot(bootOpts);
+    // 默认把内核自己的出词关掉：这些用例测的是"那一拍被怎么对待"，
+    // 不是"什么时候有一拍"。世界自己说话的那条路由 natural:true 单独放开（指纹对照用的就是它）。
+    // ⚠️ 这只动 world.speechEnabled 这一个运行时开关（spec §4.13.1.1 第 3 条那条通道），
+    // 而替内核 push 一条 say 事件与内核自己发的那条在结构上完全同形，所以测的还是真接线。
+    if (!o.natural) controller.world.speechEnabled = false;
+    if (o.enable) {
+      controller.setApiConfig({
+        enabled: true, endpoint: 'https://api.example.test/v1', model: 'small-chat', key: SECRET,
+        ...(o.enable === true ? {} : o.enable),
+      });
+    }
+    return await fn({
+      controller, frame, flush, bubbles, bursts, heard, warns, el, raf,
+      store: o.store === undefined ? g.localStorage : o.store,
+      fetcher: o.fetcher === undefined ? g.fetch : o.fetcher,
+      timeOf: () => lastT,
+    });
+  } finally {
+    if (controller) controller.stop();
+    g.document = saved.document;
+    g.window = saved.window;
+    g.requestAnimationFrame = saved.requestAnimationFrame;
+    g.cancelAnimationFrame = saved.cancelAnimationFrame;
+    g.fetch = saved.fetch;
+    g.localStorage = saved.localStorage;
+    console.warn = saved.warn;
+  }
+}
+
+// 那一拍：测试替内核发一条 say（**只喂事件，不改世界** —— 世界说话由它自己决定，
+// 这里只是不让测试等上几分钟才等到自然出词）。
+const speak = (world, id, text = '喵喵 饿饿', mood = 'happy') => {
+  const ev = { kind: 'say', id, text, tokens: text.split(' '), mood };
+  world.events.push(ev);
+  world.stats.said += 1;
+  return ev;
+};
+
+const firstId = (controller) => controller.world.creatures[0].id;
+const poolTexts = (bubbles) => bubbles.text.slice(0, bubbles.count);
+
+// ---------------------------------------------------------------- 矩阵第 1 行：关掉 ⇒ 零额外动作
+
+test('boot：档位关着（出厂默认）⇒ 一次请求都不发、一句都不按、事件当帧就到消费方', async () => {
+  await withTank({ store: makeStore(), fetcher: makeFetcher('manual') }, async (h) => {
+    const { controller, frame, bubbles, heard } = h;
+    assert.equal(controller.api.state.active, false, '默认必须是不参与（出厂 CONFIG.api.enabled=false）');
+    assert.equal(controller.api.state.status, 'off', '关掉的可读原因就是一个字：off');
+    const id = firstId(controller);
+    for (let i = 0; i < 12; i++) {
+      speak(controller.world, id, `喵喵 饿饿${i}`);
+      frame();
+      // 当帧就到：一句话都没被按住 ⇒ 气泡池与「啾」都当帧收到那一条。
+      // ⚠️ 池子里**永远只有一条**是 bubble.js 的规矩（同一只的新句顶掉旧句，spec §4.13.1），
+      // 所以这里断言"最新那句当帧在场"而不是"攒了 i+1 句"；攒了几句由 heard 那份流水看。
+      assert.equal(poolTexts(bubbles).length, 1, `第 ${i} 帧那句话没被当帧交付`);
+      assert.equal(poolTexts(bubbles)[0], `喵喵 饿饿${i}`);
+      assert.equal(heard.length, i + 1, `第 ${i} 帧那一声「啾」没被当帧送到叫声层`);
+    }
+    assert.equal(controller.api.stats.frames, 0, '关着时连"按了几帧"这个计数器都不该走（frame 没被调过）');
+    assert.equal(controller.api.stats.fetchCalls, 0);
+    assert.equal(controller.api.pending.accepted, 0, '关着时一个字节都不进队列');
+    assert.equal(controller.api.pending.count, 0);
+    assert.equal(controller.api.stats.delivered, 0);
+    assert.equal(heard.length, 12, '叫声层必须收到全部 12 句（旁路不许吃掉任何一拍）');
+    assert.deepEqual(h.warns, [], '关着是正常状态，不是降级：console 一句都不许响');
+  });
+});
+
+test('boot：关着的缸与"这档根本没接上"时逐位相同（跨档位验收的接线形式）', async () => {
+  // spec §4.13.2 第 3 条在接线层的等价形式：同一颗种子、同一串帧时刻，
+  // 档位开着（请求全挂着不回）与关着必须给出**同一个世界**。
+  // ⚠️ 这一条**保留内核自己出词**（natural:true）：两缸的世界演化完全同源，
+  // 所以只要接线层往世界裡写过一个字节，两边的指纹就会分家 —— 关掉出词反而测不到。
+  const drive = async (enable) => {
+    let snap = '';
+    await withTank({ store: makeStore(), fetcher: makeFetcher('manual'), seed: 4242, natural: true, enable },
+      async (h) => {
+        for (let i = 0; i < 240; i++) {
+          if (i % 12 === 0) {
+            speak(h.controller.world, h.controller.world.creatures[i % 4].id, `词${i} 喵喵`);
+          }
+          h.frame();
+          await h.flush();
+        }
+        snap = fingerprint(h.controller.world);
+      });
+    return snap;
+  };
+  const off = await drive(false);
+  const on = await drive(true);
+  assert.notEqual(off, '', '防空转：指纹必须算得出来');
+  assert.notEqual(JSON.parse(off).creatures.length, 0, '防空转：缸里得有活物');
+  assert.equal(on, off, '开着 API 档的世界与关着的逐位不同 ⇒ 这一档越过了输出侧那条界');
+});
+
+// ---------------------------------------------------------------- 矩阵第 2 行：开着 + 成功
+
+test('boot：模型文案回来就换词，气泡池拿到的形状与规则档逐字同形', async () => {
+  await withTank({ store: makeStore(), fetcher: makeFetcher('ok', '肚肚 空空 喵喵'), enable: true },
+    async (h) => {
+      const { controller, frame, flush, bubbles, heard } = h;
+      assert.equal(controller.api.state.active, true, '前置条件：档位真的开着');
+      assert.equal(controller.api.state.status, 'ready');
+      const id = firstId(controller);
+      speak(controller.world, id, '喵喵 饿饿');
+      frame();
+      assert.equal(controller.api.pending.count, 1, '那一拍正被按住');
+      assert.equal(poolTexts(bubbles).length, 0, '按住期间气泡池里不该有它（决策 A：有界的按住，不是事后换字）');
+      await flush();                        // 回复落地（微任务）
+      frame();                             // 下一帧的交付扫描把它放出去
+      assert.deepEqual(poolTexts(bubbles), ['肚肚 空空 喵喵'], '交出去的必须是模型那句');
+      assert.deepEqual(bubbles.tokens[0], ['肚肚', '空空', '喵喵']);
+      assert.equal(bubbles.id[0], id, '只换措辞：那句话还是这只的');
+      assert.equal(bubbles.accepted, 1, '气泡池真的收下了这段话（不是测试自己数出来的）');
+      assert.equal(controller.api.pending.replaced, 1);
+      assert.equal(controller.api.pending.fellBack, 0);
+      assert.equal(controller.api.stats.replyAccepted, 1);
+      assert.equal(controller.api.stats.inFlight, 0, '落地之后在途数必须归零');
+      assert.equal(heard.length, 1, '「啾」与气泡一起出现（同一份交付，两路都吃到，也晚了同样的帧数）');
+    });
+});
+
+test('boot：那一拍最多晚 apiHoldMs 毫秒就出去（上界是硬的上界）', async () => {
+  const hold = CONFIG.api.apiHoldMs;
+  await withTank({ store: makeStore(), fetcher: makeFetcher('manual'), enable: true },
+    async (h) => {
+      const { controller, frame, bubbles } = h;
+      const id = firstId(controller);
+      frame(1000);                          // 空帧立起一个干净的时钟
+      speak(controller.world, id, '喵喵 饿饿');
+      const tTake = frame(16);              // 这一帧把它接管 ⇒ 上界 = tTake + apiHoldMs
+      assert.equal(controller.api.pending.count, 1, '前置条件：那一拍确实被按住了');
+      frame(hold - 1);                      // 距上界还差一毫秒
+      assert.equal(controller.api.pending.count, 1, '还没到上界就交付 ⇒ 那个上界不是上界');
+      assert.deepEqual(poolTexts(bubbles), [], '没到上界之前不许出去');
+      frame(1);                             // 恰好到点（shouldAbort 用的是 >=）
+      assert.deepEqual(poolTexts(bubbles), ['喵喵 饿饿'], '到点必须带着规则文案出去');
+      assert.equal(controller.api.pending.count, 0);
+      assert.equal(controller.api.pending.expired, 1, '一条都没等到回复 ⇒ expired 计数');
+      assert.equal(controller.api.stats.inFlight, 0, '到期交付时那个还在飞的请求必须一起被掐掉');
+      assert.ok(Number.isFinite(tTake) && tTake > 0, '防空转：这一条测的是时刻，不是帧数');
+    });
+});
+
+// ---------------------------------------------------------------- 矩阵第 3 行：cfg 不合格
+
+test('boot：端点空 / key 空 / 明文 http / 模型空 ⇒ 状态可读、零请求、规则那句当帧就说', async () => {
+  const cases = [
+    [{ endpoint: '' }, CONFIG_REASONS.EMPTY_ENDPOINT],
+    [{ key: '' }, CONFIG_REASONS.EMPTY_KEY],
+    [{ endpoint: 'http://api.example.test/v1' }, CONFIG_REASONS.INSECURE_ENDPOINT],
+    [{ model: '' }, CONFIG_REASONS.EMPTY_MODEL],
+    [{ timeoutMs: CONFIG.api.timeoutMaxMs + 1 }, CONFIG_REASONS.BAD_TIMEOUT],
+  ];
+  for (const [patch, want] of cases) {
+    await withTank({ store: makeStore(), fetcher: makeFetcher('ok'), enable: patch }, async (h) => {
+      assert.equal(h.controller.api.state.active, false, `${want}：这一档必须不参与交付`);
+      assert.equal(h.controller.api.state.status, want, 'configIssue 的原因必须是可读状态');
+      const id = firstId(h.controller);
+      speak(h.controller.world, id, '喵喵 饿饿');
+      h.frame();
+      assert.deepEqual(poolTexts(h.bubbles), ['喵喵 饿饿'], `${want}：规则档那句照样说，而且一帧都不延`);
+      assert.equal(h.controller.api.stats.fetchCalls, 0, `${want}：一个请求都不许发`);
+      assert.equal(h.controller.api.pending.accepted, 0, `${want}：一个字节都不进队列`);
+      assert.equal(h.heard.length, 1, `${want}：那一声明也没少`);
+    });
+  }
+});
+
+test('boot：这台设备根本没有发请求的能力 ⇒ 状态可读、缸照常跑、零请求、零延时', async () => {
+  await withTank({ store: makeStore(), fetcher: null, enable: true }, async (h) => {
+    assert.equal(h.controller.api.state.active, false);
+    assert.equal(h.controller.api.state.status, 'no-fetcher', '缺能力要说出来，不许静默地"就是不说话"');
+    const before = h.controller.world.time;
+    speak(h.controller.world, firstId(h.controller), '喵喵 饿饿');
+    h.frame();
+    assert.deepEqual(poolTexts(h.bubbles), ['喵喵 饿饿'], '缺能力时一句话都不该延');
+    h.frame();
+    assert.ok(h.controller.world.time > before, '缺能力不许拖累缸的运行');
+    assert.equal(h.controller.api.stats.fetchCalls, 0);
+  });
+});
+
+// ---------------------------------------------------------------- 矩阵第 4~7 行：失败的四种形状
+
+test('boot：网络失败 ⇒ 规则文案立刻出去、fellBack 计数、在途归零', async () => {
+  await withTank({ store: makeStore(), fetcher: makeFetcher('reject'), enable: true }, async (h) => {
+    speak(h.controller.world, firstId(h.controller), '喵喵 饿饿');
+    h.frame();
+    assert.equal(h.controller.api.stats.inFlight, 1, '前置条件：请求真的发出去了');
+    await h.flush();                       // 那条 reject 的微任务跑掉
+    assert.equal(h.controller.api.stats.networkFailed, 1);
+    assert.equal(h.controller.api.stats.inFlight, 0, '终局分支必须结掉在途的账（探针 9 的靶子）');
+    assert.equal(h.controller.api.pending.released, 1, '落地即交付，不必等到上界');
+    assert.equal(h.controller.api.pending.fellBack, 1);
+    h.frame();
+    assert.deepEqual(poolTexts(h.bubbles), ['喵喵 饿饿'], '网络错了也必须说话');
+    assert.equal(h.controller.api.pending.replaced, 0);
+    assert.equal(h.controller.api.pending.expired, 0, '这一条是"回复落地了但没换成词"，不是到期');
+  });
+});
+
+test('boot：非 2xx（401 与 429）永远产不出一句替换', async () => {
+  for (const mode of ['status401', 'status429']) {
+    await withTank({ store: makeStore(), fetcher: makeFetcher(mode), enable: true }, async (h) => {
+      speak(h.controller.world, firstId(h.controller), '喵喵 饿饿');
+      h.frame();
+      await h.flush();
+      h.frame();
+      assert.equal(h.controller.api.stats.httpFailed, 1, `${mode}：非 2xx 要计数`);
+      assert.deepEqual(poolTexts(h.bubbles), ['喵喵 饿饿'], `${mode}：状态码不许变成文案`);
+      assert.equal(h.controller.api.pending.replaced, 0);
+      assert.equal(h.controller.api.stats.replyAccepted, 0);
+      assert.equal(h.controller.api.stats.inFlight, 0);
+      assert.equal(h.controller.api.pending.fellBack, 1);
+    });
+  }
+});
+
+test('boot：响应体不是合法 JSON ⇒ 不抛、回落，而缸下一帧照常推进（§7.7）', async () => {
+  await withTank({ store: makeStore(), fetcher: makeFetcher('badBody'), enable: true }, async (h) => {
+    const before = h.controller.world.time;
+    speak(h.controller.world, firstId(h.controller), '喵喵 饿饿');
+    h.frame();
+    await h.flush();
+    h.frame();
+    assert.deepEqual(poolTexts(h.bubbles), ['喵喵 饿饿']);
+    assert.equal(h.controller.api.stats.bodyFailed, 1);
+    assert.ok(h.controller.world.time > before, '坏 body 之后缸必须还在推进');
+    assert.equal(h.controller.api.pending.fellBack, 1);
+  });
+});
+
+test('boot：同步就抛的 fetch 也只是回落，不崩 step', async () => {
+  await withTank({ store: makeStore(), fetcher: makeFetcher('throwSync'), enable: true }, async (h) => {
+    speak(h.controller.world, firstId(h.controller), '喵喵 饿饿');
+    h.frame();
+    await h.flush();
+    h.frame();
+    assert.deepEqual(poolTexts(h.bubbles), ['喵喵 饿饿']);
+    assert.equal(h.controller.api.stats.inFlight, 0);
+    assert.equal(h.controller.api.pending.fellBack, 1);
+  });
+});
+
+test('boot：超字符上限 / 超 token 预算 / 只复读口癖的回复都被拒，原来那句站着', async () => {
+  const tooLong = `${'词'.repeat(CONFIG.api.textMaxChars + 5)} 喵喵`;
+  const tooMany = new Array(CONFIG.speech.maxTokens + 4).fill('词').join(' ');
+  const cases = [[tooLong, REASONS.TOO_LONG, false], [tooMany, REASONS.TOO_MANY_TOKENS, false],
+    ['喵喵 喵喵 喵喵', REASONS.CATCHPHRASE_ONLY, true]];
+  for (const [content, why, pinCatch] of cases) {
+    await withTank({ store: makeStore(), fetcher: makeFetcher('ok', content), enable: true }, async (h) => {
+      // ⚠️ 第三例必须把这只的口癖**钉成** '喵喵'：世界第一只个体的口癖是从 speechRng 抽的，
+      // 未必是 '喵喵' —— 不钉的话这条用例其实**根本没在测** catchphrase-only 那条规则，
+      // 它红就红在这里（回复被当成合法内容收下了）。这是夹具的错，不是实现的错。
+      if (pinCatch) h.controller.world.creatures[0].catchphrase = '喵喵';
+      speak(h.controller.world, firstId(h.controller), '喵喵 饿饿');
+      h.frame();
+      await h.flush();
+      h.frame();
+      assert.equal(h.controller.api.stats.replyRejected, 1, `${why}：被拒的回复要计数`);
+      assert.deepEqual(poolTexts(h.bubbles), ['喵喵 饿饿'], `${why}：拒了也必须说原来那句`);
+      assert.equal(h.controller.api.pending.replaced, 0);
+      assert.equal(h.controller.api.pending.fellBack, 1);
+      assert.equal(h.controller.api.stats.inFlight, 0);
+    });
+  }
+});
+
+test('boot：同一只第二次开口时旧的那拍让位并照样说出来（不叠加、不吞字）', async () => {
+  await withTank({ store: makeStore(), fetcher: makeFetcher('manual'), enable: true }, async (h) => {
+    const id = firstId(h.controller);
+    speak(h.controller.world, id, '喵喵 饿饿');
+    h.frame();
+    assert.equal(h.controller.api.pending.count, 1);
+    speak(h.controller.world, id, '困困 抱抱');
+    h.frame();
+    assert.equal(h.controller.api.pending.superseded, 1, '让位要计数');
+    assert.equal(h.controller.api.pending.count, 1, '同一只不许在队列里叠成两句');
+    assert.deepEqual(poolTexts(h.bubbles), ['喵喵 饿饿'], '旧的那句当场出去（让位不等于闭嘴）');
+    assert.equal(h.heard.length, 1, '「啾」也一样：旧的那拍不该被吃掉一声');
+    h.frame(CONFIG.api.apiHoldMs);          // 新那句到上界
+    // ⚠️ 这里**不该**期望池子里同时挂着两句：气泡池自己的纪律（B19a 的 superseded）就是
+    // "同一只只留最新那句"，所以第二拍交出去时把第一拍换掉了。
+    // "不吞字"的证据不在这里，而在上面那条（第一拍确实到过屏）与下面的 released/fellBack 计数：
+    // 两拍都被交付过，只是同一只不許在屏上叠成两句。
+    assert.deepEqual(poolTexts(h.bubbles), ['困困 抱抱'], '同一只的第二拍把第一拍换掉（那是气泡池的既有纪律）');
+    assert.equal(h.bubbles.superseded, 1, '第一拍必须是被**换掉**的，而不是从没上过屏');
+    assert.equal(h.controller.api.pending.accepted, 2);
+    assert.equal(h.controller.api.pending.released, 2, '两拍都要交付出去');
+    assert.equal(h.controller.api.pending.fellBack, 2, '两拍都带着规则文案出去');
+  });
+});
+
+// ---------------------------------------------------------------- 两处补测（探针 R2 / R4 存活之后写的）
+//
+// 这两条都是**接线层**的义务，纯函数层测不到：`pushPending` 返回 0 之后谁负责那句话？
+// `getApiConfig()` 里该不该有 key？—— 两条探针（R2 把"吞掉"那一支改掉、R4 让脱敏读数带上 key）
+// 原本都能存活，就是这个仓库反复栽的那一类"纯函数被测到、调用点没被测到"。
+
+test('boot：喂进队列的每一拍都有一条去路（接管或交回，没有第三条 = 静默吞字）', async () => {
+  await withTank({ store: makeStore(), fetcher: makeFetcher('manual'), enable: true }, async (h) => {
+    const { controller, frame, bubbles } = h;
+    const cs = controller.world.creatures;
+    assert.ok(cs.length >= 3, '夹具：缸里至少三只，好让每拍来自不同个体');
+    const beats = CONFIG.api.pendingCap * 3;
+    for (let i = 0; i < beats; i++) {
+      speak(controller.world, cs[i % cs.length].id, `喵喵 ${i}`);
+    }
+    frame();
+    const p = controller.api.pending;
+    // 守恒：每一拍要么被队列接管，要么被明确交回给调用方 —— 两者之外不许有第三条去路。
+    // 这一条就是 §4.13.2 第 1 条在接线层的形状：**拒收 ≠ 不说**。
+    assert.equal(p.accepted + p.notTaken, beats,
+      `喂进 ${beats} 拍，接管 ${p.accepted} + 交回 ${p.notTaken} 必须等于它（差额就是被吞掉的那几拍）`);
+    // 按着的那批到上界一律松手：按住是"延后"，不是"取消"。
+    frame(CONFIG.api.apiHoldMs);
+    assert.equal(p.count, 0, `上界之后队列必须空，还剩 ${p.count} 拍`);
+    assert.equal(p.released, p.accepted, '接管的每一拍都要被释放');
+    assert.ok(bubbles.count <= CONFIG.api.pendingCap, `交付不许超过队列上界：${bubbles.count}`);
+  });
+});
+
+test('接线层源码守卫：pushPending 返回 0 那一支必须把那一拍原样交出去', () => {
+  // ⚠️ 这一支**在当前 CONFIG 下打不到**（探针 R2 就是这么存活的）：拿不到请求名额的拍会在
+  // 同一帧被 resolvePending 当场交出去，所以队列占用从不会堆到 pendingCap。
+  // 但它是"队列上界一改就变成吞字"的那一颗地雷 —— 行为测不到就用源码钉住，
+  // 这一层有先例（tests/render-bubble.test.js 与 tests/audio.test.js 的那几条接线守卫）。
+  const src = readFileSync(fileURLToPath(new URL('../src/main.js', import.meta.url)), 'utf8')
+    .replace(/\/\/[^\n]*/g, ' ');
+  const m = src.match(/pushPending\([^)]*\)\s*===\s*0\)?\s*\{/);
+  assert.ok(m, 'main.js 里找不到"队列没收这一拍"那一支 —— 拒收的去路变了，必须重新想清楚');
+  const start = m.index + m[0].length - 1;
+  let depth = 0; let end = -1;
+  for (let i = start; i < src.length; i += 1) {
+    if (src[i] === '{') depth += 1;
+    else if (src[i] === '}') { depth -= 1; if (depth === 0) { end = i; break; } }
+  }
+  const block = src.slice(start, end + 1);
+  assert.ok(block.includes('out.push(ev)'),
+    '拒收那一支里必须把那一拍**原样**交付；写成别的（比如 continue）就是让这只生物闭嘴，'
+    + '正是 spec §4.13.2 第 1 条禁止的"填了 key 反而不说话了"');
+});
+
+test('boot：getApiConfig 是脱敏读数——有 hasKey，没有 key（探针 R4 原本存活）', async () => {
+  // ⚠️ 必须显式给 fetcher：Node 24 自带 globalThis.fetch，而 withTank 不注入时用的就是它 ——
+  // 那会让一个"读数脱敏"的测试真去联网打一个不存在的域名。用 manual（永不落地）把它钉死。
+  await withTank({ store: makeStore(), fetcher: makeFetcher('manual'), enable: true }, async (h) => {
+    const view = h.controller.getApiConfig();
+    assert.equal(view.hasKey, true, '填过 key 要能读出来（计划 3 那颗按钮靠它决定显示）');
+    assert.ok(!('key' in view), `脱敏读数里不许有 key 这个键：${Object.keys(view).join(',')}`);
+    // 整份读数序列化之后搜一遍：这比"没有那个键"更硬 —— 漏的方式也可能是
+    // keyMasked / debug / lastError 之类**别的**字段里夹着原值。
+    const dumped = JSON.stringify(view);
+    assert.ok(!dumped.includes(SECRET), `key 泄进了 getApiConfig 的读数：${dumped}`);
+    assert.equal(view.endpoint, 'https://api.example.test/v1', '除 key 之外都该照原样读得到');
+    assert.equal(h.controller.api.state.active, true, '夹具：这一档确实开着');
+  });
+});
+
