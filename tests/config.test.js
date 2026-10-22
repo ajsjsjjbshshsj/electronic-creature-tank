@@ -685,16 +685,16 @@ test('软体弹簧的二十八个常量齐备，且两端都欠阻尼（spec §4
 //   只钉行为 → 把 joy.toHz 从 900 改成 600 时行为断言仍然全绿（它按 CONFIG 比）；
 //   只钉数值 → 把音高因子写成常数时数值全对，而"小只高、大只低"那条承诺没了。
 
-test('叫声表的三十五项齐备（27 个调度量 + 8 张声表子行，node 数出来的），且 spec §5.4 逐字那几个数被钉死', () => {
+test('叫声表的三十六项齐备（28 个调度量 + 8 张声表子行，node 数出来的），且 spec §5.4 逐字那几个数被钉死', () => {
   const W = CONFIG.audio;
   assert.deepEqual(Object.keys(W).sort(), [
-    'affectionMin', 'anger', 'beg', 'chirp', 'cooldownSec', 'death', 'fallbackSampleRate',
+    'affectionMin', 'anger', 'beg', 'chirp', 'chirpGapSec', 'cooldownSec', 'death', 'fallbackSampleRate',
     'filterQ', 'filterRatioMax', 'filterRatioMin', 'hatch', 'hueBuckets', 'hueTurn', 'joy',
     'lfoSeedModulus', 'lfoSeedSpread', 'lookaheadSec', 'masterGain', 'maxVoices',
     'noiseBufferSec', 'noiseStepSec', 'overtoneMix', 'overtoneRatioMax', 'overtoneRatioMin',
     'pitchMax', 'pitchMin', 'refSize', 'releaseSec', 'silenceGain', 'sleepy', 'sleepyMin',
     'thud', 'thudGapSec', 'thudPerSec', 'tiredMin',
-  ], 'CONFIG.audio 的三十五项键集（node 数出来的），不多不少：27 个调度量 + 八张声表子行');
+  ], 'CONFIG.audio 的三十六项键集（node 数出来的），不多不少：28 个调度量 + 八张声表子行');
 
   // 八行的**共同形状**：少了任何一项都会让某一行听得出差别而测不出来（"短促"变长、"极轻"变响），
   // 所以整行 deepEqual 键集而不是只抽查 fromHz。noise*/lfo* 是可选附加层，允许多出来。

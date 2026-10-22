@@ -509,8 +509,12 @@ test('「啾」随体型变：两只不同大小的 say，频率读数必须不�
 
 test('say 事件绝不触发六声表里的那六声（不许给台词配音）', () => {
   const c = creature('c-say', 26, 315);
-  const { a } = makeAudio([c]);
+  const { a, g } = makeAudio([c]);
   for (const mood of ['happy', 'bliss', 'anger', 'sad']) {
+    // ⚠️ 这句 advance **不是装饰**：啾有一条全局闸门（下面几条测试钉它），同一秒里连喂四条
+    // 只会响一记。这条测试的判据是"六声表一声都不许响"，为了让四条都真的上过场，
+    // 就把时钟推到闸门之外 —— 否则 chirp=1 会被误读成"配音失败了"。
+    g.advance(AUD.chirpGapSec + 0.01);
     a.consume([sayEvent(c.id, mood)], fakeWorld([c]));
   }
   assert.equal(a.stats.calls.joy, 0, '说了"开心"不许放开心那一声明');
@@ -518,6 +522,54 @@ test('say 事件绝不触发六声表里的那六声（不许给台词配音）'
   assert.equal(a.stats.calls.beg, 0);
   assert.equal(a.stats.calls.sleepy, 0);
   assert.equal(a.stats.calls.chirp, 4, '四条 say ⇒ 四记啾');
+});
+
+// ---- 「啾」的全局闸门（2026-10-22 实测之后补的，理由见 spec §5.4.1 第 5 条）----
+// 实测数出来的，不是估的：跑 60 分钟一缸（seed 20261022、cap 24）出词 2755 句，
+// **最坏的单秒有 5 句**、最坏的三秒滑窗 8 句 ⇒ 倍速 4× 下换算是 **20 记啾/真实秒**。
+// 单音长只有 0.045s，二十记挤在一秒里就是嗡嗡一片，而那一记的职责本是"这声音是它自己发的"。
+// 事件通道不过每只的冷却（冷却是给跨越那六声用的），所以这一条必须有**全局**闸门 ——
+// 与闷响的 thudGapSec 同一个理由：拦的是"多只同时"，不是"同一只太快"。
+
+test('同一秒里连喂 5 条 say 只响一记啾，其余**计数**丢弃（不静默）', () => {
+  const c = creature('c-burst', 26, 315);
+  const { a } = makeAudio([c]);
+  const before = a.stats.calls.chirp;
+  let droppedBefore = a.stats.chirpDropped;
+  for (let i = 0; i < 5; i += 1) a.consume([sayEvent(c.id, 'calm')], fakeWorld([c]));
+  assert.equal(a.stats.calls.chirp, before + 1, '闸门之内只许响一记');
+  assert.equal(a.stats.chirpDropped, droppedBefore + 4, '被挤掉的四记必须有读数：§7.7 禁止静默丢');
+});
+
+test('闸门走的是 graph 秒（真实秒），不是模拟秒：倍速再快也拦得住', () => {
+  const c = creature('c-gate', 26, 315);
+  const { a, g } = makeAudio([c]);
+  a.consume([sayEvent(c.id, 'calm')], fakeWorld([c]));
+  const first = a.stats.calls.chirp;
+  // 差一点点：仍然拦得住（边界不是"下一帧就放行"）
+  g.advance(AUD.chirpGapSec * 0.5);
+  a.consume([sayEvent(c.id, 'calm')], fakeWorld([c]));
+  assert.equal(a.stats.calls.chirp, first, '只走了半个闸门就放行 ⇒ 闸门形同虚设');
+  g.advance(AUD.chirpGapSec);
+  a.consume([sayEvent(c.id, 'calm')], fakeWorld([c]));
+  assert.equal(a.stats.calls.chirp, first + 1, '闸门过了还不响 ⇒ 这条通道被彻底掐死');
+});
+
+test('稀缺那两声（hatch / death）不被装饰声的闸门挤掉', () => {
+  // 闸门只管啾。若把 hatch/death 也关进去，症状是"卵孵出来了却没有任何声音"，
+  // 而死亡那一声的稀缺性正是 spec 要的东西 —— 它不该被一缸话痨挤掉。
+  const c = creature('c-mix', 26, 315);
+  const { a } = makeAudio([c]);
+  a.consume([sayEvent(c.id, 'calm')], fakeWorld([c]));
+  const chirps = a.stats.calls.chirp;
+  a.consume([
+    { kind: 'say', id: c.id, text: '喵', tokens: ['喵'], mood: 'calm' },
+    { kind: 'hatch', id: c.id },
+    { kind: 'death', id: c.id },
+  ], fakeWorld([c]));
+  assert.equal(a.stats.calls.chirp, chirps, '同一秒里的第二记啾必须被闸门拦住');
+  assert.equal(a.stats.calls.hatch, 1, 'hatch 必须照样响');
+  assert.equal(a.stats.calls.death, 1, 'death 必须照样响');
 });
 
 test('hatch 与 death 事件各响对应那一声明；找不到个体也要响（不静默）', () => {
@@ -668,8 +720,11 @@ test('发声上限：超过 maxVoices 的那些被丢并**计数**（静默丢�
   const list = [];
   for (let i = 0; i < AUD.maxVoices + 4; i += 1) list.push(creature(`c-v${i}`, 26, 315));
   const { a } = makeAudio(list);
-  // 同帧 10 条 say（时钟不前进 ⇒ 前面的都还占着槽）
-  const events = list.map((c) => sayEvent(c.id, 'calm'));
+  // ⚠️ 造压用的是 **hatch**，不是 say：「啾」有一条全局闸门（上面那几条测试钉它），
+  // 同帧十条 say 只会响一记，那样的话这条测试测的是闸门而不是上限。
+  // hatch / death 不受闸门管（稀缺声不许被装饰声挤掉，理由见那几条测试），
+  // 而且时钟不前进 ⇒ 前面排进去的槽都还占着，正好把池子顶满。
+  const events = list.map((c) => ({ kind: 'hatch', id: c.id }));
   a.consume(events, fakeWorld(list));
   assert.equal(a.stats.played, AUD.maxVoices, `只许排程 ${AUD.maxVoices} 声`);
   assert.equal(a.stats.dropped, events.length - AUD.maxVoices, '溢出必须进计数');

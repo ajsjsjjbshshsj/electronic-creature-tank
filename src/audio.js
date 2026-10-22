@@ -322,7 +322,7 @@ export function createAudio(opts) {
   const entries = new Map();     // id → 该只的读数与冷却（**按世界成员身份回收**）
   const voices = [];             // 发声槽：{ end, nodes }
   const stats = {
-    frames: 0, events: 0, played: 0, dropped: 0, thudDropped: 0,
+    frames: 0, events: 0, played: 0, dropped: 0, thudDropped: 0, chirpDropped: 0,
     created: 0, started: 0, stopped: 0, disconnected: 0,
     reclaimed: 0, entries: 0, entriesMax: 0,
     silentEvents: 0, mutedSkips: 0, filterSkipped: 0, noiseSkipped: 0,
@@ -334,6 +334,10 @@ export function createAudio(opts) {
   let muted = !!o.muted;
   let closed = false;
   let lastThudAt = Number.NEGATIVE_INFINITY;
+  // 「啾」的全局闸门时刻。理由与量出来的数都写在 CONFIG.audio.chirpGapSec 那一行旁边：
+  // 事件通道**不过**每只的冷却（那条是给跨越那六声用的），所以一缸话痨在 4× 下会把
+  // 这记"这声音是它自己发的"的前导音打成一梭子 —— 那既不是前导音也不是声音，是嗡嗡。
+  let lastChirpAt = Number.NEGATIVE_INFINITY;
   let noise = null;              // 一块、终身复用（容量由 CONFIG.audio.noiseBufferSec 定）
 
   // 主输出：一个常驻 gain 节点。静音走它 + 不再排程**两条**，
@@ -598,6 +602,13 @@ export function createAudio(opts) {
         // 「啾」这条通道上**只允许**读体型与色相：ev.mood / ev.text / ev.tokens 一概不碰。
         // 碰了就是给台词配音，spec §5.4 那条"两条通道不许同步"当场作废。
         // 找不到个体（迟到的死亡事件之类）也要响，用参考嗓音 —— 静默是 §7.7 禁止的。
+        if (key === 'chirp') {
+          // 闸门只管装饰声。**不**管 hatch / death：那两声是稀缺的、语义重的，
+          // 把它们关进同一个闸门的症状是"卵孵出来了却一声不响"。
+          const t = now();
+          if (t - lastChirpAt < AUD.chirpGapSec) { stats.chirpDropped += 1; continue; }
+          lastChirpAt = t;        // 与 thud 同一口径：占坑在排程之前，静音期间也不留积压
+        }
         if (schedule(planSound(key, voiceOf(findCreature(world, ev.id)), at(), idSeed(ev.id)))) made += 1;
       }
     }
