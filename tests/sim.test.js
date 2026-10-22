@@ -1849,3 +1849,113 @@ test('抚摸整条链在同一种子下可复现', () => {
   };
   assert.deepEqual(play(), play());
 });
+
+// ---------------------------------------------------------------- 戳与惊吓（spec §6.1，Task B17c）
+//
+// spec §6.1 的原话："抚摸与戳是同一根手指、不同速度，反应完全相反。这个区分是整个
+// 交互的核心。" 判定写在下一段："速度超过阈值且位移方向反复（戳）判为戳"。
+//
+// 三条通道的完整分工（B17b 立了前两条，这里补后两条）：
+//   温柔 + 贴上   → affection + 、petted 冲击一次
+//   快速 + 贴上   → poked 冲击一次、safety 受冲击（needs.startle）、不买好感
+//   手突然出现    → startled 冲击一次（"吓一跳"，与划动无关）
+//
+// ⚠️ 这三条都必须**只走 world.playerHand**：它是内核唯一接受表现层写入的字段，
+// 所以 input.js 要给它加 `down` 与 `appeared` 两个读数，而不是另开一条通道。
+
+test('快速戳它：poked 冲击一次、safety 受冲击、好感一点不涨', () => {
+  const { w, c } = petTank(930);
+  w.playerHand = {
+    pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.9, down: true, appeared: false,
+  };
+  let jumps = 0;
+  let prevJoy = c.emotions.joy;
+  let prevSafety = c.needs.safety;
+  let safetyJump = 0;
+  for (let i = 0; i < Math.round(6 * 60); i++) {
+    tickWorld(w, 1 / 60);
+    if (c.emotions.joy - prevJoy > 0.2) jumps += 1;
+    if (c.needs.safety - prevSafety > 0.2) safetyJump = Math.max(safetyJump, c.needs.safety - prevSafety);
+    prevJoy = c.emotions.joy;
+    prevSafety = c.needs.safety;
+    w.events.length = 0;
+  }
+  assert.equal(jumps, 0, '戳不许发 petted 冲击（joy 那一跳是抚摸独有的）');
+  assert.ok(safetyJump >= CONFIG.needs.startleAmount * 0.9,
+    `needs.startle 必须真的被调用（safety 应跳 ${CONFIG.needs.startleAmount}），实测 ${safetyJump.toFixed(3)}`);
+  assert.ok(affectionFor(c.memory, PLAYER_ID) <= 0, '戳不买好感');
+  assert.ok(c.emotions.fear > 0.3, `被戳应当害怕，实测 fear ${c.emotions.fear.toFixed(3)}`);
+  assert.equal(c.beingPoked, true, '戳是一个持续的 episode（与抚摸对称）');
+});
+
+test('poked 只在上升沿发一次；手抬起再戳算第二次', () => {
+  const { w, c } = petTank(931);
+  const poke = () => {
+    w.playerHand = { pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.9, down: true, appeared: false };
+  };
+  const lift = () => {
+    w.playerHand = { pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.9, down: false, appeared: false };
+  };
+  const countFearJumps = (seconds) => {
+    let n = 0;
+    let prev = c.emotions.fear;
+    for (let i = 0; i < Math.round(seconds * 60); i++) {
+      tickWorld(w, 1 / 60);
+      if (c.emotions.fear - prev > 0.2) n += 1;
+      prev = c.emotions.fear;
+      w.events.length = 0;
+    }
+    return n;
+  };
+  poke();
+  assert.equal(countFearJumps(2), 1, '第一次戳：一次 poked 冲击');
+  lift();
+  assert.equal(countFearJumps(1), 0, '抬手之后不该再有冲击');
+  assert.equal(c.beingPoked, false, '抬手之后 episode 必须落回');
+  poke();
+  assert.equal(countFearJumps(2), 1, '再戳必须再算一次 —— 否则第二次起永远静默');
+});
+
+test('手突然出现（appeared）→ startled 一次，且与是否贴上无关', () => {
+  const { w, c } = petTank(932);
+  w.playerHand = null;
+  step(w, 1);
+  let jumps = 0;
+  let prev = c.emotions.fear;
+  // 第一 tick 报 appeared:true，之后报 false（input 层的一次性标记）
+  w.playerHand = { pos: { x: 0.5 + 0.1, y: 0.5 }, speed: 0.0, down: false, appeared: true };
+  for (let i = 0; i < 600; i++) {
+    tickWorld(w, 1 / 60);
+    if (c.emotions.fear - prev > 0.2) jumps += 1;
+    prev = c.emotions.fear;
+    if (i === 0) w.playerHand.appeared = false;
+    w.events.length = 0;
+  }
+  assert.equal(jumps, 1, '突然出现只吓一次，不是每 tick 都吓');
+});
+
+test('温柔的划动不会触发 poked / startled 的任何一条', () => {
+  const { w, c } = petTank(933);
+  w.playerHand = {
+    pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.02, down: true, appeared: false,
+  };
+  let fearJumps = 0;
+  let prevFear = c.emotions.fear;
+  for (let i = 0; i < Math.round(4 * 60); i++) {
+    tickWorld(w, 1 / 60);
+    if (c.emotions.fear - prevFear > 0.2) fearJumps += 1;
+    prevFear = c.emotions.fear;
+    w.events.length = 0;
+  }
+  assert.equal(fearJumps, 0, '抚摸不许带惊吓');
+  assert.equal(c.beingPoked, false);
+  assert.ok(affectionFor(c.memory, PLAYER_ID) > 0.1, '而好感照买（B17b 那条通道没被改坏）');
+});
+
+test('playerHand 缺 down / appeared 时按 false 处理（老形状不许崩，也不许静默当成 true）', () => {
+  const { w, c } = petTank(934);
+  w.playerHand = { pos: { x: 0.5 + touchDist(c) * 0.4, y: 0.5 }, speed: 0.9 };   // 没有 down / appeared
+  assert.doesNotThrow(() => step(w, 1));
+  assert.equal(c.beingPoked, false, '缺 down 就当没按下 —— 反过来会把每次快速移动都当成戳');
+  assert.equal(c.beingPetted, false);
+});

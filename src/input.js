@@ -117,7 +117,13 @@ export function createHandTracker(opts) {
     // ⚠️ state() 的返回值**下一次 poll 就会被改掉**，调用方不得缓存它、
     //   也不得把 out.pos 的引用存到跨帧的地方（内核那边拷的是 x/y 两个**标量**，
     //   这件事由 tests/input.test.js 的「复用同一个对象是安全的」那条验证）。
-    out: { pos: { x: 0, y: 0 }, speed: 0 },
+    // down / appeared 是给内核的两个读数（spec §6.1 的"戳"与"惊吓"）：
+    //   down     —— 此刻按着。poll 只在按着时才交样本，所以交付时它恒为 true；
+    //               仍然要**显式交出去**，否则内核只能靠"样本存在"去猜，
+    //               而那个猜测在 main.js 改了交付条件的那天就会悄悄变成错的。
+    //   appeared —— 进缸后的**第一次**交付。内核用它发一次 startled（突然出现在身边会吓一跳）。
+    out: { pos: { x: 0, y: 0 }, speed: 0, down: false, appeared: false },
+    justPressed: false,
     // 三个整数计数器。**存在的全部理由是让"重活 ≤ poll 次数"这条上界可被断言**；
     // 整数自增不是分配，也不参与任何几何计算。
     metrics: { reads: 0, inserts: 0, computes: 0, releases: 0 },
@@ -165,6 +171,7 @@ export function createHandTracker(opts) {
     tracker.out.pos.x = last >= 0 ? s.x[last] : 0;
     tracker.out.pos.y = last >= 0 ? s.y[last] : 0;
     tracker.out.speed = computeSpeed(s, tracker.count, now, windowMs);
+    tracker.out.down = tracker.down;
     tracker.active = tracker.count > 0;
   }
 
@@ -187,6 +194,10 @@ export function createHandTracker(opts) {
       tracker.reading.fresh = false;
     }
     recompute(t);
+    // appeared 只在"按下之后的第一次成功交付"上为 true：按下了但还没采到任何样本时
+    // 不能算出现（那时交的是 null，标记必须留着等真正交付的那一次）。
+    tracker.out.appeared = tracker.active && tracker.justPressed;
+    if (tracker.active) tracker.justPressed = false;
     tracker.metrics.computes += 1;
     return tracker.active ? tracker.out : null;
   };
@@ -195,10 +206,14 @@ export function createHandTracker(opts) {
   // 真实浏览器里走的是 observe + poll 两条路；这条留给单测与任何"我就是要马上要一个读数"的调用。
   tracker.sample = (t, clientX, clientY, cssWidth, cssHeight) => {
     tracker.down = true;
+    tracker.justPressed = true;
     observe(t, clientX, clientY, cssWidth, cssHeight);
     insert(t, true);
     tracker.reading.fresh = false;     // 这一笔已经被消费掉了，否则下一次 poll 会把它再插一遍
     recompute(t);
+    tracker.out.down = tracker.down;
+    tracker.out.appeared = tracker.justPressed;
+    tracker.justPressed = false;
     tracker.metrics.computes += 1;
     return tracker.state();
   };
@@ -206,6 +221,7 @@ export function createHandTracker(opts) {
   // pointerdown：按下这件事本身就是"手进缸"，不需要等第一次移动。
   tracker.press = (t, clientX, clientY, cssWidth, cssHeight) => {
     tracker.down = true;
+    tracker.justPressed = true;
     observe(t, clientX, clientY, cssWidth, cssHeight);
   };
 

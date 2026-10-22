@@ -104,6 +104,9 @@ export function createCreature(opts) {
     // 此刻是否正被抚摸（温柔的手贴着身体）。只为 petted 事件的**上升沿**服务：
     // 一次抚摸发一次，而不是每 tick 发一次（每 tick 发的话 joy 会被瞬间推到顶）。
     beingPetted: false,
+    // 同上，服务于"戳"（spec §6.1）的上升沿。戳与抚摸是同一根手指、不同速度，
+    // 反应完全相反 —— 两条 episode 因此必须各自独立，不能合成一个"手在动"的布尔。
+    beingPoked: false,
     begIgnored: 0,
     mourn: 0,          // 哀悼剩余秒数（spec 4.11）
 

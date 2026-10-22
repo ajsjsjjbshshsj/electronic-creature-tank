@@ -608,3 +608,38 @@ test('boot 之后：一次真实指针手势必须把 world.playerHand 写进内
     g.cancelAnimationFrame = saved.cancelAnimationFrame;
   }
 });
+
+test('交付的样本带 down / appeared —— 内核的戳与惊吓只有这一条来源', () => {
+  // 这条是**接线断言**，不是功能断言。B17c 在内核里读 h.down 与 h.appeared，
+  // 而 input.js 的 out 原本只有 { pos, speed } —— 于是那两条内核路径在真实浏览器里
+  // **永远走不到**，全部测试却仍然绿（sim 那边的测试是手搓 playerHand 对象喂进去的）。
+  // 这正是本项目在 B16 刚抓过的那一类："纯函数被测到，调用点没被测到"。
+  const target = makeTarget();
+  const delivered = [];
+  const input = attachInput(target, (h) => delivered.push(h && { down: h.down, appeared: h.appeared }),
+    { now: () => 1000 });
+  target.emit('pointerdown', PEV(300, 200));
+  const s1 = input.poll(1000);
+  assert.ok(s1, '按下之后第一次 poll 必须交付样本');
+  assert.equal(s1.down, true, '样本必须带 down');
+  assert.equal(s1.appeared, true, '进缸的第一次交付必须 appeared');
+  const s2 = input.poll(1020);
+  assert.ok(s2, '第二次 poll 仍然在交付（手还按着）');
+  assert.equal(s2.appeared, false, 'appeared 是一次性的，第二次必须落回 false');
+  assert.deepEqual(delivered[0], { down: true, appeared: true }, '回调拿到的必须是同一份读数');
+  assert.equal(delivered[1].appeared, false);
+  input.detach();
+});
+
+test('抬手再按下：appeared 再亮一次（每次进缸都算一次"出现"）', () => {
+  const target = makeTarget();
+  const input = attachInput(target, () => {}, { now: () => 1000 });
+  target.emit('pointerdown', PEV(100, 100, 7));
+  assert.equal(input.poll(1000).appeared, true, '第一次进缸');
+  assert.equal(input.poll(1020).appeared, false);
+  target.emit('pointerup', PEV(100, 100, 7));
+  assert.equal(input.poll(1040), null, '抬手之后不交付任何样本');
+  target.emit('pointerdown', PEV(120, 110, 7));
+  assert.equal(input.poll(1060).appeared, true, '第二次进缸必须也算出现');
+  input.detach();
+});

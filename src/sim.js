@@ -30,7 +30,7 @@
 import { CONFIG } from './config.js';
 import { createRng } from './rng.js';
 import { randomGenome, phenotype, eggTintBucket } from './genes.js';
-import { decay as decayNeeds, feed as feedNeeds, comfort } from './needs.js';
+import { decay as decayNeeds, feed as feedNeeds, comfort, startle as startleNeeds } from './needs.js';
 import { computeTargets, update as updateEmotions, applyEvent, moodOf } from './emotions.js';
 import {
   adjust as adjustMemory, decay as decayMemory, ensure as ensureMemory,
@@ -336,7 +336,13 @@ export function perceive(world, c) {
     const d = Math.hypot(world.playerHand.pos.x - c.pos.x, world.playerHand.pos.y - c.pos.y);
     // 手比同类更"显眼"：感知半径放宽到 1.5 倍，好让玩家一伸手就有反应。
     if (d <= R * 1.5) {
-      playerHand = { pos: world.playerHand.pos, dist: d, speed: world.playerHand.speed };
+      // down / appeared 必须一起转发：perceive 返回的是**新建的对象**，
+      // 漏抄字段就等于在感知层把输入信号丢了 —— 症状是"戳它完全没反应"，
+      // 而 input.js 与 world.playerHand 两边都是对的，最难查的那种断链。
+      playerHand = {
+        pos: world.playerHand.pos, dist: d, speed: world.playerHand.speed,
+        down: !!world.playerHand.down, appeared: !!world.playerHand.appeared,
+      };
     }
   }
 
@@ -386,7 +392,25 @@ function isPetting(senses) {
 function isBeingPetted(c, senses) {
   const h = senses.playerHand;
   if (!h || h.speed > HAND_SPEED_POKE) return false;
-  return h.dist <= (sizeOf(c) / 1000) * CONFIG.behavior.petContactRatio;
+  return inContact(c, h);
+}
+
+// "贴上身体"这个几何判定只有一处定义（抚摸与戳共用）。
+// 两处各写一遍的话，改一处就会让"摸得到但戳不到"这类不对称悄悄出现。
+function inContact(c, hand) {
+  return hand.dist <= (sizeOf(c) / 1000) * CONFIG.behavior.petContactRatio;
+}
+
+// 戳 = **按下** + 快速 + 贴上。
+// 为什么戳要 `down` 而抚摸不要：手机上没有 hover，手指一接触屏幕就是按下，
+// 两者都有 down；但桌面鼠标"悬停划过"是合法的抚摸（spec §6.1 的"缓慢划动"），
+// 而"没按下的快速移动"只是手划过，不该被当成攻击。
+// 缺 down 一律按 false 处理 —— 反过来（当成 true）会把每次快速划过都判成戳。
+function isPoking(c, senses) {
+  const h = senses.playerHand;
+  if (!h || !h.down) return false;
+  if (h.speed <= HAND_SPEED_POKE) return false;
+  return inContact(c, h);
 }
 
 function emotionCtx(c, senses) {
@@ -725,6 +749,30 @@ function tickCreature(world, c, dt) {
     }
   } else {
     c.beingPetted = false;
+  }
+
+  // ---- 戳（spec §6.1）----
+  // "抚摸与戳是同一根手指、不同速度，反应完全相反" —— 这条区分是整个交互的核心。
+  // 一次戳同时做三件事：poked 情绪冲击（fear+ anger+ joy−）、safety 受冲击
+  // （needs.startle，它从计划 1 起也没有消费者）、以及**不买好感**。
+  if (isPoking(c, senses)) {
+    if (!c.beingPoked) {
+      c.beingPoked = true;
+      applyEvent(c.emotions, 'poked');
+      startleNeeds(c.needs, CONFIG.needs.startleAmount);
+      world.events.push({ kind: 'poke', id: c.id });   // 给表现层：它会躲开或抗议（B16/B17 的读道）
+    }
+  } else {
+    c.beingPoked = false;
+  }
+
+  // ---- 惊吓（手突然出现）----
+  // `appeared` 是 input 层的一次性读数（第一帧之后自己变 false），所以这里不需要
+  // 内核侧的上升沿状态 —— 生产者已经保证了"一次"。
+  // 距离门用感知半径而不是接触半径：突然出现在它旁边就够吓一跳，不必真的碰到。
+  if (senses.playerHand && senses.playerHand.appeared
+      && senses.playerHand.dist <= CONFIG.perceiveRadius) {
+    applyEvent(c.emotions, 'startled');
   }
 
   const petting = isPetting(senses);

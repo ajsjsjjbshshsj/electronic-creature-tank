@@ -197,11 +197,10 @@ test('每一种情绪事件种类都真的有生产者（不许留无人发出�
   // 判据本身不需要正则：注释已剥掉，剩下"这一行既调了 applyEvent 又带着这个字面量"就够了。
   // 已知的**待补生产者**清单。每条都必须写清"谁将来发它"，且这个清单只许变短、不许变长 ——
   // 新增一个没有任何生产者、也没写归属的事件种类，这条测试就是为拦它而存在。
-  // （B17c 会实现"戳"的输入通道，届时 poked / startled 从这里删掉。）
-  const PENDING_PRODUCERS = {
-    poked: 'B17c：spec §6.1 的"戳"（快速点击），由 input.js 的 press + sim 结算',
-    startled: 'B17c：突然出现在它身边的手；needs.startle 目前也因此没有消费者',
-  };
+  // 已经有生产者的种类若还留在这里，下面的 stale 断言会把它抓出来（防清单腐烂）。
+  //
+  // B17c 之后这张表是**空的**：poked 与 startled 的输入通道（down / appeared）已经接上。
+  const PENDING_PRODUCERS = {};
   const lines = [];
   for (const f of listSrcFiles(SRC_DIR)) {
     for (const line of stripComments(readFileSync(f, 'utf8')).split('\n')) lines.push(line);
