@@ -227,6 +227,30 @@ test('恢复走的是 migrate()，不是"把 JSON 直接塞进世界"（裁定 R
   assert.equal(controller.world.creatures.length, 1);
 }));
 
+// 复核时撞出来的：我那份 v1 夹具漏了 stage，于是 restoreWorld 抛了 —— 查下来**代码是对的**
+// （它在恢复边界上认得出"这个 stage 不在 STAGES 里"），错的是我的夹具。
+// 但这件事值得单独钉一条：**过了 migrate 却过不了 restoreWorld 的档，必须走隔离区而不是白屏**。
+// 玩家手里的旧档完全可能带着某个今天已经不认识的枚举值，那种时候页面必须照常起一缸新的。
+test('过了 migrate 但 restoreWorld 不认的档（stage 是垃圾值）：进隔离区，页面照常开缸', () => withSaveTank({
+  store: makeStore({
+    [KEY]: JSON.stringify({
+      version: SAVE_VERSION,
+      world: { time: 100 },
+      creatures: [{
+        id: 'bad-stage', name: '怪怪', stage: 'adolescent', age: 100, alive: true,
+        genes: Object.fromEntries(ALL_GENES.map((g) => [g, [0.4, 0.7]])),
+      }],
+    }),
+  }),
+}, ({ controller, store }) => {
+  const kept = store.raw(CORRUPT);
+  assert.ok(kept && kept.includes('adolescent'),
+    '原档必须逐字节进隔离区 —— 它只是有个字段今天不认得，不是垃圾');
+  assert.equal(controller.saveState.source, 'corrupt-moved');
+  assert.equal(controller.world.creatures.length, CONFIG.initialCreatures,
+    '新缸必须照常起来：一份读不懂的档没有权利让页面开不了');
+}));
+
 // ============================================================ 第 3 行：R-1，坏档绝不被覆盖
 
 // 三种"读不懂"各测一遍：坏 JSON、比实现更新的版本、能解析但形状不对。

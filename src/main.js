@@ -81,7 +81,7 @@
 //     （JSON.stringify 给的是 `{}`），所以这里**不许**写"存→读→跑 N tick 与连跑逐位相同"那种假断言。
 
 import { CONFIG } from './config.js';
-import { createWorld, tickWorld, restoreWorld } from './sim.js';
+import { createWorld, tickWorld, restoreWorld, assertRestorable } from './sim.js';
 import { updateBodies, reconcileBodies } from './body.js';
 import { createRenderer, consumeEvents } from './render.js';
 import { attachInput } from './input.js';
@@ -598,6 +598,10 @@ function attachSaveTier(probe, options) {
     try {
       doc = migrate(JSON.parse(String(raw)));
       for (let i = 0; i < doc.creatures.length; i++) assertCreatureShape(doc.creatures[i]);
+      // ⚠️ 这道必须在这里、**动世界之前**：restoreWorld 是就地改写的，
+      // 让它改到一半才抛，玩家拿到的是一缸被清掉一半的僵尸而不是一缸干净的新缸。
+      // 复核时这条测试一写出来就红了 —— 坏档当时能穿过 load()、在 boot 里炸掉整个页面。
+      assertRestorable(doc);
     } catch (err) {
       doc = null;
       state.reason = String((err && err.message) || err);

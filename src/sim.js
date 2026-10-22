@@ -276,6 +276,31 @@ export function restoreWorld(world, doc) {
   return world;
 }
 
+// 读档路径的**前置**校验：只查"这只装不装得进去"，一个字节都不改。
+// 为什么单独导出：main.js 的 load() 必须在**动世界之前**问这句话 ——
+// restoreWorld 是就地改写的，让它改到一半才抛，用户得到的是一缸被清掉一半的僵尸，
+// 而不是一缸干净的新缸。导出一份、两处用（load 与 restoreCreature 自己），
+// 免得校验规则长成两份各自漂移的清单。
+// 脏 stage 不拦的症状是"这只永远不能繁殖也不算成年"，跟迁移取默认值一样**完全没有症状**，
+// 所以这道防线必须在读档这条绕过 createCreature 的路上重设一遍。
+export function assertRestorable(doc) {
+  if (doc === null || typeof doc !== 'object' || !Array.isArray(doc.creatures)) {
+    throw new TypeError('restoreWorld: 存档必须是 migrate() 的输出（要有 creatures 数组）');
+  }
+  for (let i = 0; i < doc.creatures.length; i++) {
+    const c = doc.creatures[i];
+    if (c === null || typeof c !== 'object') {
+      throw new TypeError(`restoreWorld: 第 ${i} 个个体不是对象（收到 ${JSON.stringify(c)}）`);
+    }
+    if (typeof c.id !== 'string' || c.id === '') {
+      throw new TypeError(`restoreWorld: 个体缺 id（收到 ${JSON.stringify(c.id)}）`);
+    }
+    if (!STAGES.includes(c.stage)) {
+      throw new TypeError(`restoreWorld: ${c.id} 的 stage "${String(c.stage)}" 不在 STAGES 里：${STAGES.join(' / ')}`);
+    }
+  }
+}
+
 // 一只裸对象 → 一只能跑的生物。补的三类东西各有出处：
 //   · memory / traits / thresholds / speech / heard / catchphrase 由 save.migrate() 备齐，
 //     这里**不重做**（重做就是两份形状定义，正是 save.js 文件头禁止的那件事）；
@@ -284,12 +309,7 @@ export function restoreWorld(world, doc) {
 //     而读档路径绕过了 createCreature，所以防线必须搬到这里来。脏 stage 不抛的话，
 //     症状是"这只永远不能繁殖也不算成年"，跟迁移取默认值一样**完全没有症状**。
 function restoreCreature(c) {
-  if (typeof c.id !== 'string' || c.id === '') {
-    throw new TypeError(`restoreWorld: 个体缺 id（收到 ${JSON.stringify(c.id)}）`);
-  }
-  if (!STAGES.includes(c.stage)) {
-    throw new TypeError(`restoreWorld: ${c.id} 的 stage "${String(c.stage)}" 不在 STAGES 里：${STAGES.join(' / ')}`);
-  }
+  assertRestorable({ creatures: [c] });
   const out = { ...c };
   if (out.pos) out.pos = { ...c.pos };
   if (out.vel) out.vel = { ...c.vel };
