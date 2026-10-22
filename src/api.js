@@ -1,11 +1,13 @@
-// api.js —— 可选 API 档的**纯函数层**（spec §4.13.2 / §4.13.2.1，Task B19b-i）。
+// api.js —— 可选 API 档的**纯函数层**（spec §4.13.2 / §4.13.2.1，Task B19b-i 与 B19b-ii）。
 //
 // 分工与 src/bubble.js / src/eyes.js / src/audio.js 同一形状：**算**的东西全在这里，
 // 而且这一层连浏览器能力都不需要 —— 它**一个请求都不发**。发请求、掐时间、把文字换进气泡
 // 是接线层（B19b-ii，住在 main.js）的事，那个以 f-e-t-c-h 四个字母拼成的名字在 src/ 里
 // 只许出现在 main.js（tests/constraints.test.js 逐字扫这个文件）。
-// 拆的理由还是可测性：喂给模型什么、接受什么样的回复、什么时候算超时，全是**值**，
-// 能在 Node 里逐条断言；混进绘制与网络路径之后就只剩"看起来能用"。
+// 拆的理由还是可测性：喂给模型什么、接受什么样的回复、什么时候算超时、一句话最多被按多久，
+// 全是**值**，能在 Node 里逐条断言；混进绘制与网络路径之后就只剩"看起来能用"。
+// B19b-ii 在末尾追加的**暂存队列**守同一条界线：它按住一句话的手里只有一个数字
+// （那条 deadline），而那个数字由调用方逐帧喂进来 —— 所以这层照样零定时器、零能力。
 //
 // 这一层的核心裁定（spec §4.13.2.1 第 1 条）：**API 档是输出侧的旁路，不是开关。**
 // 内核照旧决定"说不说、什么时候说"（自己的概率、冷却、speechRng），照旧发那条带着
@@ -447,3 +449,278 @@ export function shouldAbort(nowMs, deadlineMs) {
   }
   return nowMs >= deadlineMs;
 }
+
+// ================================================================ 暂存队列（B19b-ii）
+//
+// 为什么这一半住在 api.js 而不是 main.js：它的语义（先进先出、有上界、到期先出、
+// 每个出口都有计数）全是**值**，在 Node 里能逐条断言；混进 f-e-t-c-h 与绘制路径之后就只剩
+// "看起来会冒泡"。与 bubble.js / eyes.js / audio.js 的拆法同一条理由。
+//
+// 这一层的形状由 spec §4.13.2.1 第 7 条（B19b-ii 落定的那一条）决定：
+// **有界的按住，不是事后换字。** 内核发出的那条 say 事件被这里接管住（不再当帧转发给
+// 消费方），最多多等 `CONFIG.api.apiHoldMs` 毫秒，然后**无论手上是什么文案都交出去**。
+// 于是"最多延后 apiHoldMs"是结构性质，而"让它闭嘴"这条通路在这层根本不存在：
+// 队列的每一个出口都交出一句话，差别只在那句话是模型写的还是规则档写的。
+//
+// ⚠️ 这里**没有任何定时器**（s-e-t-t-i-m-e-o-u-t 那一家族的两个名字一个都不许出现）。
+// 超时机制就是帧循环里的 `duePending` 一趟扫描 —— 于是 stop() 之后没有定时器要收拾，
+// 也不可能出现"某个回调在缸停之后把字塞进气泡池"。时钟由调用方逐帧传进来。
+//
+// ⚠️ 槽位存的是**内核那一条事件对象本身的引用**，队列自己不造事件对象（稳态零分配）。
+// 接管期间文案可以改写在那个对象上（`resolvePending`），改写发生在它被交出去之前 ——
+// 交出去之后世界与队列都不再引用它，所以不会撞到后来那一拍。
+// 被换掉的是 `text` / `tokens` 两个字段，`c.speech.lastTokens` 指的是另一个数组，不受影响。
+
+// pushPending 的结果原因（接线层按它计数，绝不按自然语言分支）。
+export const PUSH_REASONS = Object.freeze({
+  OK: 'ok',                    // 老老实实进了一个空槽
+  BAD_SHAPE: 'bad-shape',      // 事件形状不对 ⇒ 没接管；调用方必须照旧把它转发（不许吞）
+  SUPERSEDED: 'superseded',    // 同一只又开口，旧的那拍让位（旧的那拍**交出去**，不是丢掉）
+  OVER_CAP: 'over-cap',        // 队列满了，挤掉最早到期的一条（同样是交出去，不是丢掉）
+});
+
+// 一拍的四种去路。每一条都必须留下一个读数（§7.7 不许静默）。
+export const RELEASE_WHY = Object.freeze({
+  DUE: 'due',                        // 到点，没有回复 ⇒ 规则文案
+  RESOLVED: 'resolved',              // 回复落地（模型文案或"没有替换"）
+  SUPERSEDED: 'superseded',          // 被同一只的新句顶掉 ⇒ 当场交付
+  OVER_CAP: 'over-cap',              // 被容量挤掉 ⇒ 当场交付
+});
+// ⚠️ 表里只有"确实交出去了"的这四种去路。停缸收走记在 `p.dropped`、交付缓冲区满记在
+// `p.giveOverflow` 与 `p.stuck`，它们都**不是**交付 —— 给一句没能说话的句子配一个
+// release 的 why，等于把 `released === replaced + fellBack` 那条守恒式拿去撑数。
+
+const SLOT_FREE = 0;
+const SLOT_USED = 1;
+
+// 容量由调用方定（接线层取气泡队列容量：按住的话数永远不该超过显示层装得下的条数）。
+export function createPending(cap) {
+  const n = Math.max(1, Math.floor(finite(cap) ? cap : 1));
+  return {
+    n, count: 0,
+    used: new Uint8Array(n),
+    // 槽位里存的是那条 say 事件的引用；下面四个数组只是**读数**（断言与诊断用），
+    // 其中 text/tokens 两个会在模型回复落地时被改写回那个对象上。
+    ev: new Array(n).fill(null),
+    id: new Array(n).fill(''),
+    text: new Array(n).fill(''),
+    tokens: new Array(n).fill(null),
+    mood: new Array(n).fill(''),
+    deadlineMs: new Float64Array(n),
+    // 代号：每次占用槽位都要新号。迟到的回复只能对上号才能写字，
+    // 对不上就是"那一拍早就走了" ⇒ 丢弃并计数（决策 F 的后半段）。
+    token: new Float64Array(n),
+    seq: 0,
+    changed: new Uint8Array(n),      // 1 = 这一拍最终交出去的是模型文案
+    // ---- 两个复用容器（长度有界，运行中只写不 push）----
+    due: new Array(n).fill(-1), dueCount: 0,
+    give: new Array(n + 1).fill(null), giveIdx: new Array(n + 1).fill(-1), giveCount: 0,
+    // ---- 诊断读数 ----
+    lastIdx: -1, lastToken: 0, lastReason: '',
+    // ---- 计数器：每一个出口都有名字 ----
+    accepted: 0, rejected: 0, superseded: 0, overCap: 0, expired: 0,
+    resolved: 0, refused: 0, released: 0, replaced: 0, fellBack: 0,
+    late: 0, dropped: 0, droppedStaged: 0, giveOverflow: 0, stuck: 0, notTaken: 0, peak: 0,
+  };
+}
+
+// 最早到期的那个槽位（并列时取代号最小的 ⇒ 同刻按入队先后，确定且无随机）。
+function oldestIdx(p) {
+  let best = -1;
+  for (let k = 0; k < p.n; k++) {
+    if (p.used[k] !== SLOT_USED) continue;
+    if (best < 0
+        || p.deadlineMs[k] < p.deadlineMs[best]
+        || (p.deadlineMs[k] === p.deadlineMs[best] && p.token[k] < p.token[best])) best = k;
+  }
+  return best;
+}
+
+// 第一个空槽（下标升序 ⇒ 槽位复用顺序确定，测试可以照着写）。
+function freeSlot(p) {
+  for (let k = 0; k < p.n; k++) if (p.used[k] === SLOT_FREE) return k;
+  return -1;
+}
+
+// 这只生物现在手上有没有一句还按着的话。**导出**是因为"同一只不许叠加"这条规矩
+// 需要调用方在 push 之前就能看见它（顶位的那条要当场交出去，而交付是接线层的事）。
+export function findPending(p, id) {
+  if (typeof id !== 'string' || id === '') return -1;
+  for (let k = 0; k < p.n; k++) if (p.used[k] === SLOT_USED && p.id[k] === id) return k;
+  return -1;
+}
+
+// 把第 idx 拍交出去。返回 1 = 进了交付缓冲区，0 = 缓冲区满（留在槽里、标成已到期）。
+function handOff(p, idx, why) {
+  if (p.giveCount >= p.give.length) {
+    // 这条**不该被走到**（缓冲区比槽位还多一格，而调用方每推一条就抽干一次）。
+    // 真走到了也只许多计数不许吞字：把 deadline 压到过去，下一帧的 duePending 一定捡起来。
+    p.giveOverflow += 1;
+    p.stuck += 1;
+    p.deadlineMs[idx] = -1;
+    return 0;
+  }
+  const ev = p.ev[idx];
+  p.released += 1;
+  if (p.changed[idx] === 1) p.replaced += 1;
+  else p.fellBack += 1;
+  if (why === RELEASE_WHY.DUE) p.expired += 1;
+  p.give[p.giveCount] = ev;
+  p.giveIdx[p.giveCount] = idx;
+  p.giveCount += 1;
+  p.used[idx] = SLOT_FREE;
+  p.ev[idx] = null;
+  p.id[idx] = '';
+  p.text[idx] = '';
+  p.tokens[idx] = null;
+  p.mood[idx] = '';
+  p.changed[idx] = 0;
+  p.count -= 1;
+  return 1;
+}
+
+// 接管一条已经要说出口的一句话。
+// 返回 1 = 这一拍归队列交付；返回 0 = **队列没收它**，调用方必须当场原样交付那一句
+// （两种没收：形状不对 `bad-shape`，以及腾不出位 `over-cap` —— 都不许让那句话消失）。
+// ⚠️ 满的时候不拒收新的那条就先挤掉**最早到期**的那条并把它交出去：
+// 队列的语义是"按住等一句替换文案"，被按住的代价该由等得最久的那条先付，
+// 而它付的方式是"当场把规则档那句说出来"，不是"消失"。
+export function pushPending(p, ev, deadlineMs) {
+  if (!ev || typeof ev.id !== 'string' || ev.id === ''
+      || typeof ev.text !== 'string' || ev.text === '') {
+    p.rejected += 1;
+    p.lastIdx = -1;
+    p.lastReason = PUSH_REASONS.BAD_SHAPE;
+    return 0;
+  }
+  // 腾位之前先看交付缓冲区放不放得下：放不下的话宁可**不收这一拍**（调用方原样交付），
+  // 也绝不在这里覆盖掉一个还没交出去的句子 —— 那才是真的吞字。
+  // 一次 push 最多需要腾两个位（同 id 让位 + 容量挤出），所以 give 的长度 n+1 在
+  // "调用方每推一条就抽干一次"的契约下永远够用；契约被违反时走这条拒收分支，有读数。
+  const dup = findPending(p, ev.id);
+  const free = freeSlot(p);
+  const need = (dup >= 0 ? 1 : 0) + (dup < 0 && free < 0 ? 1 : 0);
+  if (need > p.give.length - p.giveCount) {
+    p.notTaken += 1;
+    p.lastIdx = -1;
+    p.lastReason = PUSH_REASONS.OVER_CAP;
+    return 0;
+  }
+  let why = PUSH_REASONS.OK;
+  // 同一只只留最新那句（与 bubble.js 的 pushSay 同一条规矩：话痨不许把队列摞起来）。
+  // 顶掉的那条**当场交出**它当下手上的文案 —— 让位不等于闭嘴。
+  if (dup >= 0) {
+    handOff(p, dup, RELEASE_WHY.SUPERSEDED);
+    p.superseded += 1;
+    why = PUSH_REASONS.SUPERSEDED;
+  }
+  let idx = freeSlot(p);
+  if (idx < 0) {
+    idx = oldestIdx(p);                // 上面那一轮顶位没腾出槽，就挤掉最早到期的那条
+    handOff(p, idx, RELEASE_WHY.OVER_CAP);
+    p.overCap += 1;
+    why = PUSH_REASONS.OVER_CAP;
+  }
+  p.used[idx] = SLOT_USED;
+  p.ev[idx] = ev;
+  p.id[idx] = ev.id;
+  p.text[idx] = ev.text;
+  p.tokens[idx] = Array.isArray(ev.tokens) && ev.tokens.length > 0 ? ev.tokens : ev.text.split(' ');
+  p.mood[idx] = typeof ev.mood === 'string' ? ev.mood : '';
+  // 脏 deadline（旧档/时钟漂移）当成"已经到期"：宁可不按住，也绝不把一句话永远按着。
+  p.deadlineMs[idx] = finite(deadlineMs) ? deadlineMs : -1;
+  p.token[idx] = ++p.seq;
+  p.changed[idx] = 0;
+  p.count += 1;
+  p.accepted += 1;
+  if (p.count > p.peak) p.peak = p.count;
+  p.lastIdx = idx;
+  p.lastToken = p.token[idx];
+  p.lastReason = why;
+  return 1;
+}
+
+// 到期的是哪些：写进 p.due（到期先、同刻入队先），返回条数。调用方随后逐条 releasePending。
+// 这就是超时机制本身 —— 没有别的地方在掐表。
+export function duePending(p, nowMs) {
+  p.dueCount = 0;
+  for (let k = 0; k < p.n; k++) {
+    if (p.used[k] !== SLOT_USED) continue;
+    if (!shouldAbort(nowMs, p.deadlineMs[k])) continue;
+    // 插入排序（槽位上限是个位数，且这里零分配）：保证"等得最久的先出去"。
+    let i = p.dueCount;
+    while (i > 0) {
+      const prev = p.due[i - 1];
+      if (p.deadlineMs[prev] < p.deadlineMs[k]) break;
+      if (p.deadlineMs[prev] === p.deadlineMs[k] && p.token[prev] <= p.token[k]) break;
+      p.due[i] = prev;
+      i -= 1;
+    }
+    p.due[i] = k;
+    p.dueCount += 1;
+  }
+  return p.dueCount;
+}
+
+// 把第 idx 拍交付出去（到期那一支）。手上有什么就交什么：模型文案换过就交模型文案。
+export function releasePending(p, idx) {
+  if (!(idx >= 0 && idx < p.n) || p.used[idx] !== SLOT_USED) return 0;
+  return handOff(p, idx, RELEASE_WHY.DUE);
+}
+
+// 一次请求的落地。utterance 是 validateReply 通过时那份 { text, tokens }，其它一律 null。
+// token 是接线层在 pushPending 之后拿到的代号：对不上 ⇒ 那一拍早就交付过了 ⇒ **丢弃并计数**，
+// 绝不把迟到的文案塞进后来那一句话里（决策 F）。
+export function resolvePending(p, idx, utterance, nowMs, token) {
+  if (!(idx >= 0 && idx < p.n) || p.used[idx] !== SLOT_USED) { p.late += 1; return 0; }
+  if (token !== undefined && token !== null && p.token[idx] !== token) { p.late += 1; return 0; }
+  if (utterance && typeof utterance.text === 'string' && utterance.text !== ''
+      && Array.isArray(utterance.tokens) && utterance.tokens.length > 0) {
+    const ev = p.ev[idx];
+    // 改写的是**尚未交出去**的那个对象；c.speech.lastTokens 指向另一个数组，碰不到。
+    if (ev) { ev.text = utterance.text; ev.tokens = utterance.tokens; }
+    p.text[idx] = utterance.text;
+    p.tokens[idx] = utterance.tokens;
+    p.changed[idx] = 1;
+    p.resolved += 1;
+  } else {
+    p.refused += 1;
+  }
+  p.deadlineMs[idx] = finite(nowMs) ? nowMs : -1;   // 已经落地，不必再按到原定的点
+  return handOff(p, idx, RELEASE_WHY.RESOLVED);
+}
+
+// 缸停了：队列里还按着的话**不再交付**（屏幕上什么都不画了，交付也没有去处），但必须留读数。
+// 这是全队列唯一一条"没有交出一句话"的去路，而它不是让生物闭嘴 —— 是整个应用停了。
+// 已经进了交付缓冲区、还没来得及被取走的那几条也一样收走，另记一个 `droppedStaged`：
+// 真实场景是"回复恰好在最后一帧之后落地"，那一份文案同样消失，同样不许静默。
+export function dropAllPending(p) {
+  let n = 0;
+  for (let k = 0; k < p.n; k++) {
+    if (p.used[k] !== SLOT_USED) continue;
+    p.used[k] = SLOT_FREE;
+    p.ev[k] = null;
+    p.id[k] = '';
+    p.text[k] = '';
+    p.tokens[k] = null;
+    p.mood[k] = '';
+    p.changed[k] = 0;
+    n += 1;
+  }
+  p.count = 0;
+  p.dropped += n;
+  // 已经 handOff（记过 released）但还没来得及被取走的那几条：它们同样不会出现在屏幕上。
+  // 另记一个读数而不是并进 dropped —— 守恒式 `accepted == released + count + dropped`
+  // 靠 released 覆盖它们，把两处混记会让那条式子再也对不上。
+  p.droppedStaged += p.giveCount;
+  p.giveCount = 0;
+  return n;
+}
+
+// 交付缓冲区里的那几条：接线层逐帧读 give/giveIdx，然后 clearGive(p)。
+export function clearGive(p) {
+  for (let i = 0; i < p.giveCount; i++) { p.give[i] = null; p.giveIdx[i] = -1; }
+  p.giveCount = 0;
+  return 0;
+}
+

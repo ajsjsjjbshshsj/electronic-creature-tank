@@ -171,7 +171,13 @@ test('白名单没有腐烂：main.js 确实存在，且确实用到了浏览器
     //   · 根本没人创建 ⇒ 缸永远没声音，而**没有任何一条测试会红**（B17c 抓过的那类"接线没接到"）。
     // 这一条拦的是第二种。它和 tests/audio.test.js 里那两条 boot 用例是同一个约束的两面：
     // 这里查"源码里有这个构造"，那里查"真的在首次手势上跑起来了"。
-    for (const required of ['document', 'requestAnimationFrame', 'AudioContext']) {
+    //
+    // B19b-ii（2026-10-22）按同一条理由加第四、第五个：fetch 与 localStorage。
+    // 可选 API 档的**全部**网络与本机存储都只许住在 main.js（src/api.js 里连名字都不许出现），
+    // 所以"接线根本没接上"在这里唯一的机器形式就是"这两个名字确实出现在 main.js 的代码里"。
+    // 光有上面那条纯度守卫拦不住第二种：那边全绿，这边一缸只会说规则档的话而没人知道自己接了档。
+    // 它和 tests/api.test.js 末尾那组 boot 用例是同一个约束的两面（这里查源码，那里查真的跑了）。
+    for (const required of ['document', 'requestAnimationFrame', 'AudioContext', 'fetch', 'localStorage']) {
       assert.ok(used.includes(required),
         `${rel} 没有用到 ${required}：它要么不是页面入口（该移出白名单），要么那条通道没接线`);
     }
