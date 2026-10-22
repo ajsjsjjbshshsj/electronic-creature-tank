@@ -556,6 +556,82 @@ const CONFIG = {
     hopStretchAir: 1.10,       // 滞空中点的竖向尺度（拉长 10%；与压扁共用一条 sin 弧）
   },
 
+  // ---- 叫声（spec §5.4 的声音表 + §5.4.1 的落地裁定，2026-10-22 B18）----
+  // 分工与 eye / render 两段完全一致：**数在这里，映射与调度在 src/audio.js**（纯函数、
+  // Node 里全测），而 AudioContext 只出现在 src/main.js。
+  // 表里那六个 fromHz/toHz 是 spec §5.4 **逐字**的数（600→900、400→200、90–140、
+  // 下滑、上扬、极轻），它们描述的是**参考体型**那一只的嗓音；真实个体要乘 voiceFor()
+  // 从体型推导的音高因子 —— 这就是"音高随体型、音色随色相"那条 headline 的实现方式。
+  // 新增的 thud / chirp 两行**不在 spec 表里**，是计划 2 的两条增量，理由写在 §5.4.1 第 5 条。
+  audio: {
+    masterGain: 0.16,            // spec §5.4"默认开启、音量很小"。总线上还有一层，见 peak
+    maxVoices: 6,                // 同时活跃的发声数上界；溢出**计数丢弃**（§7.7 不许静默丢）
+    lookaheadSec: 0.012,         // 排程提前量：0 时刻排程会让 Web Audio 立刻截掉起音
+    refSize: 26,                 // 参考体型 = (minSize+maxSize)/2 的中性成体（与 needs 那段同源）
+    pitchMin: 0.55,              // 音高因子两端：大只最低 0.55×、小只最高 2.6×
+    pitchMax: 2.6,
+    hueBuckets: 12,              // 音色分桶：同一桶 = 同一家族的嗓音（血脉可听）
+    hueTurn: 360,                // 一整圈：跨 0° 区间的展开式里那个 360（genes.decode 同一条式子）。
+                                 // 它是结构常数而不是调参旋钮，但 audio.js 不许有字面量
+                                 // （先例：body.js 连五角星的"五"都搬进了 CONFIG.star.corners）。
+    // 音色这两项**都相对基频**，不是绝对 Hz：低通的绝对中心一旦落在基频之下，
+    // 它就不再是"音色"而是"音量"（600→900 那一声被 700Hz 低通一砍，只剩发闷）。
+    // 于是色相决定的是"泛音留多少"与"倍音偏多少"，与体型推出的音高不会互相抵消。
+    filterRatioMin: 2,           // 低通中心 = 基频 × 此区间的一端（桶 0，最暗的一系）
+    filterRatioMax: 6,           // 桶末（最亮的一系）
+    filterQ: 1.1,
+    overtoneMix: 0.18,           // 倍音那只振荡器的增益 / 主振荡的 peak（"嗓音里的共鸣"）
+    overtoneRatioMin: 2.02,      // 倍音比：略微偏离八度 ⇒ 拍频，血脉之间听得出"不是同一副嗓子"
+    overtoneRatioMax: 2.97,
+
+    // ---- 检测阈值（内核**没有**情绪事件，见 §5.4.1 第 1 条：表现层只读阈值跨越）----
+    // joyMin / angerMin **不在这里**：读 CONFIG.mood.happyJoyMin 与 CONFIG.mood.angerMin，
+    // 与 body.js 读 CONFIG.behavior.begEscalate 同一条纪律（阈值只许一处定义）。
+    sleepyMin: 0.50,             // emotions.sleepy 跨过它 → 困倦那一声明
+    tiredMin: 0.72,              // needs.energy（疲劳匮乏度）跨过它 → 同一声明（两个读数共用一条冷却）
+    affectionMin: 0.35,          // 对玩家好感跨过它 → 卖萌那一声明（另一条来源是 begLevelOf 升档）
+    cooldownSec: 4,              // 同一只、同一声明的最小**真实秒**间隔。防的是阈值沿线抖动
+                                 // （joy 在 0.45 上下微摆时，只靠"跨越"会连发）。
+    thudGapSec: 0.35,            // 落地闷响的**全局**最小间隔：24 只好动个体在 4× 下不能变成机关枪
+    thudPerSec: 0.9,             // 同一只两次落地之间的最小间隔（一个 hop 窗口最多一记）
+    // 出词前那记「啾」的**全局**闸门。数值是**量出来的**（spec §5.4.1 第 5 条）：
+    // 60 分钟一缸实测最坏单秒 5 句、最坏三秒窗 8 句 ⇒ 4× 下就是 20 记/真实秒，而单音长只有 0.045s。
+    // 0.3 刻意选在"**1× 下不 binding**（三秒窗最多放行 10 记 > 实测 8 记）、4× 下才咬人"：
+    // 正常话痨的手感一个字都不动，只把倍速捅出来的那一梭子拦住。上限 ≈ 3.3 记/真实秒。
+    chirpGapSec: 0.3,
+    releaseSec: 0.03,            // 每个声部在 noteSec 之后的释音段（stop 时刻 = 音长 + 这一段）
+    silenceGain: 0.0001,         // 包络终点的"零"：真 0 会让 exponentialRamp 在本秒变成非法值
+    noiseStepSec: 0.031,         // 噪声层各段读取共享 buffer 的偏移步长（碎裂感的来源）
+    noiseBufferSec: 0.2,         // 那块共享 buffer 的秒数；必须盖过最大偏移 + 最长一段
+    fallbackSampleRate: 44100,   // 注入的图没有 sampleRate 时用它（真实浏览器都是 44100/48000）
+    lfoSeedModulus: 7,           // 「生气抖动」速率的每只变化量：**由 id 派生**，不消费随机数
+    lfoSeedSpread: 0.06,         // × 上述派生的偏移（±3 × 0.06 ⇒ 速率在 0.82–1.18 之间散开）
+
+    // 八行的共同形状：wave / fromHz / toHz / noteSec / gapSec / reps / attack / peak / pitchMix。
+    // pitchMix = 音高因子**用多少**：1 = 全额随体型（spec 要求的那几行与那记「啾」），
+    // 0.5 = 只走一半（低沉那一类的低频端再乘 0.55 就掉到手机扬声器发不出的 39Hz）。
+    // noise* 四项只在有噪声层的行里出现（气泡噪声 / 细碎裂声），没有就不写。
+    joy: { wave: 'sine', fromHz: 600, toHz: 900, noteSec: 0.085, gapSec: 0.055, reps: 2,
+           attack: 0.006, peak: 0.50, pitchMix: 1 },
+    beg: { wave: 'triangle', fromHz: 400, toHz: 200, noteSec: 0.14, gapSec: 0, reps: 1,
+           attack: 0.008, peak: 0.42, pitchMix: 1,
+           noiseCount: 4, noiseDur: 0.030, noiseGap: 0.028, noisePeak: 0.10 },
+    anger: { wave: 'sawtooth', fromHz: 140, toHz: 92, noteSec: 0.34, gapSec: 0, reps: 1,
+             attack: 0.020, peak: 0.46, pitchMix: 1,
+             lfoRateBase: 11, lfoDepthHz: 8 },      // "轻微抖动"：LFO 调制主振荡的频率
+    sleepy: { wave: 'sine', fromHz: 300, toHz: 120, noteSec: 0.80, gapSec: 0, reps: 1,
+              attack: 0.260, peak: 0.32, pitchMix: 1 },   // 柔和起音 = attack 占掉三分之一音长
+    hatch: { wave: 'sine', fromHz: 520, toHz: 900, noteSec: 0.16, gapSec: 0, reps: 1,
+             attack: 0.008, peak: 0.36, pitchMix: 1,
+             noiseCount: 6, noiseDur: 0.018, noiseGap: 0.032, noisePeak: 0.14 },
+    death: { wave: 'sine', fromHz: 230, toHz: 96, noteSec: 0.90, gapSec: 0, reps: 1,
+             attack: 0.120, peak: 0.12, pitchMix: 1 },     // 几乎听不见：peak 是全表最低一档
+    thud: { wave: 'sine', fromHz: 118, toHz: 58, noteSec: 0.10, gapSec: 0, reps: 1,
+            attack: 0.004, peak: 0.34, pitchMix: 0.5 },
+    chirp: { wave: 'sine', fromHz: 1150, toHz: 1560, noteSec: 0.045, gapSec: 0, reps: 1,
+             attack: 0.003, peak: 0.20, pitchMix: 1 },
+  },
+
   // ---- 世界 ----
   particles: { desktop: 120, mobile: 60 },
   foodMax: 40,
