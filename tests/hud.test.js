@@ -8,6 +8,8 @@ import { createEmotions } from '../src/emotions.js';
 import { sizeOf } from '../src/creature.js';
 import { createNeeds } from '../src/needs.js';
 import { createMemory, remember } from '../src/memory.js';
+import { mountHud } from '../src/hud.js';
+import { makeDoc, find, findAll, textOf, dump, click, countListeners } from './dom-stub.js';
 
 // ---------------------------------------------------------------- 这个文件在守什么
 //
