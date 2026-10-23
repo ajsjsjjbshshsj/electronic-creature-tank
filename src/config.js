@@ -426,6 +426,21 @@ const CONFIG = {
     // 兜底。**不许是 wink**：那只眼是"卖萌"，一张读错的脸色比一张呆板的脸伤害大得多。
     fallback: 'calm',
   },
+  hud: {
+    // 计划 3 HUD。手势那三个数是 **gestures.js 的唯一真相源**（它 import 这一段，
+    // 不再自带一份 DEFAULTS —— Task 1 里那份兜底值在 Task 3 被收编了）。
+    tapMaxPx: 12,              // 位移小于此才算"点按"而不是"划动"（手指抖动与 44px 目标之间的折中）
+    holdMinMs: 500,            // 长按改名 / 长按撒食的门槛
+    minHitPx: 22,              // 点选半径下限：幼体屏上半径可小到 3px（render.js:120 的 SIZE_LO），
+                               // 不夹就等于"点按开信息卡"对最小的那些没做。44px 目标的一半。
+    fadeIdleMs: 2600,          // spec §6.3"平时半透明淡出，交互时才浮现"
+    minTouchPx: 44,            // spec §6.3 触控目标下限（css 的 .hud-touch 用同一个数）
+    cardRefreshMs: 250,        // 信息卡读数节流：每帧重排 DOM 在手机上会掉帧（spec §5.3）
+    cardWordsMax: 6,           // "记住的词"一行最多几个（heardCap 最大 12，一行放不下）
+    tellMaxChars: 60,          // 讲给它听的输入上限：超了截断 + 计数，不报错不弹窗
+    nameMaxChars: 12,          // 改名上限。与 CONFIG.api.nameMaxChars 同数但**是两回事**
+                               // （那个是模型给的名字上限，这个是玩家手打的）
+  },
   fluff: {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型
     sprites: 2,                // FLUFF_SPRITES：常态 / 炸开。§4.7"只画毛尖碎边"换来的便宜
