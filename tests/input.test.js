@@ -7,7 +7,7 @@ import { HAND_SPEED_POKE } from '../src/behavior.js';
 import { createWorld, tickWorld } from '../src/sim.js';
 import { familiarityFor, PLAYER_ID } from '../src/memory.js';
 import { boot } from '../src/main.js';
-import { attachInput, computeSpeed, createHandTracker } from '../src/input.js';
+import { attachInput, computeSpeed, createHandTracker, NO_TIME } from '../src/input.js';
 
 // ---------------------------------------------------------------- 这个文件在守什么
 //
@@ -641,5 +641,61 @@ test('抬手再按下：appeared 再亮一次（每次进缸都算一次"出现"
   assert.equal(input.poll(1040), null, '抬手之后不交付任何样本');
   target.emit('pointerdown', PEV(120, 110, 7));
   assert.equal(input.poll(1060).appeared, true, '第二次进缸必须也算出现');
+  input.detach();
+});
+
+// ---------------------------------------------------------------- 计划 3 Task 1：按压的起止时刻
+
+test('press 记 downAt；release 之后它必须还在（长按是抬起那一刻才要算时长的）', () => {
+  const t = tracker();
+  t.press(1000, 100, 100, W, H);
+  assert.equal(t.downAt, 1000);
+  assert.equal(t.upAt, NO_TIME, '还没抬起，不许有一个"已完成的按压"等着被消费');
+  t.release(1600);
+  assert.equal(t.downAt, 1000, 'release 把 downAt 抹掉了 ⇒ classifyPress 永远算不出 heldMs');
+  assert.equal(t.upAt, 1600);
+  assert.equal(t.state(), null, 'state() 抬起后仍然是 null —— 正因如此这两个数不放 out 里');
+  t.press(2000, 100, 100, W, H);
+  assert.equal(t.downAt, 2000, '下一次按压覆盖起始时刻');
+  assert.equal(t.upAt, NO_TIME, '上一把的抬起必须清掉：不清的话消费者会把它当成这一把抬起再算一次');
+});
+
+test('脏时钟不许把 NaN 写进 downAt / upAt', () => {
+  const t = tracker();
+  t.press(NaN, 1, 1, W, H);
+  assert.equal(t.downAt, NO_TIME, 'NaN 一旦乘进 heldMs，classifyPress 三档全部走空');
+  t.release(undefined);
+  assert.equal(t.upAt, NO_TIME);
+});
+
+test('attachInput 端到端：一次"整把掉在同一帧之间"的快按，抬起时刻仍然留得住', () => {
+  // 这条是 upAt 存在的**全部**理由：poll 每帧一次，而 pointerdown+pointerup
+  // 可以整个挤在两个 rAF 之间（手机掉帧时间隙能到 100ms 以上）。
+  // 只有 downAt 的话，下一次按下会把它盖掉 —— 症状是"界面偶尔不理人"，最难查的那种。
+  let clock = 1000;
+  const target = makeTarget();
+  const input = attachInput(target, () => {}, { now: () => clock });
+  target.emit('pointerdown', PEV(100, 100, 3));
+  clock = 1090;
+  target.emit('pointerup', PEV(100, 100, 3));
+  clock = 1100;
+  assert.equal(input.poll(1100), null, '这一帧根本没看见那只手');
+  assert.equal(input.tracker.downAt, 1000);
+  assert.equal(input.tracker.upAt, 1090);
+  assert.equal(input.tracker.upAt - input.tracker.downAt, 90, 'classifyPress 要的就是这个差');
+  input.detach();
+});
+
+test('抬手之后再来一次按下，前一次的 upAt 被清干净（不重复消费）', () => {
+  let clock = 500;
+  const target = makeTarget();
+  const input = attachInput(target, () => {}, { now: () => clock });
+  target.emit('pointerdown', PEV(10, 10, 1));
+  clock = 600;
+  target.emit('pointerup', PEV(10, 10, 1));
+  assert.notEqual(input.tracker.upAt, NO_TIME);
+  clock = 700;
+  target.emit('pointerdown', PEV(10, 10, 1));
+  assert.equal(input.tracker.upAt, NO_TIME, '新的一次按下必须让"上一次已完成"这件事失效');
   input.detach();
 });

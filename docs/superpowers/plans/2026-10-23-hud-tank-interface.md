@@ -1801,3 +1801,24 @@ git push -u origin <branch> && gh pr create --repo ajsjsjjbshshsj/electronic-cre
 - Task 5 Step 6：`spawnFood(world, kind, pos)` 的 `pos` 到底是归一化还是世界单位 —— 读 `sim.js:349-377`。
 - Task 6 Step 5：窝里那枚卵的序号字段的确切名字 —— 读 `breeding.js:19` 的 `reserveEggSeq` 与 `egg` 的构造处。
 两处都**不许猜**，因为猜错的症状不是报错而是"投出来的食不在手指那儿" / "去重把名字全改没了"这一类查半天的活。
+
+---
+
+## 执行日志（边做边记：计划与现实的差，逐条）
+
+### Task 1（2026-10-23 做完）—— 六处偏离，全部是计划错了而不是实现错了
+
+| # | 计划里写的 | 实际 | 为什么 |
+|---|---|---|---|
+| 1 | `pickCreature(creatures, viewport, xPx, yPx, maxAgeSec)` | 第五参是 `opts`（`{minHitPx}`） | 那个 `maxAgeSec` 是我写计划时手滑，签名里根本没有它的消费者 |
+| 2 | gestures.js "纯，**零 import**" | `import { radiusPx } from './render.js'` | 自己另算一份半径 = 第二份真相。radiusPx 含年龄与蛋加成，另算的话幼体的**可点范围会和画出来的对不上** |
+| 3 | 一条测"点选用的是**静止**半径而不是形变半径" | **删掉，前提不成立** | 读完 `render.js:142` 才发现 `radiusPx = renderSizeOf(c) × scale × 0.5`，而 `renderSizeOf` 只含年龄；挤压走的是 ctx 变换，**不进半径**。换成一条"命中边界就是 radiusPx 那个数"的耦合测试 |
+| 4 | tracker 只加 `downAt` | 加了 `downAt` **与 `upAt`** | 只有 downAt 的话，"一次按下+抬起整个掉在同一帧间隙里"（手机掉帧时间隙 >100ms）会被下一次按下盖掉 —— 症状是"界面偶尔不理人"，最难查的那类。`upAt` 让"有一次已完成的按压没被消费"本身可读。残留限制（单槽寄存器，同帧两次按压仍会丢第一次）写在 `input.js` 的注释里，不为此上队列 |
+| 5 | `classifyPress` 收 `overCreature`、DEFAULTS 里有 `tapMaxMs` | 两个都删 | 没有消费者。`tapMaxMs` 在"只有 hold 一条时间判据"的方案里根本改变不了任何结果 |
+| 6 | 入口处 `if (!Number.isFinite(x) …) return null` | **删掉** | 变异探针 P7 活着回来了：NaN 减什么都得 NaN，`NaN <= r` 恒 false，脏坐标在比较里被自然吸收。留着只会让下一个人以为 NaN 需要特判 |
+
+另外：`NO_TIME` 从模块私有改成导出 —— 测试要断"没有一次已完成的按压等着被消费"就得引用同一个哨兵，在测试里另写 `-Infinity` 就是第二份真相。
+
+**⚠️ 给下一个执行者的一条环境事实**：本仓库源码是 **CRLF**。写变异探针时 `perl -0pi -e 's/…\n…//'` 这种**跨行**模式会静默不匹配，
+看起来像"探针活着 = 测试是空的"，其实是根本没改到。跨行模式一律写 `\r?\n`，并且**每次改完先 grep 确认改到了再跑测试**。
+本轮 P5/P6 第一次就是这么假活过去的。

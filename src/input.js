@@ -49,7 +49,9 @@ const DEFAULT_MIN_INTERVAL_MS = 8;  // poll 之间的最小插入间隔（上界
 // 整个窗口只剩 1ms 的时长，速度被放大 100 倍以上。
 // （这不是假想的：B17 落地时跨层测试先用 -1 跑出来一个 3.4/s 的假"猛戳"读数，
 //   由 tests/input.test.js 的「首笔采样的时刻可以是 0 或负数」那条钉住。）
-const NO_TIME = Number.NEGATIVE_INFINITY;
+// 计划 3 Task 1 起**导出**：downAt / upAt 的初值就是它，测试要断"没有一次已完成的按压
+// 等着被消费"就得引用同一个哨兵 —— 在测试里另写一个 -Infinity 就是第二份真相。
+export const NO_TIME = Number.NEGATIVE_INFINITY;
 
 // ---------------------------------------------------------------- 纯函数
 
@@ -108,6 +110,16 @@ export function createHandTracker(opts) {
   const tracker = {
     count: 0,
     down: false,        // 手指/鼠标按着的这段时间叫"手在缸里"
+    // 一次按压的**起止**时刻（毫秒，来自 opts.now，与 press/poll 同一个时钟）。
+    // 计划 3 Task 1 加，为的是 gestures.classifyPress 那个 heldMs。
+    // 为什么放在 tracker 上而不是 `out` 里：`state()` 抬起之后返回 **null**，
+    // 而"抬起"那一刻正是唯一还想知道按了多久的时候。
+    // 为什么连 upAt 也要：消费者每帧才 poll 一次，一次**快点的按下+抬起**
+    // 可以整个掉在同一帧的间隙里（手机掉帧时间隙能到 100ms 以上）。只有 downAt 的话，
+    // 下一次按下会把它盖掉，那一下点击就凭空消失 —— 症状是"界面偶尔不理人"。
+    // upAt 让"有一次已完成的按压还没被消费"这件事本身可读。
+    downAt: NO_TIME,
+    upAt: NO_TIME,
     active: false,      // 有可用读数（state() 非 null）
     lastInsertT: NO_TIME,
     samples: { t: new Float64Array(max), x: new Float64Array(max), y: new Float64Array(max) },
@@ -222,13 +234,21 @@ export function createHandTracker(opts) {
   tracker.press = (t, clientX, clientY, cssWidth, cssHeight) => {
     tracker.down = true;
     tracker.justPressed = true;
+    tracker.downAt = Number.isFinite(t) ? t : NO_TIME;
+    // 清掉上一次已完成的按压：不清的话消费者会把"上一把抬起"当成"这一把抬起"再算一次，
+    // 症状是点一下开卡、再点一下同一只，卡却关不掉。
+    tracker.upAt = NO_TIME;
     observe(t, clientX, clientY, cssWidth, cssHeight);
   };
 
   // 手离开了。**必须**把 active 清掉并把缓冲倒空：
   // 留着的话下一次按下的第一笔速度会跟上一次的手势做差（跨手势的假速度可以大到几十），
   // 于是"刚伸出的手"会被当成猛戳，生物在玩家每次重新伸手时都被吓一次。
-  tracker.release = () => {
+  tracker.release = (t) => {
+    // 抬起时刻记一笔就走，**downAt 不许清**：按住多久是"抬起之后"才要算的。
+    // 残留的限制只有一条：upAt 是一个单槽寄存器，"同一帧里完成两次按压"会丢第一次 ——
+    // 那要两个完整的按下+抬起挤在 16.7ms 内，人手做不到，所以不为此上一队列。
+    tracker.upAt = Number.isFinite(t) ? t : NO_TIME;
     tracker.down = false;
     tracker.active = false;
     tracker.count = 0;
@@ -295,7 +315,7 @@ export function attachInput(target, onHand, opts) {
 
   function lift() {
     trackedId = null;
-    tracker.release();
+    tracker.release(now());
     if (reported) {
       reported = false;
       onHand(null);
