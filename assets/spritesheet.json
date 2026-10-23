@@ -1,0 +1,56 @@
+{
+  "image": "star_puff_spritesheet.png",
+  "frameWidth": 512,
+  "frameHeight": 512,
+  "columns": 4,
+  "frames": {
+    "wink": {
+      "x": 0,
+      "y": 0,
+      "width": 512,
+      "height": 512
+    },
+    "calm": {
+      "x": 512,
+      "y": 0,
+      "width": 512,
+      "height": 512
+    },
+    "happy": {
+      "x": 1024,
+      "y": 0,
+      "width": 512,
+      "height": 512
+    },
+    "sleepy": {
+      "x": 1536,
+      "y": 0,
+      "width": 512,
+      "height": 512
+    },
+    "surprised": {
+      "x": 0,
+      "y": 512,
+      "width": 512,
+      "height": 512
+    },
+    "sad": {
+      "x": 512,
+      "y": 512,
+      "width": 512,
+      "height": 512
+    },
+    "angry": {
+      "x": 1024,
+      "y": 512,
+      "width": 512,
+      "height": 512
+    },
+    "love": {
+      "x": 1536,
+      "y": 512,
+      "width": 512,
+      "height": 512
+    }
+  }
+}
