@@ -37,19 +37,24 @@ const TAIL = CONFIG.tail;
 // 症状是"这只生物在画面上消失了"且全程不报错（计划 1 的教训）。
 const clamp01 = (v) => (Number.isFinite(v) ? (v < 0 ? 0 : v > 1 ? 1 : v) : 0);
 
-// 五角星的目标半径函数：把任意角折进一个扇区，再折进"外角 → 内角"的半周期，线性插值。
+// 五角星的目标半径函数：把任意角折进一个扇区，再折进"外角 → 内角"的半周期，按 smoothstep 插值。
 //
-// 为什么用"角度上的线性插值"而不是真弦：弦在角度轴上不是线性的（外角 1.0、内凹 0.62 时
-// 中点差约 5%），插值出来的每条臂会略微鼓一点 —— 对一只毛绒抱枕来说这正是想要的
-// （抱枕的棱是圆的），而渲染层还要再过一道 Catmull-Rom 平滑。记在这里是因为
-// "半径对角做线性"看上去像偷懒，实际上是有意的一次降级。
+// 为什么是 smoothstep 而不是线性（D-1，2026-10-23 照 assets 那只星绒绒逐点拟合的）：
+// 素材的轮廓**两头都是平的** —— 瓣尖圆钝（±3° 内几乎不掉半径）、凹口也圆（底部 0.71→0.71 走平），
+// 过渡集中在中段。smoothstep 在两端导数为 0，正好就是这个形状；线性则是"尖角 + V 形沟"。
+// 逐点 RMS（对素材对称轮廓，见 tests/body.test.js 那张表）：线性 0.027、smoothstep 0.012。
+// 再往上加一个幂次旋钮只把最大偏差从 0.021 买到 0.011 —— r=15px 上是 0.15px，不值一个 CONFIG 键。
+//
+// 旧注释里"线性是有意降级，因为抱枕的棱是圆的"这句是**反的**：线性恰恰做出尖棱，
+// 圆棱要靠二阶连续的那条 —— 这一版就是把它补上。
 export function starRadius(angle) {
   const sector = TAU / STAR.corners;              // 72°
   const half = sector / 2;                        // 36°：外角顶点到内凹顶点
   let wrapped = angle % sector;
   if (wrapped < 0) wrapped += sector;
   const dist = wrapped <= half ? wrapped : sector - wrapped;   // 到最近外角顶点的角距
-  return STAR.outerRatio + (STAR.innerRatio - STAR.outerRatio) * (dist / half);
+  const t = dist / half;
+  return STAR.outerRatio + (STAR.innerRatio - STAR.outerRatio) * (t * t * (3 - 2 * t));
 }
 
 // 弹簧参数由 wobble 基因决定（spec §4.7："挤压幅度由 wobble 基因决定，

@@ -356,13 +356,21 @@ test('听进去的话的九个常量与价格表齐备，价格表键集与 MOOD
 // 只钉数值的话，把摆速公式里的 (1 + arousal) 改成 (1 + fear) 也不会报警 —— 所以两边都要有。
 
 test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（行为两侧由 body.test.js 负责）', () => {
-  // 八个数逐字取自 spec §11（2026-10-20 那一版），不是估的：
+  // 这组数原本逐字取自 spec §11（2026-10-20 那一版）：
   //   STAR_OUTER_RATIO=1.0  STAR_INNER_RATIO=0.62  FLUFF_LEN_RATIO=0.18  FLUFF_SPRITES=2
   //   TAIL_SEGS=3  TAIL_LEN_RATIO=0.5  TAIL_SWING_BASE=1.2  BLINK_INTERVAL_BASE=4.0
+  // 其中 STAR_INNER_RATIO 已经在 D-1 里被**量**改了（见下），spec §11 跟着回写。
   assert.deepEqual(Object.keys(CONFIG.star).sort(), ['corners', 'innerRatio', 'outerRatio']);
   assert.equal(CONFIG.star.corners, 5, '五角星的"五"：spec §11 没单列，但 body.js 不许有字面量');
   assert.equal(CONFIG.star.outerRatio, 1.0);
-  assert.equal(CONFIG.star.innerRatio, 0.62, '0.62 是照片那只的比例，改它必须是一次有意识的动作');
+  // 0.62 → 0.71 是**量出来的**（D-1，2026-10-23），不是调出来的：
+  // 用户新配的 assets/star_puff_*.png 是这只生物现在的样子。量法两步 ——
+  // ① 零依赖解 PNG + 360 条射线二分轮廓半径，② 按 72° 对称化。
+  // 只走①会读到 min/max=0.545（睡帽压出来的那条深沟），上一版据此定成 0.55 并加了一个
+  // tipPower=3.2 的钝度旋钮，两处都被①的污染带偏；对称化之后凹口是 0.71，
+  // 而"钝"这件事由**过渡形状**（smoothstep，见 body.js）免费拿到，不需要旋钮 ⇒ 已删。
+  // 这条注释原本那句"改它必须是一次有意识的动作"现在兑现了：有意识，且带着数。
+  assert.equal(CONFIG.star.innerRatio, 0.71, '照素材对称轮廓量的凹口深度（逐瓣 0.55–0.80，中位 0.70）');
   assert.ok(CONFIG.star.innerRatio > 0 && CONFIG.star.innerRatio < CONFIG.star.outerRatio,
     '内凹必须严格小于外角，否则"不是星形就是圆"');
 
