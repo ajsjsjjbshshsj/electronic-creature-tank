@@ -119,7 +119,10 @@ test('约束扫描确实覆盖到了 src/ 下的模块（防空转）', () => {
   // B18（2026-10-22）扩展到 audio.js：音频图（那个以 A-u-d 开头的构造器的**实例**）由
   // createAudio({ graph }) 注入，本文件里连那个名字都不出现，所以整个叫声层
   // —— 嗓音映射、六声表、跨越判据、冷却、发声上限、节点收支 —— 继续在 Node 里可单测。
-  for (const expected of ['body.js', 'render.js', 'input.js', 'audio.js']) {
+  // 计划 3 Task 1/2（2026-10-23）再扩两个：gestures.js 只 import render.js 的纯函数 radiusPx，
+  // avatar.js 只 import CONFIG 与 emotions.js 的两个纯派生量 —— 两个新模块从第一天起就在守卫范围内，
+  // 不需要开任何白名单。（HUD 那一半将来靠**注入的 doc 形参**拿 DOM，同一条路子。）
+  for (const expected of ['body.js', 'render.js', 'input.js', 'audio.js', 'gestures.js', 'avatar.js']) {
     assert.ok(files.includes(join('src', expected)), `纯度守卫没有覆盖 src/${expected}`);
     assert.ok(!BROWSER_MODULES.includes(join('src', expected)),
       `src/${expected} 不该在浏览器模块白名单里（它靠注入，Node 里可单测）`);

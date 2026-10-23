@@ -1822,3 +1822,31 @@ git push -u origin <branch> && gh pr create --repo ajsjsjjbshshsj/electronic-cre
 **⚠️ 给下一个执行者的一条环境事实**：本仓库源码是 **CRLF**。写变异探针时 `perl -0pi -e 's/…\n…//'` 这种**跨行**模式会静默不匹配，
 看起来像"探针活着 = 测试是空的"，其实是根本没改到。跨行模式一律写 `\r?\n`，并且**每次改完先 grep 确认改到了再跑测试**。
 本轮 P5/P6 第一次就是这么假活过去的。
+
+### Task 2（2026-10-23 做完）—— 三处偏离，其中两条是执行事故，值得留着
+
+| # | 计划里写的 | 实际 | 为什么 |
+|---|---|---|---|
+| 1 | `expressionFor(c, world)` | `expressionFor(c)` | `world` 从头到尾没人读。参数也是旋钮，没有消费者就不许留（同 D-1 删 `tipPower`） |
+| 2 | 未提 `EXPRESSIONS` 这个导出 | 加了 | 测试要拿"表里的八个名字"当全集比对，再抄一遍字面量就是第二份真相 |
+| 3 | 未提 `!memory` 守卫 | 加了，并且**为它补了一条真会走到它的测试** | 见下 |
+
+**执行事故一：`git checkout` 把未提交的实现抹掉了。**
+探针 M2 要改 `CONFIG.avatar`，我用 `git checkout src/config.js` 还原 —— 而那段 `CONFIG.avatar`
+**还没提交**，于是整个被 revert。症状是接下来四道探针全部报"模块加载失败"，看起来像代码坏了，
+其实是配置没了。这条仓库早就记过（B17b 那轮 `git checkout` 毁掉未提交工作，换来一条
+"先落绿色检查点再跑变异探针"的规则），我又犯了一次。
+**规则**：探针还原一律 `cp <备份> <文件>`，**不许**对探针目标用 `git checkout` / `git restore`；
+改文件之前先 `cp` 一份到 `.superpowers/sdd/tmp/`。
+
+**执行事故二：探针活着 ≠ 判据是空的，也可能是夹具走不到那条路径。**
+M5（删掉 `!memory` 守卫）第一次活着回来。两种解释：守卫是白写的，或者测试根本没碰到它。
+分开的方法是把守卫删掉之后**直接跑那条路径**：
+`expressionFor({ emotions: { joy: 0.9 … }, needs: createNeeds() })` —— 一抛 `TypeError` 就说明
+守卫是承重的，是测试坏了。根因很蠢：夹具写的是 `{ emotions: createEmotions(), needs: … }`，
+joy 恒 0，`moodOf` 在走到 `affectionFor` **之前**就返回 `calm` 了。
+**规则**：凡是"脏输入不抛"这类守卫，夹具必须**构造到那条判据的门口**（这里 = joy≥0.6 且四条
+needs≤0.25），否则它测的是"函数会返回东西"，不是"这里不抛"。
+
+探针六道（M1 表指错文件 · M2 兜底改成 wink · M3 `hasOwn`→`in` · M4 判序反了 ·
+M5 删 memory 守卫 · M6 `mourn` 不参与 adversity）—— 修正夹具与还原方式之后**六道全红**。

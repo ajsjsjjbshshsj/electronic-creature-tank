@@ -406,6 +406,26 @@ const CONFIG = {
                                // 五瓣平均之后的凹口是 0.71（逐瓣 0.55–0.80，中位 0.70）。
                                // 过渡形状另见 body.js：线性 RMS 0.027 → smoothstep 0.011。
   },
+  avatar: {
+    // 计划 3 的 HUD 肖像层。**缸里仍然程序化**（D-1 那条混合路线的裁定），
+    // 这套素材只给信息卡 / 名字肖像用 —— 见 spec §4.7.3 开头与 progress.md 2026-10-23 段。
+    dir: 'assets',
+    // 键是**我们**的表情名，值是素材的文件名。两边不同名（我们 anger / bliss / curiosity / arousal，
+    // 素材 angry / love / surprised / wink），所以这张表必须存在而不是靠字符串拼接：
+    // 拼错一个字母不抛，只会"生气的那只显示一张笑脸"。
+    file: Object.freeze({
+      calm: 'star_puff_calm.png',
+      happy: 'star_puff_happy.png',
+      sad: 'star_puff_sad.png',
+      anger: 'star_puff_angry.png',
+      bliss: 'star_puff_love.png',
+      sleepy: 'star_puff_sleepy.png',
+      curiosity: 'star_puff_surprised.png',
+      arousal: 'star_puff_wink.png',
+    }),
+    // 兜底。**不许是 wink**：那只眼是"卖萌"，一张读错的脸色比一张呆板的脸伤害大得多。
+    fallback: 'calm',
+  },
   fluff: {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型
     sprites: 2,                // FLUFF_SPRITES：常态 / 炸开。§4.7"只画毛尖碎边"换来的便宜
