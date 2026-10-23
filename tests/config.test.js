@@ -95,18 +95,23 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   //    avatar 本身 + avatar.file 那张八行表）。这一段是"HUD 肖像层"的全部真相 ——
   //    行为侧由 tests/avatar.test.js 钉（八张各有生产者、表外名字造不出来、文件名两边不同名），
   //    这里只钉形状。file 那张表**必须**是 8 个键：素材就八张脸，多一个是死条目、少一个是黑图。
-  assert.equal(visited.length, 60, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 60 → 61、52 → 53（2026-10-23 计划 3 Task 3）：新增 **CONFIG.hud 一段**（一个节点、9 个标量）。
+  //    其中 tapMaxPx / holdMinMs / minHitPx 三个是 **gestures.js 的唯一真相源** —— Task 1 落地时
+  //    它自带一份 DEFAULTS 兜底（那时 CONFIG.hud 还不存在），Task 3 把那份收编了，
+  //    于是"两处数字要同步改"这个隐患从结构上消失。行为侧由 tests/gestures.test.js 与
+  //    tests/hud.test.js 钉；这里只钉"这一段的形状"。
+  assert.equal(visited.length, 61, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'api', 'audio', 'avatar', 'behavior', 'blink', 'body', 'bodyPoints',
     'broody', 'colors', 'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize',
     'eggTint', 'eggsPerClutch', 'emotions', 'eye', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt',
-    'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop',
+    'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hud',
     'hueRange', 'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
     'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
     'populationCap', 'render', 'save', 'speech', 'stage', 'star', 'tail', 'timeScales',
-  ], 'CONFIG 顶层键名（52 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 52);
+  ], 'CONFIG 顶层键名（53 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 53);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -122,6 +127,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.api',                                                                 // B19b-i 新增（可选 API 档的形状与默认值，里面没有 key）
     'CONFIG.save',                                                                // C-1 新增（存档落地的两个常数 + 两个键名）
     'CONFIG.avatar', 'CONFIG.avatar.file',                                        // 计划 3 Task 2 新增（HUD 肖像层：目录 + 那张八行表）
+    'CONFIG.hud',                                                                 // 计划 3 Task 3 新增（HUD 的九个常数，其中三个是 gestures.js 的真相源）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }

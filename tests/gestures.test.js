@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { classifyPress, pickCreature, GESTURES } from '../src/gestures.js';
 import { radiusPx } from '../src/render.js';
+import { CONFIG } from '../src/config.js';
 
 // 视口用**自己挑的数**而不是抄 createViewport 的输出：本模块只消费 width/height/scale 三个数，
 // 而它们怎么来的由 render.test.js 钉。scale=4 是为了让"最小的个体"真的落在 minHitPx 之下
@@ -30,7 +33,7 @@ test('classifyPress：三档互斥且覆盖全域', () => {
 test('swipe 先于 hold 判：从食物条拖出来的那一把**两样都满足**', () => {
   // 顺序反了的症状不是报错，是"拖着食物经过一只个体时先弹出了改名框"。
   assert.equal(classifyPress({ heldMs: 900, movedPx: 220 }), 'swipe');
-  assert.equal(classifyPress({ heldMs: 900, movedPx: 13 }), 'swipe');   // 13 = 默认 tapMaxPx 12 之上一点
+  assert.equal(classifyPress({ heldMs: 900, movedPx: CONFIG.hud.tapMaxPx + 1 }), 'swipe');
 });
 
 test('classifyPress：脏读数一律不抛，且落回三档之内', () => {
@@ -43,13 +46,15 @@ test('classifyPress：脏读数一律不抛，且落回三档之内', () => {
   assert.ok(GESTURES.includes(classifyPress(null)));
 });
 
-test('阈值全部可由 opts 覆盖（Task 3 的 CONFIG.hud 会从那里传进来，本模块不写第二份真相）', () => {
-  assert.equal(classifyPress({ heldMs: 600, movedPx: 3 }, { holdMinMs: 1000 }), 'tap');
-  assert.equal(classifyPress({ heldMs: 600, movedPx: 3 }, { holdMinMs: 300 }), 'hold');
-  // tapMaxPx 那一档要**短按**才测得出来：600ms 在默认 holdMinMs 500 之下已经不成立，
-  // 拿它去比 tapMaxPx 会同时踩住 hold 那条，测的就不是 tapMaxPx 了（第一版就是这么写错的）。
-  assert.equal(classifyPress({ heldMs: 100, movedPx: 20 }, { tapMaxPx: 40 }), 'tap');
-  assert.equal(classifyPress({ heldMs: 100, movedPx: 20 }), 'swipe');
+test('阈值只有**一个**真相源：边界正好落在 CONFIG.hud 写的那两个数上', () => {
+  // Task 3 把 gestures.js 自带的那份 DEFAULTS 收编进 CONFIG.hud 之后，
+  // 这条测试的职责变了：不再测"能不能覆盖"，而是测"它真的读的是 CONFIG"。
+  // 覆盖式测试会藏住"模块里另抄了一份"，边界式测试不会。
+  const { tapMaxPx, holdMinMs } = CONFIG.hud;
+  assert.equal(classifyPress({ heldMs: 100, movedPx: tapMaxPx }), 'tap');
+  assert.equal(classifyPress({ heldMs: 100, movedPx: tapMaxPx + 0.1 }), 'swipe');
+  assert.equal(classifyPress({ heldMs: holdMinMs - 1, movedPx: 0 }), 'tap');
+  assert.equal(classifyPress({ heldMs: holdMinMs, movedPx: 0 }), 'hold');
 });
 
 test('pickCreature：命中边界**就是** radiusPx 给的那个半径（点得到的与看到的是同一个实现）', () => {
@@ -68,10 +73,13 @@ test('pickCreature：命中半径有下限，最小的那些也点得到', () =>
   // 不夹下限的话"点按单只开信息卡"对最小的那些等于没做。
   const small = CRE('s', 14, { age: 10, stage: 'hatchling' });
   const r = radiusPx(small, VP);
-  assert.ok(r < 22, `fixture 要的是"屏上半径小于下限"，实算 ${r.toFixed(2)}`);
-  assert.equal(pickCreature([small], VP, CX + r * 1.6, CY, { minHitPx: 22 }).id, 's');
-  assert.equal(pickCreature([small], VP, CX + r * 1.6, CY, { minHitPx: r * 0.5 }), null,
-    '下限是可配的，不是写死的 —— 夹了下限就回不去了');
+  assert.ok(r < CONFIG.hud.minHitPx,
+    `fixture 要的是"屏上半径小于下限"，实算 ${r.toFixed(2)} vs 下限 ${CONFIG.hud.minHitPx}`);
+  const edge = CX + CONFIG.hud.minHitPx;
+  assert.equal(pickCreature([small], VP, edge - 1, CY).id, 's',
+    '下限之内必须点得到（真实半径早就过了）');
+  assert.equal(pickCreature([small], VP, edge + 1, CY), null,
+    '下限之外就是外 —— 夹的是下限，不是无限大');
 });
 
 test('pickCreature：重叠时取**屏上最近**的那只，数组顺序不许影响结果', () => {
@@ -99,4 +107,21 @@ test('pickCreature：空数组 / 空视口 / 非有限坐标一律 null，不抛
 
 test('pickCreature：缺 pos 的个体跳过（脏存档不许传染成 NaN 比较）', () => {
   assert.equal(pickCreature([CRE('a', 26, { pos: null })], VP, CX, CY), null);
+});
+
+test('阈值确实读 CONFIG.hud：一条源码守卫（探针证不到的那一半）', () => {
+  // 为什么需要这条：变异探针的用法是"改坏代码看测试红不红"，但把 CONFIG.hud.tapMaxPx
+  // 换成字面量 12 **不会有任何行为差别**（它现在就是 12），六道探针全都不会红。
+  // 而"两处数字要同步改"这个隐患恰恰就藏在这种"现在恰好相等"里。
+  // 所以这里不比行为，比**接线**：源码必须引用那三个名字，且不许再自带一份 DEFAULTS。
+  const src = readFileSync(fileURLToPath(new URL('../src/gestures.js', import.meta.url)), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ');
+  for (const k of ['CONFIG.hud.tapMaxPx', 'CONFIG.hud.holdMinMs', 'CONFIG.hud.minHitPx']) {
+    assert.ok(src.includes(k), `gestures.js 不再读 ${k} —— 它大概被换成了字面量`);
+  }
+  assert.ok(!/DEFAULTS/.test(src),
+    '又长出一份兜底常量表了：那等于回到"两处真相"，Task 3 收编它的意义就没了');
+  assert.ok(!/\b12\b|\b500\b|\b22\b/.test(src),
+    '源码里出现了疑似阈值的裸数字：阈值只有一个地方能写，就是 CONFIG.hud');
 });
