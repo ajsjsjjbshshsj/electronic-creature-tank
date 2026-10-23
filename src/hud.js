@@ -10,7 +10,7 @@
 import { CONFIG } from './config.js';
 import { sizeOf } from './creature.js';
 import { affectionFor, PLAYER_ID } from './memory.js';
-import { expressionFor, avatarSrc } from './avatar.js';
+import { expressionFor, avatarSrc, preloadList } from './avatar.js';
 
 const H = CONFIG.hud;
 const DASH = '—';
@@ -176,4 +176,246 @@ export function cardFor(c, world) {
     heart: heartFillFor(affectionFor((c && c.memory) || { entries: [] }, PLAYER_ID)),
     portrait: avatarSrc(expressionFor(c)),
   };
+}
+
+// ================================================================ DOM 那一半（Task 4）
+//
+// `doc` 是**形参**（与 render.js 的 ctx、audio.js 的 graph、input.js 的监听目标同一条路子），
+// 所以本文件仍然不含 document / window 那七个名字，仍然在纯度守卫的覆盖范围内。
+//
+// 结构上只有一条规则：**挂载时建好全部节点，之后只改文字与属性，不再增删节点**
+// （卡上的行列表是唯一例外，它整块重建，且只在内容真的变了时）。理由不是好看：
+// 每帧 new 节点会把 DOM 变成 GC 压力源，而"找不到刚才那个输入框"这类 bug
+// 只在节点被换掉之后才会出现。
+
+const TOUCH = 'hud-touch';
+// 三种食物的中文名（spec §6.2）。**键集必须与 CONFIG.food 同一份** ——
+// 少一个的症状不是报错，而是投食条上凭空少一个按钮，所以 tests/hud-dom.test.js 逐键比对。
+const FOOD_LABEL = Object.freeze({ algae: '光藻', nectar: '蜜珠', crystal: '冰晶' });
+
+function el(doc, tag, cls, parent) {
+  const n = doc.createElement(tag);
+  if (cls) n.className = cls;
+  if (parent) parent.appendChild(n);
+  return n;
+}
+function button(doc, parent, text, cls) {
+  const b = el(doc, 'button', `${TOUCH} ${cls}`, parent);
+  b.setAttribute('type', 'button');            // 漏了它，按钮在 <form> 里会提交页面
+  b.textContent = text;
+  return b;
+}
+function textInput(doc, parent, cls, ariaLabel, maxChars) {
+  const i = el(doc, 'input', `${TOUCH} ${cls}`, parent);
+  i.setAttribute('type', 'text');
+  i.setAttribute('enterkeyhint', cls === 'hud-tell' ? 'send' : 'done');
+  i.setAttribute('maxlength', String(maxChars));
+  i.setAttribute('aria-label', ariaLabel);
+  return i;
+}
+
+/** 雷达图：九个顶点落在单位圆上，按轴序连成闭合折线。坐标在 0..100 的方框里算。 */
+function radarPoints(radar) {
+  const n = radar.length || 1;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 - Math.PI / 2;      // 第一个轴朝上
+    const v = 8 + 42 * num(radar[i].v);
+    out.push(`${(50 + Math.cos(a) * v).toFixed(1)},${(50 + Math.sin(a) * v).toFixed(1)}`);
+  }
+  return out.join(' ');
+}
+
+export function mountHud(doc, deps) {
+  const d = deps || {};
+  const controller = d.controller;
+  const root = el(doc, 'div', 'hud', doc.body);
+
+  // ---- 四块（spec §6.3：左上读数 / 右上控件 / 底部食物条 / 信息卡）----
+  const readout = el(doc, 'div', 'hud-readout', root);
+  const rPop = el(doc, 'span', 'hud-num', readout);
+  el(doc, 'span', 'hud-sep', readout).textContent = ' · ';
+  const rFood = el(doc, 'span', 'hud-num', readout);
+  el(doc, 'span', 'hud-sep', readout).textContent = ' · ';
+  const rEgg = el(doc, 'span', 'hud-num', readout);
+  el(doc, 'span', 'hud-sep', readout).textContent = ' · ';
+  const rTime = el(doc, 'span', 'hud-time', readout);
+
+  const controls = el(doc, 'div', 'hud-controls', root);
+  const foodbar = el(doc, 'div', 'hud-foodbar', root);
+  const card = el(doc, 'div', 'hud-card', root);
+
+  // ---- 右上：倍速 / 暂停 / 静音 / 设置 ----
+  // 音频被浏览器拒绝时**不挂静音键**（spec §5.4.1 第 8 条）：一个按了永远没反应的按钮
+  // 不是"降级"，是骗人。
+  const audioBlocked = !!(d.audioState && d.audioState.ok === false);
+  for (const s of CONFIG.timeScales) {
+    const b = button(doc, controls, `${s}×`, 'hud-scale');
+    b.addEventListener('click', () => api.pressScale(s));
+  }
+  const pauseBtn = button(doc, controls, '暂停', 'hud-pause');
+  pauseBtn.addEventListener('click', () => api.pressPause());
+  if (!audioBlocked) {
+    const muteBtn = button(doc, controls, '静音', 'hud-mute');
+    muteBtn.addEventListener('click', () => api.pressMute());
+  }
+  const gearBtn = button(doc, controls, '设置', 'hud-gear');
+  gearBtn.addEventListener('click', () => api.setSettingsOpen(!state.settingsOpen));
+
+  // ---- 底部食物条：键与 kind 逐字取自 CONFIG.food ----
+  for (const kind of Object.keys(CONFIG.food)) {
+    const b = button(doc, foodbar, FOOD_LABEL[kind] || kind, 'hud-feed');
+    b.dataset.kind = kind;
+    b.addEventListener('click', () => api.pressFeed(kind));
+  }
+
+  // ---- 信息卡：结构一次建好 ----
+  const cardTitle = el(doc, 'h2', 'hud-card-title', card);
+  const portrait = el(doc, 'img', 'hud-portrait', card);
+  portrait.setAttribute('alt', '它的样子');
+  const rowsBox = el(doc, 'div', 'hud-rows', card);
+  const svg = el(doc, 'svg', 'hud-radar', card);
+  svg.setAttribute('viewBox', '0 0 100 100');
+  const poly = el(doc, 'polygon', 'hud-radar-shape', svg);
+  const heart = el(doc, 'div', 'hud-heart', card);
+  heart.setAttribute('role', 'img');
+  const relBox = el(doc, 'div', 'hud-relations', card);
+  const nameInput = textInput(doc, card, 'hud-name', '给它取名', H.nameMaxChars);
+  const nameBtn = button(doc, card, '改名', 'hud-name-go');
+  const tellInput = textInput(doc, card, 'hud-tell', '讲给它听', H.tellMaxChars);
+  const tellBtn = button(doc, card, '说', 'hud-tell-go');
+
+  const state = {
+    card: null, settingsOpen: false, lastInputAt: 0, now: 0, _lastCardAt: -Infinity,
+    frames: 0, cardRenders: 0, cardOpens: 0,
+    feeds: 0, tells: 0, tellTruncated: 0, tellDropped: 0, renames: 0, rejectedNames: 0,
+  };
+  let lastRows = '';
+  let lastRel = '';
+
+  function pulse(nowMs) {
+    state.lastInputAt = Number.isFinite(nowMs) ? nowMs : state.now;
+    root.classList.remove('is-dim');
+  }
+
+  function renderCard(c, world) {
+    const built = cardFor(c, world);
+    cardTitle.textContent = built.title;
+    portrait.setAttribute('src', built.portrait);
+    heart.style['--heart-fill'] = String(built.heart);
+    heart.setAttribute('aria-label', '它对玩家的好感');
+    poly.setAttribute('points', radarPoints(built.radar));
+    const rowsKey = JSON.stringify(built.rows);
+    if (rowsKey !== lastRows) {
+      lastRows = rowsKey;
+      rowsBox.children.length = 0;
+      for (const r of built.rows) {
+        const line = el(doc, 'div', 'hud-row', rowsBox);
+        el(doc, 'span', 'hud-row-label', line).textContent = r.label;
+        el(doc, 'span', 'hud-row-value', line).textContent = r.value;
+      }
+    }
+    const rel = relationRowsFor(c, world);
+    const relKey = JSON.stringify(rel);
+    if (relKey !== lastRel) {
+      lastRel = relKey;
+      relBox.children.length = 0;
+      for (const r of rel) {
+        const line = el(doc, 'div', 'hud-rel', relBox);
+        el(doc, 'span', 'hud-rel-label', line).textContent = r.label;
+        el(doc, 'span', 'hud-rel-value', line).textContent = r.value;
+      }
+    }
+    state.cardRenders += 1;
+  }
+
+  const api = {
+    root, state,
+    // README 那句"load images once, do not instantiate Image during frame rendering"的落点：
+    // 本模块只交出 URL，真正 new Image 的那一步在 main.js（它才许碰浏览器全局）。
+    preload: preloadList(),
+    pressScale(s) {
+      if (!CONFIG.timeScales.includes(s)) {
+        throw new Error(`pressScale: ${s} 不在 CONFIG.timeScales [${CONFIG.timeScales.join(', ')}] 里`);
+      }
+      controller.setTimeScale(s);              // 缺这个方法时**就让它抛**：那是接线没接上，不是用户输入
+      pulse();
+    },
+    pressPause() {
+      const next = !controller.getPaused();
+      controller.setPaused(next);
+      pauseBtn.textContent = next ? '继续' : '暂停';
+      pulse();
+    },
+    pressMute() {
+      controller.setMuted(!controller.getMuted());
+      pulse();
+    },
+    pressFeed(kind) {
+      if (!Object.hasOwn(CONFIG.food, kind)) throw new Error(`pressFeed: 没有这种食物 "${kind}"`);
+      state.feeds += 1;
+      if (d.onFeed) d.onFeed(kind);
+      pulse();
+    },
+    tell(text) {
+      // `text == null` 而不是 `=== undefined`：传 null 时 String(null) 会得到字面量
+      // "null" 那句话，症状是玩家什么都没讲，它记住了一个词："null"。
+      const raw = text == null ? tellInput.value : String(text);
+      tellInput.value = '';                    // 先清：不管后面发不发，输入框都不许留残句
+      if (!raw) return;
+      if (!state.card) { state.tellDropped += 1; return; }
+      const cut = raw.length > H.tellMaxChars;
+      if (cut) state.tellTruncated += 1;
+      state.tells += 1;
+      if (d.onTell) d.onTell(state.card, cut ? raw.slice(0, H.tellMaxChars) : raw);
+      pulse();
+    },
+    tellValue() { return tellInput.value; },
+    rename(creature, name) {
+      const v = String(name == null ? '' : name).trim().slice(0, H.nameMaxChars);
+      state.renames += 1;
+      if (!v) {
+        state.rejectedNames += 1;
+        if (d.onRename) d.onRename(creature, null);
+        pulse();
+        return;
+      }
+      if (d.onRename) d.onRename(creature, v);
+      pulse();
+    },
+    setCard(creature, world, opts) {
+      state.card = creature || null;
+      if (creature) { state.cardOpens += 1; renderCard(creature, world); }
+      card.classList.toggle('is-open', !!creature);
+      if (creature && opts && opts.focusName) {
+        nameInput.value = String(creature.name || '');
+        nameInput.focus();                     // 长按那一路一步到位，省掉"先点开卡再点名字"
+      }
+      pulse();
+    },
+    setSettingsOpen(open) { state.settingsOpen = !!open; pulse(); },
+    frame(nowMs, world) {
+      state.frames += 1;
+      state.now = nowMs;
+      const r = readoutFor(world);
+      // 只在值变了的时候写：textContent 赋值在真浏览器里会换掉文本节点，
+      // 每帧无条件写三次等于把 DOM 当变量用。
+      if (rPop.textContent !== String(r.population)) rPop.textContent = String(r.population);
+      if (rFood.textContent !== String(r.foods)) rFood.textContent = String(r.foods);
+      if (rEgg.textContent !== String(r.eggs)) rEgg.textContent = String(r.eggs);
+      if (rTime.textContent !== r.timeLabel) rTime.textContent = r.timeLabel;
+      if (state.card && nowMs - state._lastCardAt >= H.cardRefreshMs) {
+        state._lastCardAt = nowMs;
+        renderCard(state.card, world);
+      }
+      root.classList.toggle('is-dim', nowMs - state.lastInputAt >= H.fadeIdleMs);
+    },
+    pulse,
+    destroy() { root.remove(); },
+  };
+
+  // 这两个按钮要调 api，所以必须绑在 api 之后 —— 顺序是有意的，别顺手挪到上面去。
+  nameBtn.addEventListener('click', () => api.rename(state.card, nameInput.value));
+  tellBtn.addEventListener('click', () => api.tell());
+  return api;
 }

@@ -40,3 +40,68 @@ body {
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
 }
+
+/* ================================================================ 计划 3 HUD（Task 4） */
+/* 节点全部由 src/hud.js 建（index.html 里没有对应 markup —— 那样 DOM 桩才测得到）。
+   两条硬要求来自 spec §6.3：触控目标 ≥44px、适配 iOS 安全区。
+   --safe-* 四个变量在文件上面已经声明，这里是它们的第一个消费者。 */
+.hud {
+  position: fixed;
+  inset: 0;
+  z-index: 2;                    /* canvas 没有 stacking context，HUD 不抬一层会被水体盖住 */
+  pointer-events: none;          /* 外层不吃事件：点水面空白仍然落到 canvas，投食与抚摸不受影响 */
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  font: 13px/1.5 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #ffeaf6;
+  transition: opacity 400ms ease;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.hud.is-dim { opacity: .25; }    /* spec §6.3：平时半透明淡出，不遮挡水体 */
+.hud > * { pointer-events: auto; }
+.hud button { font: inherit; color: inherit; background: rgba(45, 18, 64, .78);
+  border: 1px solid rgba(255, 217, 232, .28); border-radius: 12px; }
+.hud input { font: inherit; color: #2d1240; background: #fff2f8;
+  border: 1px solid rgba(255, 217, 232, .5); border-radius: 10px; padding: 0 10px; }
+
+.hud-readout { position: absolute; top: 12px; left: 12px; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+.hud-sep { opacity: .45; }
+.hud-controls { position: absolute; top: 12px; right: 12px;
+  display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; max-width: 60vw; }
+.hud-foodbar { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 10px; }
+.hud-card { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(88vw, 340px); max-height: 76vh; overflow-y: auto; display: none;
+  background: rgba(20, 10, 40, .93); border: 1px solid rgba(255, 217, 232, .22);
+  border-radius: 16px; padding: 16px; }
+.hud-card.is-open { display: block; }
+.hud-card-title { margin: 0 0 8px; font-size: 17px; font-weight: 600; }
+.hud-row, .hud-rel { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+.hud-row-label, .hud-rel-label { opacity: .62; }
+.hud-row-value, .hud-rel-value { text-align: right; word-break: break-word; }
+.hud-portrait { display: block; width: 88px; height: 88px; margin: 0 auto 8px;
+  object-fit: contain; background: rgba(255, 242, 248, .07); border-radius: 14px; }
+.hud-radar { display: block; width: 132px; height: 132px; margin: 6px auto; }
+.hud-radar-shape { fill: rgba(255, 179, 209, .3); stroke: #ffb3d1; stroke-width: 1.4; }
+
+/* 心形：填充度走 CSS 变量，卡上**不写数字**（spec §6.3）。
+   变量而不是 width:xx% —— 数字出现在 style 里就不会被 textOf 读到，也就不会污染文字判据。 */
+.hud-heart { width: 40px; height: 36px; margin: 4px auto; --heart-fill: 0;
+  background: linear-gradient(to top, #ff6b9d calc(var(--heart-fill) * 100%),
+    rgba(255, 107, 157, .18) calc(var(--heart-fill) * 100%));
+  clip-path: path("M20 34 C4 22 0 14 6 7 C11 1 18 3 20 9 C22 3 29 1 34 7 C40 14 36 22 20 34 Z"); }
+
+.hud-name, .hud-tell { flex: 1 1 auto; min-width: 0; height: 44px; }
+.hud-name-go, .hud-tell-go { flex: 0 0 auto; }
+.hud-card h2 + .hud-portrait { margin-top: 0; }
+.hud-rows, .hud-relations { margin: 8px 0; }
+
+/* spec §6.3 触控目标下限。与 CONFIG.hud.minTouchPx 是同一个数 ——
+   写两处是有意的：CSS 里必须是字面量（媒体查询与 min() 读不到 JS），
+   而 JS 侧要拿它算点选下限。谁改了谁就要在另一处看到红。 */
+.hud-touch { min-width: 44px; min-height: 44px; }
+
+@media (max-width: 480px) {
+  .hud-controls { max-width: 52vw; gap: 6px; }
+  .hud-card { width: 92vw; max-height: 82vh; }
+}
