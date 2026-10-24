@@ -440,6 +440,8 @@ const CONFIG = {
     tellMaxChars: 60,          // 讲给它听的输入上限：超了截断 + 计数，不报错不弹窗
     nameMaxChars: 12,          // 改名上限。与 CONFIG.api.nameMaxChars 同数但**是两回事**
                                // （那个是模型给的名字上限，这个是玩家手打的）
+    confirmArmedMs: 4000,      // "清空存档"的确认态停留时长。超过它没按第二下就自己收回 ——
+                               // armed 的按钮一直亮着，等于下一次随手一按就把一缸清了。
   },
   fluff: {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型

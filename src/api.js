@@ -92,6 +92,19 @@ export const PERSONA_WORDS = Object.freeze({
 // https 前缀。写成正则而不是字符串常量还有一个好处：src/ 里不出现连续两个斜杠，
 // 而 tests/constraints.test.js 那个剥注释的启发式正是在"字符串里的 //"上会多删一行。
 const HTTPS_RE = /^https:/;
+
+/**
+ * 端点的两条硬要求：非空、必须 https。**导出**是为了让 HUD 的设置页与 configIssue
+ * 共用同一份判据 —— 那边再写一个 /^https:/ 的话，"设置页说可以保存、档位却拒发请求"
+ * 这种不一致就没有任何东西能拦住。
+ * 返回 'empty' | 'insecure' | null。
+ */
+export function endpointIssue(url) {
+  const s = typeof url === 'string' ? url.trim() : '';
+  if (s === '') return 'empty';
+  if (!HTTPS_RE.test(s)) return 'insecure';
+  return null;
+}
 const COMPLETIONS = '/chat/completions';
 
 // 控制字符（含 \n \r \t）与零宽字符一律换成空格而不是删掉：
@@ -243,10 +256,11 @@ export function configIssue(cfg) {
   if (!c.enabled) return issue(CONFIG_REASONS.DISABLED, 'enabled');
 
   const endpoint = typeof c.endpoint === 'string' ? c.endpoint.trim() : '';
-  if (endpoint === '') return issue(CONFIG_REASONS.EMPTY_ENDPOINT, 'endpoint');
+  const eIssue = endpointIssue(endpoint);
+  if (eIssue === 'empty') return issue(CONFIG_REASONS.EMPTY_ENDPOINT, 'endpoint');
   // 明文 http 会把 key 整条广播到局域网上（这台设备与服务器之间的任何人都能捡走），
   // 所以这不是"建议用 https"而是**不发**：回落规则档，缸照常说话。
-  if (!HTTPS_RE.test(endpoint)) return issue(CONFIG_REASONS.INSECURE_ENDPOINT, 'endpoint');
+  if (eIssue === 'insecure') return issue(CONFIG_REASONS.INSECURE_ENDPOINT, 'endpoint');
 
   const model = typeof c.model === 'string' ? c.model.trim() : '';
   if (model === '') return issue(CONFIG_REASONS.EMPTY_MODEL, 'model');

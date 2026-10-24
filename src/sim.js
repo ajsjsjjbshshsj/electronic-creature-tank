@@ -181,6 +181,38 @@ function defaultNameFor(genes, index) {
   return index < NAME_SYLLABLES.length ? base : `${base}·${Math.floor(index / NAME_SYLLABLES.length) + 1}`;
 }
 
+/**
+ * 把缸里重名的"自动名"改掉。**customName 为真的个体一个都不动** ——
+ * 这是那个字段在全仓的第一个消费者（生产者是计划 3 Task 5 的改名）。
+ *
+ * 为什么需要它，而不是只在出生时给对序号：
+ *   · 出生序号只保证**新**的一窝不撞；老存档里那批同窝同名的个体（hatch 曾恒传 index 0）
+ *     不会因此变好；
+ *   · 玩家能把两只改成同名之外的名字，也可能改到与别人撞 —— 撞了就要有一个人让路，
+ *     而让路的绝不能是玩家亲手取的那个。
+ * 两趟：第一趟让所有 customName 先占位，第二趟按出生顺序给重复者换 `·N`。
+ * 不消费随机数 ⇒ 不影响可复现性（这条很重要：名字进了 world 就进存档）。
+ * 返回改了几只，调用方计数。
+ */
+export function dedupeNames(world) {
+  const list = ((world && world.creatures) || []).filter((c) => c && typeof c.name === 'string' && c.name);
+  const taken = new Set();
+  for (const c of list) if (c.customName) taken.add(c.name);
+  let renamed = 0;
+  for (const c of list) {
+    if (c.customName) continue;                     // 玩家取的名不参与去重
+    if (!taken.has(c.name)) { taken.add(c.name); continue; }
+    const base = c.name.replace(/·\d+$/, '');       // 先剥掉旧后缀，否则叠成 泡泡·2·2
+    let k = 2;
+    let next = `${base}·${k}`;
+    while (taken.has(next)) { k += 1; next = `${base}·${k}`; }
+    c.name = next;
+    taken.add(next);
+    renamed += 1;
+  }
+  return renamed;
+}
+
 // 强制加入，**不检查 populationCap**：调用方只有 createWorld（初始投放）与
 // tickEggs（孵化）。孵化那条路径的上限已经由 layEggs 用 `viable: false` 把过关了，
 // 这里再查一次等于两个地方各自维护同一条规则，迟早打架。
@@ -1151,8 +1183,16 @@ function tickEggs(world, dt) {
         (mother ? mother.generation : 0) + 1,
         (father ? father.generation : 0) + 1,
       );
-      const baby = hatch(egg, world.rng, { nameFor: world.nameFor, generation });
+      // 名字序号 = 这只母亲**已经孵出来几只**。原来恒传 0，于是同窝全叫一个名
+      // （症状：玩家以为改名功能坏了，而 §9.2 第 2、3 条都要靠"叫得出谁是谁"）。
+      // 母亲已经溶散时退回"扫一遍还有谁认她当妈"，不然那一窝又会全部撞在一起。
+      const nameIndex = mother
+        ? mother.lineage.offspring.length
+        : world.creatures.filter((x) => x.lineage && x.lineage.mother === egg.motherId).length;
+      const baby = hatch(egg, world.rng, { nameFor: world.nameFor, generation, nameIndex });
       addCreature(world, baby);
+      // 出生即去重：老存档里那批同名的个体也在这一步被理顺（dedupeNames 不动玩家取的名）。
+      dedupeNames(world);
       world.stats.births += 1;
       world.stats.generation = Math.max(world.stats.generation, generation);
       world.events.push({ kind: 'hatch', id: baby.id, pos: { ...baby.pos }, eggId: egg.id });
