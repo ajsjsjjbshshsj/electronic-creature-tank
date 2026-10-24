@@ -639,7 +639,7 @@ const ctrl2 = mod.boot({ canvas: cv2, seed: 20261022, populationCap: 24, rendere
 
 - 桩为什么跑不出来：`tests/hud-dom.test.js` 的 `mount()` 把 `audioState` 在**挂载时就定死**
   （默认 `{tried:true, ok:true}`），时间维度没了 ⇒ "挂载时判一次"与"每帧判一次"在桩下同义。
-- 修法：谓词化 + `frame()` 里退休（`src/hud.js:258` / `:558`）。
+- 修法：谓词化 + `frame()` 里退休（`src/hud.js:258` / `:561`）。
 - 新判据 2 条（1049 → **1051**）。第二条不是白写的：探针把 `muteBtn = null` 去掉、只留
   `muteBtn.remove()` —— 键照样消失、`find()` 照样返回 null、**外观一模一样** —— 它靠数
   `remove` 调用次数（每帧一次 vs 恰好一次）才分得开。这是本轮第二次撞上同一个失败模式：
