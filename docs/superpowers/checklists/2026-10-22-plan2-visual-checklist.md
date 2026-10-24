@@ -780,10 +780,14 @@ const ctrl2 = mod.boot({ canvas: cv2, seed: 20261022, populationCap: 24, rendere
 
 ### 10.2 欠网络的
 
-`fix/hud-mute-after-refusal` 上四个提交本地安全、**尚未推送**（`github.com:443` 从合并 #31 之后一直连不上，
-`git push` 与 `git ls-remote` 都失败；"Everything up-to-date" 那次是半途断连的假报，远程实际没有这个分支）：
-`1cc8934`（F-7）、`176aa51`（F-8 + F-9）、`a3e15ae`（§9.4 两条"查过且安全"）、`399137d`（行号跟改）。
+分支 `fix/hud-mute-after-refusal` 上 `main..HEAD` 的提交**尚未推送**（`github.com:443` 从合并 #31 之后
+一直连不上，`git push` 与 `git ls-remote` 都失败；有一次 "Everything up-to-date" 是半途断连的**假报**，
+远程实际没有这个分支 —— 所以别信 push 的措辞，要信 `git ls-remote --heads origin`）。
 下一件事就是重跑 `git push -u origin fix/hud-mute-after-refusal` 并开 PR。
+
+**这里刻意不抄提交数**：本节写下时是 4 条，过一分钟就可能变 5 条；一个会自己过期的数字
+不该进归档，`git log --oneline main..HEAD` 才是权威清单。内容对应关系：
+`1cc8934` → F-7，`176aa51` → F-8 + F-9，其后几条是 §9.3 / §9.4 / §6.5 / §10 这些文档。
 
 ### 10.3 欠控制方裁定的（都推给计划 4，理由写在各处）
 
