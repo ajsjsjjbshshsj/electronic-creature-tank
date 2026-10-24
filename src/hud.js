@@ -253,15 +253,18 @@ export function mountHud(doc, deps) {
   // ⚠️ 必须同时判 tried：开缸那一刻 audioState 还是 `{tried:false, ok:false}`（AudioContext
   // 要等第一次真实手势才创建），那时 ok 也是 false —— 只看 ok 会让静音键**永远不出现**，
   // 直到玩家按下第一下才补上，而那正是按钮该在的地方。
-  const audioBlocked = !!(d.audioState && d.audioState.tried && d.audioState.ok === false);
+  // 这是个**谓词**不是常量：真页面的顺序是"先挂载、后第一次手势"，被拒这件事发生在挂载之后，
+  // 只在挂载时判一眼会让骗人按钮永远留在右上角。
+  const audioBlocked = () => !!(d.audioState && d.audioState.tried && d.audioState.ok === false);
   for (const s of CONFIG.timeScales) {
     const b = button(doc, controls, `${s}×`, 'hud-scale');
     b.addEventListener('click', () => api.pressScale(s));
   }
   const pauseBtn = button(doc, controls, '暂停', 'hud-pause');
   pauseBtn.addEventListener('click', () => api.pressPause());
-  if (!audioBlocked) {
-    const muteBtn = button(doc, controls, '静音', 'hud-mute');
+  let muteBtn = null;
+  if (!audioBlocked()) {
+    muteBtn = button(doc, controls, '静音', 'hud-mute');
     muteBtn.addEventListener('click', () => api.pressMute());
   }
   const gearBtn = button(doc, controls, '设置', 'hud-gear');
@@ -551,6 +554,8 @@ export function mountHud(doc, deps) {
     frame(nowMs, world) {
       state.frames += 1;
       state.now = nowMs;
+      // 第一次真实手势可能就在这一帧之前把 AudioContext 拒了 —— 那时才轮到此键退休。
+      if (muteBtn && audioBlocked()) { muteBtn.remove(); muteBtn = null; }
       if (world && typeof world.speechEnabled === 'boolean') draft.speech = world.speechEnabled;
       // 确认态自己收回：armed 的按钮一直亮着，等于下一次随手一按就把一缸清了。
       if (state.clearArmed && nowMs - state._armedAt >= H.confirmArmedMs) {

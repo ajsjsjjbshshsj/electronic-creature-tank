@@ -131,6 +131,42 @@ test('音频被浏览器拒绝时静音键**不出现**（spec §5.4.1 第 8 条
   assert.ok(find(mount().root, 'button', 'hud-mute'), '能发声时按钮必须在');
 });
 
+test('静音键在浏览器**当场拒绝**之后就摘掉 —— 不许只在挂载那一眼判一次', () => {
+  // 上一条测的是挂载时刻，而真页面的顺序恰好是反的：开缸在任何手势之前，那时
+  // audioState 还是 `{tried:false, ok:false}` ⇒ 键必须先挂上。真正决定"这个按钮是不是
+  // 骗人"的 `unlockAudio()` 跑在**第一次 pointerdown** 上，那一刻才可能变成被拒绝。
+  // 只看挂载那一眼，被拒之后这个键会永远亮在右上角 —— §5.4.1 第 8 条禁的正是它。
+  const audioState = { tried: false, ok: false, reason: null };
+  const { hud, root } = mount({ audioState });
+  assert.ok(find(root, 'button', 'hud-mute'), '还没试过就当被拒绝，静音键从此永远不出现');
+  audioState.tried = true;
+  audioState.reason = 'not-allowed';        // ok 一直是 false，变的是"已经试过了"
+  hud.frame(1000, W([mk()]));
+  assert.equal(find(root, 'button', 'hud-mute'), null,
+    '明确被拒之后必须摘掉：挂载那一刻判不了未来的事');
+});
+
+test('被拒之后摘一次就好 —— 不许每帧对着已脱管的节点再 remove', () => {
+  // 会犯的写法是 `if (muteBtn && audioBlocked()) muteBtn.remove()` 而不置空引用：
+  // 视觉结果完全正确（键确实没了），但每帧对着一棵已脱管的树调一次 remove。
+  // ⇒ 光断言"键不在"分不出这两种实现，必须**数 remove 被调了几次**。
+  const audioState = { tried: false, ok: false, reason: null };
+  const { hud, root } = mount({ audioState });
+  audioState.tried = true;                  // 试了，而且**成功了**
+  audioState.ok = true;
+  hud.frame(1000, W([mk()]));
+  const btn = find(root, 'button', 'hud-mute');
+  assert.ok(btn, '发声正常时静音键必须在');
+  let removes = 0;
+  const orig = btn.remove.bind(btn);
+  btn.remove = () => { removes += 1; return orig(); };
+  audioState.ok = false;                    // 中途被关闭，也算被拒
+  audioState.reason = 'closed';
+  for (const t of [2000, 3000, 4000]) hud.frame(t, W([mk()]));
+  assert.equal(find(root, 'button', 'hud-mute'), null, '被拒之后键必须不在');
+  assert.equal(removes, 1, `每帧重复 remove（实调 ${removes} 次）—— 置空引用不是洁癖，是别把 DOM 当变量`);
+});
+
 test('静音键按下去传的是"当前事实取反"，不是写死 true', () => {
   const { root, calls } = mount();
   click(find(root, 'button', 'hud-mute'));
