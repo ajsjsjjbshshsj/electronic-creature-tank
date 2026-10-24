@@ -879,6 +879,10 @@ export function boot(opts) {
   // 3. **options.audio 注入优先**：测试用替身整个换掉叫声层时，本文件连那条手势监听都不许加。
   const audioState = { tried: false, ok: false, reason: null };
   let audio = options.audio || null;
+  // 懒创建留了一段"玩家已经按了静音、但还没有任何东西可静音"的空窗。这段意图只能记在
+  // 这儿，并在 unlockAudio 里补写给刚建好的叫声层 —— 不记就等于**悄悄丢掉**：开缸第一
+  // 件事按静音的人，会在第一次点击之后被叫一声。
+  let muted = false;
 
   // 默认的上下文工厂。**整个 src/ 里那两个以 A-u-d 与 w-e-b 开头的构造名只出现在这两行**，
   // 而本文件是 tests/constraints.test.js 唯一豁免的模块（那条白名单正例守卫现在也盯着这里）。
@@ -899,6 +903,7 @@ export function boot(opts) {
       // resume() 的 Promise **不等**：等就把创建推到了微任务上，而那一刻已经不在手势栈里。
       if (ctx && typeof ctx.resume === 'function' && ctx.state === 'suspended') ctx.resume();
       audio = createAudio({ graph: ctx });
+      if (muted) audio.setMuted(true);   // 补写空窗期里那条静音请求，别让它白按
       audioState.ok = true;
       audioState.reason = ctx && ctx.state === 'suspended' ? 'suspended' : null;
     } catch (err) {
@@ -1130,13 +1135,15 @@ export function boot(opts) {
     input,           // B17：暴露给 devtools 与测试取证（metrics 里那三个计数器）
     get audio() { return audio; },        // B18：懒创建，所以按之前是 null、按之后是那个实例
     audioState,      // { tried, ok, reason } —— 降级是否发生的**唯一**可读证据
-    getMuted() { return audio ? audio.getMuted() : true; },
+    getMuted() { return audio ? audio.getMuted() : muted; },
     setMuted(value) {
-      // 没有音频可控制时**返回当前事实**（true = 听不见），而不是抛错：
-      // 计划 3 的静音按钮在降级缸里也得能把按钮自己置灰，靠的是这个返回值而不是异常。
-      if (!audio) return true;
-      audio.setMuted(value);
-      return audio.getMuted();
+      // **所有权写清楚**：有音频时真相在 audio 里（它的 `muted` 初始值可被注入，spec §5.4
+      // 默认开）；没有音频时这个请求本身就是真相。两边各存一份是本项目反复清账的那类债。
+      // 返回值语义变过一次：原来"没音频 ⇒ true（听不见）"，那会让 HUD 第一次按下算成
+      // "取消静音"，与按钮上的"静音"二字相反，而请求又被整条丢掉。
+      if (audio) { audio.setMuted(!!value); return audio.getMuted(); }
+      muted = !!value;
+      return muted;
     },
     get frame() { return state.frame; },
     // ---- 存档层（C-1，裁定 R-6：计划 2 没有 HUD，所以这三个就是唯一的入口）----

@@ -1232,6 +1232,31 @@ test('boot：本浏览器没有 AudioContext 时是"不支持"，可读、只打
   });
 });
 
+test('boot：第一次手势**之前**按的静音不许丢 —— 解锁那一刻要带上', () => {
+  // 懒创建意味着开缸后有整整一段时间 `audio === null`。这段时间里 setMuted 若只
+  // "返回当前事实"而不记账，玩家开缸第一件事就是点静音，然后第一下真实点击把上下文
+  // 建起来 —— 叫声照响。请求丢了，而且没有任何地方说它丢过。
+  withBrowserGlobals(({ target, window }) => {
+    const g = createGraphStub({});
+    window.AudioContext = function Fake() { return g; };
+    const controller = boot({ hud: false, canvas: target, seed: 20261026, renderer: { draw() {}, onResize() {} } });
+    try {
+      assert.equal(controller.getMuted(), false,
+        '还没解锁不等于"已静音"：那样第一次按下算的是"取消静音"，与按钮上的字相反');
+      controller.setMuted(true);                    // 玩家在没有任何声音的时候按了静音
+      assert.equal(controller.getMuted(), true, '没有音频不等于请求可以丢');
+      target.emit('pointerdown', pointer(120, 120)); // 现在才解锁
+      assert.ok(controller.audio, 'fixture：手势没建成音频');
+      assert.equal(controller.audio.getMuted(), true, '解锁后音频没接上玩家的静音请求');
+      assert.equal(controller.getMuted(), true);
+      assert.equal(g.nodes[0].gain.writes.some((w) => w.v === 0), true,
+        '总线必须真被推到 0 —— 只改标志位等于没静音');
+    } finally {
+      controller.stop();
+    }
+  });
+});
+
 test('boot：控制器与模块级都拿得到静音；stop 会 close 音频图', () => {
   withBrowserGlobals(({ target, raf, window }) => {
     const g = createGraphStub({});

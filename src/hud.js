@@ -429,7 +429,10 @@ export function mountHud(doc, deps) {
       pulse();
     },
     pressMute() {
-      controller.setMuted(!controller.getMuted());
+      // 读返回值而不是自己记账：main.js 那边"没有音频时返回当前事实而不是抛"的契约
+      // 存在的唯一理由就是这里（那句注释写了很久，消费者一直缺席）。
+      const muted = controller.setMuted(!controller.getMuted());
+      if (muteBtn) muteBtn.textContent = muted ? '已静音' : '静音';
       pulse();
     },
     pressFeed(kind) {

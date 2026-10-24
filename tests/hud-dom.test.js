@@ -48,11 +48,15 @@ function mount(over = {}) {
   const doc = makeDoc();
   const calls = [];
   const cfg = { enabled: false, endpoint: '', model: '', hasKey: false };
+  // 静音必须**成对读写同一个变量**（与下面 getApiConfig/setApiConfig 同一条理由）：
+  // 写成 `getMuted: () => true` 这种只出不进的桩，"按下之后按钮上的字有没有跟着变"
+  // 这一类断言根本无从成立，而且默认值 true 与 spec §5.4"默认开启声音"是反的。
+  let muted = false;
   const controller = over.controller || {
     getTimeScale: () => 1,
     setTimeScale: (s) => calls.push(['scale', s]),
-    getMuted: () => true,
-    setMuted: (v) => calls.push(['mute', v]),
+    getMuted: () => muted,
+    setMuted: (v) => { muted = !!v; calls.push(['mute', v]); return muted; },
     getPaused: () => false,
     setPaused: (v) => { calls.push(['pause', v]); return v; },
     stop: () => calls.push(['stop']),
@@ -167,10 +171,19 @@ test('被拒之后摘一次就好 —— 不许每帧对着已脱管的节点再
   assert.equal(removes, 1, `每帧重复 remove（实调 ${removes} 次）—— 置空引用不是洁癖，是别把 DOM 当变量`);
 });
 
-test('静音键按下去传的是"当前事实取反"，不是写死 true', () => {
+test('静音键按下去传的是"当前事实取反"，且按钮上的字跟着事实变', () => {
+  // main.js 里 setMuted 那句注释承诺"降级缸里静音按钮也得能把按钮自己置灰，靠的是这个返回值
+  // 而不是异常" —— 返回值一直没人读，那句话从写下那天起就是空头承诺。
   const { root, calls } = mount();
+  const mute = find(root, 'button', 'hud-mute');
+  assert.equal(mute.textContent, '静音', '默认有声，键不许预先写着已静音');
+  click(mute);
+  assert.deepEqual(calls[0], ['mute', true], '当前有声 ⇒ 按一下应该是"要静音"');
+  assert.equal(find(root, 'button', 'hud-mute').textContent, '已静音',
+    '按完了字还是"静音"，玩家只会再按一次，于是又取消回去');
   click(find(root, 'button', 'hud-mute'));
-  assert.deepEqual(calls[0], ['mute', false], '当前是静音 ⇒ 按一下应该取消静音');
+  assert.deepEqual(calls[1], ['mute', false]);
+  assert.equal(find(root, 'button', 'hud-mute').textContent, '静音');
 });
 
 // ---------------------------------------------------------------- 信息卡
