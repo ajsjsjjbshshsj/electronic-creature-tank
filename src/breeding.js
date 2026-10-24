@@ -198,7 +198,7 @@ export function hatch(egg, rng, opts) {
   const u = clamp01((egg.eggSize - min) / (max - min));
   const baby = createCreature({
     id: `c-${egg.id}`,
-    name: opts.nameFor(egg.genes, 0),
+    name: opts.nameFor(egg.genes, opts.nameIndex || 0),
     x: clamp01(egg.pos.x + rng.range(-0.01, 0.01)),
     y: clamp01(egg.pos.y + rng.range(-0.01, 0.01)),
     age: 0,

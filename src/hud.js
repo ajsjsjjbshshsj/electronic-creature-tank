@@ -11,6 +11,8 @@ import { CONFIG } from './config.js';
 import { sizeOf } from './creature.js';
 import { affectionFor, PLAYER_ID } from './memory.js';
 import { expressionFor, avatarSrc, preloadList } from './avatar.js';
+// 端点判据只有一份：configIssue 与设置页共用，否则会出现"设置页说能存、档位却拒发请求"。
+import { endpointIssue } from './api.js';
 
 const H = CONFIG.hud;
 const DASH = '—';
@@ -292,6 +294,7 @@ export function mountHud(doc, deps) {
     card: null, settingsOpen: false, lastInputAt: 0, now: 0, _lastCardAt: -Infinity,
     frames: 0, cardRenders: 0, cardOpens: 0,
     feeds: 0, tells: 0, tellTruncated: 0, tellDropped: 0, renames: 0, rejectedNames: 0,
+    endpointRejected: 0, settingsOpens: 0, settingsSaved: 0, clearArmed: false, _armedAt: 0,
   };
   let lastRows = '';
   let lastRel = '';
@@ -330,6 +333,78 @@ export function mountHud(doc, deps) {
       }
     }
     state.cardRenders += 1;
+  }
+
+  // ---- 设置页（Task 6）----
+  // 草稿只活在这里，**从不写进任何节点的 value**（key 那一栏尤其：填进去、保存、清空，
+  // 之后页面上只剩"已保存"三个字）。这也是为什么整个面板是**开时建、关时拆**：
+  // 少一处"key 可能被读到的地方"，就少一处将来有人加个 console.log 就破掉的地方。
+  const draft = { endpoint: '', model: '', key: '', keyEntered: false, speech: true };
+  // "存过 key 没有"只有一个真相源：controller.getApiConfig().hasKey（它背后就是那份本机存储）。
+  // 曾经这里另存了一份 draft.keySaved，结果"重开设置页"时它被 getApiConfig 覆盖，
+  // 于是明明存过却显示"未填" —— 两份真相必有一天互相打脸，这次是它先露出来。
+  const hasSavedKey = () => !!(controller.getApiConfig && controller.getApiConfig().hasKey);
+  let panel = null;
+  const SAVE_SOURCE_LABEL = Object.freeze({
+    fresh: '本机新档', restored: '读回本机档', 'corrupt-moved': '旧档读不懂，已留证据',
+    unreadable: '存储不可用（只玩不存）',
+  });
+
+  function buildPanel() {
+    const box = el(doc, 'div', 'hud-settings', card);
+    const cfg = controller.getApiConfig ? controller.getApiConfig() : {};
+    draft.endpoint = String(cfg.endpoint || '');
+    draft.model = String(cfg.model || '');
+    draft.key = '';
+    // draft.speech 不在这儿猜：它由 frame(world) 从 world.speechEnabled 同步过来。
+    // 设置页自己存一份"文字层开没开"就是第二份真相，而它会与读档后的世界不一致。
+    const rowOf = (cls, label) => {
+      const row = el(doc, 'div', `hud-set ${cls}`, box);
+      el(doc, 'span', 'hud-set-label', row).textContent = label;
+      return row;
+    };
+    const epRow = rowOf('hud-set-endpoint', '端点');
+    const epBox = textInput(doc, epRow, 'hud-set-endpoint-input', 'OpenAI 兼容端点', 200);
+    epBox.value = draft.endpoint;
+    const mdRow = rowOf('hud-set-model', '模型');
+    const mdBox = textInput(doc, mdRow, 'hud-set-model-input', '模型名', 80);
+    mdBox.value = draft.model;
+    const keyRow = rowOf('hud-set-key', '密钥');
+    // 状态字与输入框是两个节点：往 <input> 上写 textContent 在真浏览器里什么都不发生，
+    // 于是"已保存"这三个字会静默消失 —— 桩里却会"成功"，这种差异必须靠结构避开。
+    el(doc, 'span', 'hud-set-value', keyRow).textContent = '未填';
+    const keyBox = el(doc, 'input', `${TOUCH} hud-set-key`, keyRow);
+    keyBox.setAttribute('type', 'password');          // 只写：值从不回填
+    keyBox.setAttribute('aria-label', 'API 密钥（只存本机）');
+    keyBox.value = '';
+    const saveRow = rowOf('hud-set-save', '存档');
+    el(doc, 'span', 'hud-set-value', saveRow).textContent = '未知来源';
+    const dangerRow = rowOf('hud-set-danger', '危险动作');
+    const speechRow = rowOf('hud-set-speech', '文字层');
+    const speechBtn = button(doc, speechRow, '关闭文字层', 'hud-speech-toggle');
+    speechBtn.addEventListener('click', () => api.setSpeech(!draft.speech));
+    const saveNowBtn = button(doc, dangerRow, '立即落盘', 'hud-save-now');
+    saveNowBtn.addEventListener('click', () => api.pressSaveNow());
+    const clearBtn = button(doc, dangerRow, '清空存档', 'hud-clear-save');
+    clearBtn.addEventListener('click', () => api.pressClear());
+    const applyBtn = button(doc, box, '保存设置', 'hud-apply');
+    applyBtn.addEventListener('click', () => api.saveSettings());
+    panel = { box, epBox, mdBox, keyBox, keyRow, epRow, saveRow, clearBtn, speechBtn };
+    paintPanel();
+  }
+
+  function paintPanel() {
+    if (!panel) return;
+    const st = controller.saveState || {};
+    const label = Object.hasOwn(SAVE_SOURCE_LABEL, st.source) ? SAVE_SOURCE_LABEL[st.source] : '未知来源';
+    panel.saveRow.children[1].textContent =
+      `${label} · ${st.bytes || 0}B · 已写 ${st.writes || 0} 次`;
+    // 标签只写"已保存 / 未填"这两个**词**，绝不把 key 的内容放进任何节点。
+    panel.keyRow.children[1].textContent = (draft.keyEntered || hasSavedKey()) ? '已保存（只存本机）' : '未填';
+    panel.epRow.classList.toggle('is-bad', !!state.endpointRejected);
+    panel.speechBtn.textContent = draft.speech ? '关闭文字层' : '打开文字层';
+    panel.clearBtn.textContent = state.clearArmed ? '再按一次确认清空' : '清空存档';
+    panel.clearBtn.classList.toggle('is-armed', !!state.clearArmed);
   }
 
   const api = {
@@ -396,10 +471,92 @@ export function mountHud(doc, deps) {
       }
       pulse();
     },
-    setSettingsOpen(open) { state.settingsOpen = !!open; pulse(); },
+    setSettingsOpen(open) {
+      const want = !!open;
+      if (want === state.settingsOpen) return;
+      state.settingsOpen = want;
+      if (want) { state.settingsOpens += 1; buildPanel(); }
+      else if (panel) { panel.box.remove(); panel = null; }   // 关了就**拆掉**：key 框少活一会儿
+      pulse();
+    },
+    setEndpoint(v) { draft.endpoint = String(v == null ? '' : v); state.endpointRejected = 0; paintPanel(); },
+    setModel(v) { draft.model = String(v == null ? '' : v); paintPanel(); },
+    // 只写：值进 draft 之后**从不回填**到任何节点，保存完立刻清空输入框。
+    setKey(v) {
+      draft.key = String(v == null ? '' : v);
+      draft.keyEntered = draft.key.length > 0;
+      if (panel) panel.keyBox.value = '';
+      paintPanel();
+    },
+    setSpeech(on) {
+      draft.speech = !!on;
+      state.speechToggles = (state.speechToggles || 0) + 1;
+      if (d.onSpeech) d.onSpeech(draft.speech);
+      paintPanel();
+      pulse();
+    },
+    saveSettings() {
+      const bad = endpointIssue(draft.endpoint);
+      // 只有 **insecure** 才拦。空端点不拦：玩家完全可能先填 key、下次再填端点，
+      // 拦下来等于不让人分两次填表；而档位那边 configIssue 会照旧拒发请求，
+      // 所以"存了但没开"是安全状态，不需要在 UI 上再禁一次。
+      // 明文 http 不一样：那份配置一旦落下，每次开缸都会把 key 往局域网上广播一次。
+      if (bad === 'insecure') {
+        state.endpointRejected += 1;
+        paintPanel();
+        pulse();
+        return false;
+      }
+      const ep = draft.endpoint.trim();
+      const md = draft.model.trim();
+      const patch = {
+        // 三样齐了才真的打开档位。只填了 key 就 enabled:true，症状是"我什么都没开，
+        // 它却开始往外发请求"（或者反过来：每次出词都白付一次被拒的往返）。
+        enabled: !!(ep && md && (draft.keyEntered || hasSavedKey())),
+        endpoint: ep, model: md,
+      };
+      // 没填 key 就**不交这个键**：交空串会把已存的 key 覆盖掉（main.js 那边照单全收）。
+      if (draft.key) patch.key = draft.key;
+      draft.key = '';
+      draft.keyEntered = false;
+      if (panel) panel.keyBox.value = '';
+      state.settingsSaved += 1;
+      if (controller.setApiConfig) controller.setApiConfig(patch);
+      paintPanel();
+      pulse();
+      return true;
+    },
+    pressSaveNow() {
+      state.saveNowPressed = (state.saveNowPressed || 0) + 1;
+      if (controller.saveNow) controller.saveNow();
+      paintPanel();
+      pulse();
+    },
+    // 清空存档是**不可逆**的（一缸的世代没了），所以要按两次，而且确认态会自己过期。
+    pressClear() {
+      if (!state.clearArmed) {
+        state.clearArmed = true;
+        state._armedAt = state.now;
+        state.clearArms = (state.clearArms || 0) + 1;
+        paintPanel();
+        pulse();
+        return;
+      }
+      state.clearArmed = false;
+      state.clears = (state.clears || 0) + 1;
+      if (controller.clearSave) controller.clearSave();
+      paintPanel();
+      pulse();
+    },
     frame(nowMs, world) {
       state.frames += 1;
       state.now = nowMs;
+      if (world && typeof world.speechEnabled === 'boolean') draft.speech = world.speechEnabled;
+      // 确认态自己收回：armed 的按钮一直亮着，等于下一次随手一按就把一缸清了。
+      if (state.clearArmed && nowMs - state._armedAt >= H.confirmArmedMs) {
+        state.clearArmed = false;
+        paintPanel();
+      }
       const r = readoutFor(world);
       // 只在值变了的时候写：textContent 赋值在真浏览器里会换掉文本节点，
       // 每帧无条件写三次等于把 DOM 当变量用。

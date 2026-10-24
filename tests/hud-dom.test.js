@@ -7,6 +7,8 @@ import { createEmotions } from '../src/emotions.js';
 import { createNeeds } from '../src/needs.js';
 import { createMemory, remember } from '../src/memory.js';
 import { makeDoc, find, findAll, textOf, dump, click, countListeners } from './dom-stub.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // ================================================================ HUD 的 DOM 那一半
 //
@@ -45,6 +47,7 @@ const W = (creatures, o = {}) => Object.assign({ creatures, eggs: [], foods: [],
 function mount(over = {}) {
   const doc = makeDoc();
   const calls = [];
+  const cfg = { enabled: false, endpoint: '', model: '', hasKey: false };
   const controller = over.controller || {
     getTimeScale: () => 1,
     setTimeScale: (s) => calls.push(['scale', s]),
@@ -56,8 +59,18 @@ function mount(over = {}) {
     saveState: { source: 'fresh', bytes: 0, writes: 0 },
     saveNow: () => calls.push(['saveNow']),
     clearSave: () => calls.push(['clearSave']),
-    getApiConfig: () => ({ enabled: false, endpoint: '', model: '', hasKey: false }),
-    setApiConfig: (p) => calls.push(['api', p]),
+    // getApiConfig / setApiConfig 必须成对地读写**同一份** cfg —— 真页面里它们背后是
+    // 同一份本机存储。写成两个互不相干的桩，就会出现"HUD 说没存过、存储里明明有"
+    // 这种两边都测不到的缝（keySaved 那条第二真相就是这么冒出来的）。
+    getApiConfig: () => ({
+      enabled: cfg.enabled, endpoint: cfg.endpoint, model: cfg.model, hasKey: cfg.hasKey,
+    }),
+    setApiConfig: (p) => {
+      if ('endpoint' in p) cfg.endpoint = p.endpoint;
+      if ('model' in p) cfg.model = p.model;
+      if ('key' in p && p.key) cfg.hasKey = true;
+      calls.push(['api', p]);
+    },
   };
   const hud = mountHud(doc, {
     controller,
@@ -342,4 +355,161 @@ test('还没试过音频时静音键**要在**：只看 ok 会把它永远藏掉
   assert.ok(find(root, 'button', 'hud-mute'), '还没试过就当"被拒绝"，静音键从此消失');
   const blocked = mount({ audioState: { tried: true, ok: false, reason: 'unsupported' } });
   assert.equal(find(blocked.root, 'button', 'hud-mute'), null, '明确被拒绝时才该藏');
+});
+
+// ================================================================ Task 6：设置页
+
+test('设置页六行：端点 / 模型 / key / 文字层开关 / 存档来源 / 危险动作', () => {
+  const { hud, root } = mount();
+  hud.setSettingsOpen(true);
+  for (const cls of ['hud-set-endpoint', 'hud-set-model', 'hud-set-key',
+    'hud-set-speech', 'hud-set-save', 'hud-set-danger']) {
+    assert.ok(find(root, 'div', cls), `缺 ${cls}`);
+  }
+});
+
+test('设置页关着的时候这些输入框不许在树里（key 少一处能被读到的地方）', () => {
+  const { hud, root } = mount();
+  assert.equal(find(root, 'input', 'hud-set-key'), null, '关着还挂着 key 框');
+  hud.setSettingsOpen(true);
+  assert.ok(find(root, 'input', 'hud-set-key'));
+  hud.setSettingsOpen(false);
+  assert.equal(find(root, 'input', 'hud-set-key'), null, '关掉设置页还留着 key 框 = 关与没关一样');
+});
+
+test('key 是**只写**的：填进去保存之后，整棵树里搜不到那个串', () => {
+  const { hud, doc, calls } = mount();
+  hud.setSettingsOpen(true);
+  const SENTINEL = 'sk-DO-NOT-LEAK-1234567890';
+  hud.setKey(SENTINEL);
+  hud.saveSettings();
+  assert.ok(calls.some((c) => c[0] === 'api' && c[1].key === SENTINEL), 'key 没交给 setApiConfig');
+  assert.ok(!dump(doc.body).includes(SENTINEL), 'key 回显在 DOM 上了');
+  const box = find(doc.body, 'input', 'hud-set-key');
+  assert.equal(box.attrs.type, 'password');
+  assert.equal(box.value, '', '保存之后输入框必须清空');
+});
+
+test('key 那一行只显示"已保存"，不显示长度也不显示前缀', () => {
+  const { hud, doc } = mount();
+  hud.setSettingsOpen(true);
+  hud.setKey('sk-abcdefgh1234567890');
+  hud.saveSettings();
+  const rowText = textOf(find(doc.body, 'div', 'hud-set-key'));
+  assert.match(rowText, /已保存/);
+  assert.ok(!/abcdefgh/.test(rowText) && !/1234/.test(rowText), rowText);
+});
+
+test('端点非 https 当场报、不落盘（spec §13.2 第 3 条）', () => {
+  const { hud, calls } = mount();
+  hud.setSettingsOpen(true);
+  hud.setEndpoint('http://evil.example/v1');
+  hud.setModel('qwen');
+  hud.saveSettings();
+  assert.equal(hud.state.endpointRejected, 1);
+  assert.ok(!calls.some((c) => c[0] === 'api'), '被拒的配置不许写进本机存储');
+});
+
+test('合法的 https 端点保存后调 setApiConfig，且交出去的 patch 里没有 undefined 键', () => {
+  const { hud, calls } = mount();
+  hud.setSettingsOpen(true);
+  hud.setEndpoint('https://example.test/v1');
+  hud.setModel('qwen-plus');
+  hud.saveSettings();
+  const patch = calls.find((c) => c[0] === 'api')[1];
+  assert.equal(patch.endpoint, 'https://example.test/v1');
+  assert.equal(patch.model, 'qwen-plus');
+  assert.ok(!('key' in patch), '没填 key 就别交 key 这个键（空串会覆盖掉已存的）');
+});
+
+test('文字层开关写的是 world.speechEnabled，不是 CONFIG', () => {
+  const { hud, calls } = mount();
+  hud.setSettingsOpen(true);
+  hud.setSpeech(false);
+  assert.deepEqual(calls.at(-1), ['speech', false]);
+});
+
+test('清空存档要按两次：第一次只亮确认态，第二次才调 clearSave', () => {
+  const { hud, calls, doc } = mount();
+  hud.setSettingsOpen(true);
+  const btn = find(doc.body, 'button', 'hud-clear-save');
+  click(btn);
+  assert.ok(!calls.some((c) => c[0] === 'clearSave'), '一次就清 = 一次误触丢掉一缸');
+  assert.ok(btn._class.has('is-armed'), '没进入确认态，玩家不知道还要按一次');
+  click(btn);
+  assert.ok(calls.some((c) => c[0] === 'clearSave'));
+});
+
+test('确认态过 confirmArmedMs 不点就自己收回', () => {
+  const { hud, calls, doc } = mount();
+  hud.setSettingsOpen(true);
+  hud.pressClear();
+  assert.equal(hud.state.clearArmed, true);
+  for (let t = 10000; t < 10000 + CONFIG.hud.confirmArmedMs + 200; t += 100) hud.frame(t, W([mk()]));
+  assert.equal(hud.state.clearArmed, false, 'armed 的按钮亮着不管 = 下一次随手一按就清了');
+  hud.pressClear();
+  assert.ok(!calls.some((c) => c[0] === 'clearSave'), '收回之后第一次按就该是重新 arm');
+});
+
+test('存档那一行写的是 source 与字节数（四个 source 都有中文说法，不许吐英文键）', () => {
+  for (const [source, want] of [['fresh', '本机'], ['restored', '读回'],
+    ['corrupt-moved', '留证据'], ['unreadable', '不可用']]) {
+    const { hud, doc } = mount({ controller: {
+      getTimeScale: () => 1, setTimeScale() {}, getMuted: () => true, setMuted() {},
+      getPaused: () => false, setPaused() {}, saveState: { source, bytes: 1234, writes: 2 },
+      saveNow() {}, clearSave() {}, getApiConfig: () => ({ enabled: false, hasKey: false }),
+      setApiConfig() {} } });
+    hud.setSettingsOpen(true);
+    const t = textOf(find(doc.body, 'div', 'hud-set-save'));
+    assert.ok(t.includes(want), `${source} 的说法里没有"${want}"：${t}`);
+    assert.ok(!t.includes(source), `${source} 直接吐了英文键：${t}`);
+  }
+});
+
+test('立即落盘那个键真的调 saveNow，并显示写入了多少字节', () => {
+  const { hud, calls, doc } = mount();
+  hud.setSettingsOpen(true);
+  click(find(doc.body, 'button', 'hud-save-now'));
+  assert.ok(calls.some((c) => c[0] === 'saveNow'));
+});
+
+test('设置页整页不许出现"心情"或任何 API key 字样（最后一道网）', () => {
+  const { hud, doc } = mount();
+  hud.setSettingsOpen(true);
+  hud.setKey('sk-zzz-secret-zzz');
+  hud.saveSettings();
+  hud.setCard(mk({ emotions: { anger: 1 } }), W([mk({ emotions: { anger: 1 } })]));
+  const all = dump(doc.body);
+  assert.ok(!all.includes('心情'));
+  assert.ok(!all.includes('sk-zzz'));
+});
+
+test('key 保存之后就算重开设置页也不回来（探针 S4 逼出来的那条）', () => {
+  // S4 那道探针（把 draft.key 回填进输入框）在"保存后 dump 一次"的判据下**活着**，
+  // 而且它改的其实是可接受的窗口：玩家正在打字时 key 当然在那个框里。
+  // 真正要钉的是**存过之后不许再出现** —— 那要跨一次"关掉再打开"才看得出来，
+  // 因为 buildPanel 是重建的，回填只会发生在那里。
+  const { hud, doc } = mount();
+  hud.setSettingsOpen(true);
+  const SENTINEL = 'sk-PERSIST-MUST-NOT-COME-BACK';
+  hud.setKey(SENTINEL);
+  hud.saveSettings();
+  hud.setSettingsOpen(false);
+  hud.setSettingsOpen(true);
+  assert.ok(!dump(doc.body).includes(SENTINEL), '重开设置页把已保存的 key 又画出来了');
+  assert.match(textOf(find(doc.body, 'div', 'hud-set-key')), /已保存/);
+});
+
+test('源码守卫：draft.key 从不被赋给任何节点（S4/S10 都逼不出红的，因为这条是结构性的）', async () => {
+  // 前面那两条 dump 判据是**观察侧**的网；但"key 不回填"这件事在这版实现里是结构性的
+  // —— 没有任何一条代码路径把 draft.key 写进节点，所以删掉某一句清空也测不出红。
+  // 测不出红的判据不等于没有判据，但**要换一种判法**：直接扫源码。
+  const src = readFileSync(fileURLToPath(new URL('../src/hud.js', import.meta.url)), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ');
+  // (?![A-Za-z]) 是必需的：draft.keyEntered 也以前缀 draft.key 开头，
+  // 少了这个边界，守卫会把"读一个布尔量"误报成"把 key 写进节点"。
+  assert.ok(!/(\.value|\.textContent|setAttribute\([^)]*\))\s*=[^;\n]*draft\.key(?![A-Za-z])/.test(src),
+    '有人把 draft.key 写进节点了 —— 那正是"key 只写不读"这条承诺破掉的地方');
+  assert.ok(/type', 'password'/.test(src), 'key 输入框不再是 password 型');
 });
