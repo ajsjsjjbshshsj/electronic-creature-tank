@@ -1204,6 +1204,41 @@ function drawEggsInner(ctx, renderer, egg, viewport) {
   drawEggShell(ctx, egg, x, y, rr);
 }
 
+/**
+ * F-5（计划 3 Task 7）：把卵的**下沿**埋进沉积带。
+ *
+ * 为什么要有这一层：B20 量过，卵的**位置本来就是对的**（卵心 y≈0.926，沉积带上沿在 0.915），
+ * 问题是层序 —— 沉积带画在卵之前，所以卵的下沿永远不被任何东西遮住，画面上就是
+ * "一颗颗蛋浮在带子前面"。加一层同色矩形盖住下沿，才读成"蛋陷进沙里"。
+ *
+ * 三条实现约束，每条都对应一种症状：
+ *  · **逐颗**遮，不画整条横贯缸底的矩形：低处那颗会被整块埋掉，"看不见缸里有卵"
+ *    比"蛋浮在沙上"更糟；每块遮罩只盖到自己那颗的下沿为止，也不遮住更深的另一颗。
+ *  · **只用矩形**（fillRect）：本文件里 arc 归食物、ellipse 归卵、clip 归本体，
+ *    那条"arc 早于 ellipse 早于 clip"的层序断言数的是这三者的**次数**，
+ *    遮罩要是敢用圆弧，那条断言就以"卵层多了弧线"的方式红，而它正是我们要保的东西。
+ *  · 颜色取 CONFIG.colors.sediment，**不新造一个数**：不一样就在缸底画出一条看得见的接缝。
+ *  · 整颗都在带上方的卵**跳过**：那会在开阔水里画一块沙色矩形。
+ */
+export function drawEggMask(ctx, world, viewport) {
+  const eggs = world && world.eggs;
+  if (!Array.isArray(eggs) || eggs.length === 0) return;
+  const h = viewport.height;
+  const bandTop = h * (1 - CONFIG.render.sedimentHeight);
+  ctx.save();
+  ctx.fillStyle = CONFIG.colors.sediment;
+  for (const egg of eggs) {
+    if (!egg || !egg.pos) continue;
+    const r = eggRadiusPx(egg, viewport);
+    const cx = screenX(egg.pos.x, viewport);
+    const cy = screenY(egg.pos.y, viewport);
+    if (cy + r <= bandTop) continue;                 // 悬在沙子之上，不遮
+    const y0 = Math.max(bandTop, cy);
+    ctx.fillRect(cx - r - 1, y0, (r + 1) * 2, (cy + r + 1) - y0);
+  }
+  ctx.restore();
+}
+
 export function drawEggs(ctx, renderer, world, viewport) {
   const eggs = world.eggs;
   if (!eggs || eggs.length === 0) return;
@@ -1758,6 +1793,10 @@ export function createRenderer(opts) {
       // 由 tests/render-fx.test.js 的"arc 早于 ellipse 早于 clip"守住。
       drawFoods(ctx, renderer, world, viewport);
       drawEggs(ctx, renderer, world, viewport);
+      // F-5：卵之后立刻补一层同色遮罩，把每颗的下沿埋进沙里。
+      // 位置是判据：必须在卵之后（否则盖不住）、在生物之前（否则把个体也埋了）——
+      // 两条都由 tests/render-fx.test.js 钉着。
+      drawEggMask(ctx, world, viewport);
       // 生物层（spec §5.1 的六层：B14 的第 1/2/3/4/5/7 + B15 的第 6）。
       // 层序有意义：生物在水体**之上**；B15 的眼睛接在 drawCreature 内部（clip 之外），
       // B19 的气泡接在最后。

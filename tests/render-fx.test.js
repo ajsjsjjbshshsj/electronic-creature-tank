@@ -16,7 +16,7 @@ import {
   dimFactorFor, sickDesaturate,
   hopProgress, hopImpulse, hopLiftAt, hopSquashAt,
   eggGlowFor, eggShellRevealFor, eggRadiusPx, eggTintHex,
-  foodRadiusPx, foodColorFor, drawEggs, drawFoods,
+  foodRadiusPx, foodColorFor, drawEggs, drawEggMask, drawFoods,
   createBursts, burst, updateBursts, drawBursts, consumeEvents,
 } from '../src/render.js';
 
@@ -43,12 +43,14 @@ function createLogCtx() {
     ops,
     counts,
     shadowBlurWrites: 0,
+    rects: [],
     _shadowBlur: 0,
     lastGlobalAlpha: 1,
     alphaAtDraw: [],
     reset() {
       counts.clear(); ops.length = 0; depth = 0;
       stub.shadowBlurWrites = 0; stub.alphaAtDraw.length = 0; stub.lastGlobalAlpha = 1;
+      stub.rects.length = 0;
     },
     count(name) { return counts.get(name) || 0; },
     indexOf(name) { return ops.findIndex((o) => o.op === name); },
@@ -65,6 +67,16 @@ function createLogCtx() {
     // 那是 B13/B14 立"只数次数"这条纪律时要避免的东西。
     if (m === 'drawImage') {
       stub[m] = () => { ops.push({ op: bump(m), depth }); stub.alphaAtDraw.push(stub.lastGlobalAlpha); };
+      continue;
+    }
+    // F-5 的第二处"记值"例外：遮罩这一层的**全部**语义就是几何（盖哪一段、盖多深），
+    // 只数次数测不出"把更深处那颗也埋了"这种错。与 drawImage 记 globalAlpha 同理 ——
+    // 只记这一个方法、只记这几个参数，不全面记值（那会让每条断言都对参数脆断）。
+    if (m === 'fillRect') {
+      stub.fillRect = (x, y, w, h) => {
+        ops.push({ op: bump('fillRect'), depth });
+        stub.rects.push([x, y, w, h]);
+      };
       continue;
     }
     stub[m] = () => { ops.push({ op: bump(m), depth }); };
@@ -1250,4 +1262,100 @@ test('好动的必须跳得更高（探针 P9：冲量不读 activity 必须红�
   assert.ok(lively.lift > calm.lift * 1.5,
     `冲量必须随 activity 上升：lift ${calm.lift.toFixed(3)} vs ${lively.lift.toFixed(3)}`);
   assert.ok(lively.y < calm.y, '好动的那只在这一帧屏幕上必须真的更高（y 更小）');
+});
+
+// ================================================================ F-5：卵埋在沉积物里（Task 7）
+//
+// B20 的 F-5 说得很清楚：**位置是对的**（卵心 y=0.926 确实在带子里），
+// 问题是层序 —— 沉积带画在卵**之前**，所以卵的下沿永远不被任何东西遮住，
+// 画面上就是"一颗颗蛋浮在带子前面"。修法是在卵之后补一层遮罩。
+//
+// 那条"foods 的 arc 早于 eggs 的 ellipse 早于生物的 clip"层序断言的账**一个字都不能变**，
+// 所以遮罩只用矩形路径。下面 arc / ellipse / clip 那三个基线数（107 / 62 / 8）
+// 是用本文件同一套夹具（11 只 + 2 颗卵）跑出来的，不是估的。
+
+const eggScene = () => {
+  const created = [];
+  const world = makeWorld(11);
+  world.eggs.push(eggFixture({ id: 'a', age: 30, pos: { x: 0.3, y: 0.94 } }));
+  world.eggs.push(eggFixture({ id: 'b', age: 30, pos: { x: 0.4, y: 0.96 } }));
+  const r = makeRenderer(world, DESKTOP, false, created);
+  const bodies = new Map();
+  for (const c of world.creatures) bodies.set(c.id, createBody(c.traits));
+  return { world, r, bodies, ctx: createLogCtx(), created };
+};
+
+test('F-5：缸里有卵时补一层遮罩，没有卵时一个字节都不花', () => {
+  const s = eggScene();
+  s.r.draw(s.ctx, s.world, s.bodies, DESKTOP, 1 / 60);
+  // 遮罩是**逐颗**的：一整条横贯缸底的矩形会把落在低处的那颗整个埋掉，
+  // 而"看不见缸里有卵"比"蛋浮在沙上"更糟。
+  assert.equal(s.ctx.count('fillRect'), s.world.eggs.length,
+    `每颗该被埋的卵一次遮罩，实测 ${s.ctx.count('fillRect')} vs ${s.world.eggs.length} 颗`);
+  const empty = eggScene();
+  empty.world.eggs.length = 0;
+  empty.r.draw(empty.ctx, empty.world, empty.bodies, DESKTOP, 1 / 60);
+  assert.equal(empty.ctx.count('fillRect'), 0, '没卵也画遮罩 = 每帧白擦一遍缸底');
+  // 整颗都在沉积带上方的卵**不遮**：那会在开阔水里画一块沙色矩形。
+  const high = eggScene();
+  high.world.eggs.length = 0;
+  high.world.eggs.push(eggFixture({ id: 'hi', age: 30, pos: { x: 0.5, y: 0.6 } }));
+  high.r.draw(high.ctx, high.world, high.bodies, DESKTOP, 1 / 60);
+  assert.equal(high.ctx.count('fillRect'), 0, '给一颗悬在沙子之上的卵画了沙色矩形');
+});
+
+test('F-5：遮罩不改那条层序断言的账 —— arc / ellipse / clip 一个都没多', () => {
+  const s = eggScene();
+  s.r.draw(s.ctx, s.world, s.bodies, DESKTOP, 1 / 60);
+  assert.equal(s.ctx.count('arc'), 107, 'arc 次数变了：遮罩用了圆弧，会把层序断言打红');
+  assert.equal(s.ctx.count('ellipse'), 62, 'ellipse 次数变了：同上');
+  assert.equal(s.ctx.count('clip'), 8, 'clip 次数变了');
+  assert.equal(s.ctx.count('save'), s.ctx.count('restore'), 'save/restore 必须成对');
+});
+
+test('F-5：遮罩画在卵之后、生物之前（盖住下沿，不盖住个体本身）', () => {
+  const s = eggScene();
+  s.r.draw(s.ctx, s.world, s.bodies, DESKTOP, 1 / 60);
+  const mask = s.ctx.indexOf('fillRect');
+  const firstBezier = s.ctx.indicesOf('bezierCurveTo')[0];
+  assert.ok(mask >= 0, '根本没画遮罩');
+  assert.ok(firstBezier > mask,
+    `遮罩画在生物之后（${mask} > ${firstBezier}）= 会把个体下半截也埋掉`);
+});
+
+test('F-5：遮罩本身只用矩形路径，且颜色就是沉积带那个颜色', () => {
+  const s = eggScene();
+  drawEggMask(s.ctx, s.world, DESKTOP);
+  assert.equal(s.ctx.count('arc'), 0, '遮罩用了 arc');
+  assert.equal(s.ctx.count('ellipse'), 0, '遮罩用了 ellipse');
+  assert.equal(s.ctx.count('fillRect'), s.world.eggs.length);
+  // 遮罩色必须与沉积带**同色**：不一样就在缸底画出一条看得见的接缝，
+  // 那比"蛋浮在沙上"更糟。
+  assert.equal(String(s.ctx.fillStyle), CONFIG.colors.sediment,
+    `遮罩色与沉积带不同（${s.ctx.fillStyle}）`);
+});
+
+test('F-5：每块遮罩只盖到自己那颗的下沿为止 —— 不许把更深处的那颗也埋了', () => {
+  // 这条是探针 E5 逼出来的：把遮罩高度写成"一直到视口底"，
+  // 次数、颜色、arc/ellipse 账**全都不变**，只有几何错了 ——
+  // 症状是低处那颗蛋整个消失（"看不见缸里有卵"比"蛋浮在沙上"更糟）。
+  const s = eggScene();
+  drawEggMask(s.ctx, s.world, DESKTOP);
+  assert.equal(s.ctx.rects.length, 2, `两颗卵应该两块遮罩，实测 ${s.ctx.rects.length}`);
+  const bandTop = DESKTOP.height * (1 - CONFIG.render.sedimentHeight);
+  for (let i = 0; i < s.world.eggs.length; i++) {
+    const egg = s.world.eggs[i];
+    const [x, y, w, h] = s.ctx.rects[i];
+    const r = eggRadiusPx(egg, DESKTOP);
+    const cy = egg.pos.y * DESKTOP.height;
+    assert.ok(y >= bandTop - 1e-9, `遮罩顶到了沙面之上（${y} < ${bandTop}）：会在开阔水里画沙色块`);
+    assert.ok(y <= cy + 1e-9, '遮罩起点低于卵心：那等于整颗都埋了');
+    assert.ok((y + h) <= cy + r + 2, `遮罩下沿 ${y + h} 越过了这颗卵的底 ${cy + r}`);
+    assert.ok(w >= 2 * r, `遮罩比卵还窄（${w} < ${2 * r}）：两侧的下沿没埋住`);
+    assert.ok(x <= egg.pos.x * DESKTOP.width - r + 2, '遮罩没对准这颗卵');
+  }
+  // 关键那条：浅的那颗的遮罩**不许**盖到深的那颗的蛋心
+  const shallow = s.ctx.rects[0];
+  const deepCy = s.world.eggs[1].pos.y * DESKTOP.height;
+  assert.ok(shallow[1] + shallow[3] < deepCy, '浅处的遮罩伸进了深处那颗的蛋心');
 });
