@@ -382,3 +382,29 @@ test('显式 saveNow() 绕过墙钟下限（人按的按钮不该被防抖吞掉
   controller.saveNow();
   assert.equal(store.writesOf(KEY), n + 1, '连按两次必须真的写两次');
 }));
+
+test('三天后再打开，它们还在你离开的那一秒 —— **不补算流逝时间**（spec §7.4）', () => {
+  // 这条判据早就写在 spec 里，而 progress.md 一直记着"没有任何断言钉它"：
+  // §7.4 的"不补算"原本是靠**没有那段代码**成立的，哪天有人加一段"离线也长个子"，
+  // 全绿会一路陪着他。现在它有测试了。
+  const shared = makeStore();
+  return withSaveTank({ store: shared }, ({ controller, run }) => {
+    run(CONFIG.save.everySimSec + 5);
+    controller.saveNow();
+    shared.leftAt = controller.world.time;
+    shared.c0 = { age: controller.world.creatures[0].age, hunger: controller.world.creatures[0].needs.hunger };
+    // 把档里的 savedAt 改成**三天前**：真页面上"关三天再打开"就是这个形状。
+    const doc = JSON.parse(shared.raw(CONFIG.save.key));
+    doc.savedAt = new Date(Date.now() - 3 * 86400 * 1000).toISOString();
+    shared.setItem(CONFIG.save.key, JSON.stringify(doc));
+  }).then(() => withSaveTank({ store: shared }, ({ controller }) => {
+    assert.equal(controller.saveState.source, 'restored');
+    assert.equal(controller.world.time, shared.leftAt,
+      `世界被补算了 ${controller.world.time - shared.leftAt} 模拟秒：`
+      + '三天没来，它们应该还在你离开的那一秒等着，而不是饿死一片');
+    // 一帧都不许多推进：年龄与需求必须**停在离开那一刻**。
+    const c = controller.world.creatures[0];
+    assert.equal(c.age, shared.c0.age, '年龄被补算了');
+    assert.equal(c.needs.hunger, shared.c0.hunger, '饥饿被补算了：三天没来，一缸饿死');
+  }));
+});
