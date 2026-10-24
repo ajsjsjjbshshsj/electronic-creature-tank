@@ -127,7 +127,7 @@ async function withSaveTank(opts, fn) {
   // 落盘节奏是 **30 模拟秒**，而一次 frame 只推进 16.7ms ⇒ "等一会儿"必须是显式的。
   const run = (simSec) => { const n = Math.ceil((simSec * 1000) / 16.7); for (let i = 0; i < n; i++) frame(); };
   try {
-    controller = boot(bootOpts);
+    controller = boot({ hud: false, ...bootOpts });
     return await fn({ controller, store, frame, run, warns, doc: g.document, win: g.window, lastT: () => lastT });
   } finally {
     if (controller) controller.stop();

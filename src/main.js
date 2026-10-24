@@ -81,7 +81,7 @@
 //     （JSON.stringify 给的是 `{}`），所以这里**不许**写"存→读→跑 N tick 与连跑逐位相同"那种假断言。
 
 import { CONFIG } from './config.js';
-import { createWorld, tickWorld, restoreWorld, assertRestorable } from './sim.js';
+import { createWorld, tickWorld, restoreWorld, assertRestorable, spawnFood } from './sim.js';
 import { updateBodies, reconcileBodies } from './body.js';
 import { createRenderer, consumeEvents } from './render.js';
 import { attachInput } from './input.js';
@@ -94,6 +94,16 @@ import {
   buildSummary, buildRequest, configIssue, validateReply, maySend, deadlineFor,
   PUSH_REASONS,
 } from './api.js';
+// 计划 3 Task 5：HUD 与它需要的三个内核入口。
+// 三个"算"的模块（gestures / avatar / hud 的视图模型）都靠依赖注入或纯读，
+// 本文件仍然是七个浏览器全局**唯一**允许出现的地方 —— mountHud 拿到的 `doc` 就是这里的
+// 那个全局，作为**实参**传进去，所以 hud.js 里连那个名字都不出现。
+import { classifyPress, pickCreature } from './gestures.js';
+import { mountHud } from './hud.js';
+import { hear } from './heard.js';
+import { moodOf } from './emotions.js';
+import { mostUrgent } from './needs.js';
+import { NO_TIME } from './input.js';
 
 // ---------------------------------------------------------------- 纯逻辑（可在 Node 测）
 
@@ -825,7 +835,10 @@ export function boot(opts) {
   // 里面只在出生时增长 —— 见 body.js 的 updateBodies / reconcileBodies 注释。
   const bodies = new Map();
   // timeScale 的初值来自存档（C-1）：没有档可读时是 1，与 B11 以来的行为逐字节相同。
-  const state = { frame: 0, timeScale: restoredTimeScale, lastT: -1, rafId: 0, running: true };
+  // paused（计划 3 Task 5）：**不往 CONFIG.timeScales 里加一个 0**。那样 advanceLoop
+  // 会拿到 0 倍速，于是 loop.acc 每帧白攒一格，恢复的瞬间把攒下的全补掉 ——
+  // 症状是"暂停一会儿再放，世界跳一大步"。另开一条旗标才是对的。
+  const state = { frame: 0, timeScale: restoredTimeScale, lastT: -1, rafId: 0, running: true, paused: false };
 
   // 渲染层（B13：水体层；B14：生物六层）。options.renderer 的注入口保留 —— 测试要用 spy 替掉它。
   // makeCanvas 是本文件**唯一**允许创建可绘制对象的地方：render.js 拿到的是
@@ -964,6 +977,64 @@ export function boot(opts) {
     if (renderer && renderer.onResize) renderer.onResize(viewport, world.rng.fork());
   };
 
+  // ---- 计划 3 Task 5：HUD 的状态与手势分发 ----
+  // hud 在 controller 之后才挂（它要读 controller），但 step 是闭包，运行时读到的是赋值后的那个。
+  let hud = null;
+  // 两套计数器**不是重复**：hud.state.* 数的是"界面看到了什么"（截断、丢弃、开了几次卡），
+  // 这里的 hudStats 数的是"世界收到了什么"。两者的差就是漏掉的东西 ——
+  // 只留一套的话，"玩家讲了十句它一句没记住"与"输入框根本没通"在画面上长得一样。
+  const hudStats = {
+    feeds: 0, foodRejected: 0, tells: 0, wordsHeard: 0,
+    renames: 0, rejectedNames: 0, gestures: 0, scatters: 0,
+  };
+  const gesture = { lastUpAt: NO_TIME };
+
+  // 投食的唯一入口。**必须**走 spawnFood（sim.js:349）而不是自己往 world.foods 里 push：
+  // 那个函数管 id 发号、clamp01、以及"未知食物种类抛错"（原型键 'toString' 那种）。
+  function feedAt(kind, nx, ny) {
+    if (world.foods.length >= CONFIG.foodMax) { hudStats.foodRejected += 1; return null; }
+    hudStats.feeds += 1;
+    return spawnFood(world, kind, { x: nx, y: ny });
+  }
+  function scatterAt(nx, ny) {
+    // 撒食 = 一次三颗光藻（光藻是唯一"会自然再生"的基础食物，spec §6.2），
+    // 横向摊开一点点，免得三颗叠成一颗。
+    let made = 0;
+    for (let i = -1; i <= 1; i++) {
+      if (feedAt('algae', nx + i * 0.02, ny)) made += 1;
+    }
+    if (made > 0) hudStats.scatters += 1;
+    return made;
+  }
+
+  function dispatchGesture(xPx, yPx, heldMs, movedPx) {
+    const kind = classifyPress({ heldMs, movedPx });
+    const nx = xPx / viewport.width, ny = yPx / viewport.height;
+    if (kind === 'swipe') { scatterAt(nx, ny); return; }
+    const hit = pickCreature(world.creatures, viewport, xPx, yPx);
+    if (!hud) return;
+    if (kind === 'hold') {
+      if (hit) hud.setCard(hit, world, { focusName: true });
+      else scatterAt(nx, ny);
+      return;
+    }
+    hud.setCard(hit, world);          // 点空白 ⇒ hit 为 null ⇒ 关卡
+  }
+
+  // 每帧收一次"已完成的按压"。upAt 是单槽寄存器（见 input.js），所以这里比的是
+  // "比上次消费过的那一次更新吗"，而不是"现在按着吗" —— 后者会漏掉整把掉在两个
+  // 帧之间的那种快按（手机掉帧时间隙能到 100ms 以上）。
+  function consumeGesture() {
+    const tr = input.tracker;
+    if (!(tr.upAt > gesture.lastUpAt)) return;
+    gesture.lastUpAt = tr.upAt;
+    const heldMs = tr.upAt - tr.downAt;
+    const movedPx = Math.hypot(tr.upX - tr.downX, tr.upY - tr.downY)
+      * Math.max(viewport.width, viewport.height);
+    hudStats.gestures += 1;
+    dispatchGesture(tr.upX * viewport.width, tr.upY * viewport.height, heldMs, movedPx);
+  }
+
   const step = (t) => {
     if (!state.running) return;
     state.rafId = requestAnimationFrame(step);
@@ -980,8 +1051,11 @@ export function boot(opts) {
     // ⚠️ 放在 advanceLoop **之前**：本帧的子步必须看得见最新的手，
     // 放在之后会让"手进缸"的那一帧里所有生物都还在按旧位置决策（读起来慢半拍）。
     input.poll(t);
+    consumeGesture();
 
-    const steps = advanceLoop(loop, frameDt, state.timeScale);
+    // 暂停 = 不推进模拟，但**帧循环照跑**（画面、HUD、输入都要还能响应）。
+    // 不调 advanceLoop 而不是喂它一个 0：见上面 state.paused 那条注释里的"攒一格补一大步"。
+    const steps = state.paused ? 0 : advanceLoop(loop, frameDt, state.timeScale);
     for (let i = 0; i < steps; i++) {
       tickWorld(world, CONFIG.fixedDt);
       updateBodies(bodies, world, CONFIG.fixedDt);
@@ -1042,6 +1116,11 @@ export function boot(opts) {
     // 而决策 A 说得很清楚：气泡与「啾」要一起晚一点出现，而不是各响一次。
     if (audio) audio.consume(events, world);
     world.events.length = 0;
+    // HUD 每帧一眼（计划 3）。放在**最后**：它读的是本帧推进完的世界与刚清空过的事件队列，
+    // 放前面会读到上一帧的读数。它自己按 CONFIG.hud.cardRefreshMs 节流重排，
+    // 并且**一个字节都不写世界** —— 那条由 tests/hud-boot.test.js 用"开 HUD 与关 HUD
+    // 跑同样的帧，世界投影逐字段相同"钉住。
+    if (hud) hud.frame(t, world);
   };
 
   const controller = {
@@ -1090,6 +1169,15 @@ export function boot(opts) {
       state.timeScale = scale;
     },
     getTimeScale() { return state.timeScale; },
+    // ---- 计划 3 Task 5：暂停与 HUD ----
+    // 暂停与 stop() 是两件事：stop 会 detach 输入、关音频、摘掉所有监听、取消 rAF，
+    // 那是"关缸"。暂停只让模拟不推进，帧循环、画面、输入、HUD 全都还活着。
+    setPaused(value) { state.paused = !!value; return state.paused; },
+    getPaused() { return state.paused; },
+    // HUD 实例（boot({hud:false}) 时是 null）与"世界收到了什么"那一套计数器。
+    // 设置页与取证都读这两个：hud.state.* 是界面侧的账，hudStats 是世界侧的账。
+    get hud() { return hud; },
+    hudStats,
     stop() {
       state.running = false;
       if (state.rafId) cancelAnimationFrame(state.rafId);
@@ -1114,9 +1202,64 @@ export function boot(opts) {
       // 假世界盖掉玩家真读过的那一份 —— 恰好是 R-1 禁止的那个形状。
       save.detach();
       window.removeEventListener('resize', resize);
+      // HUD（计划 3）：缸停了界面也要跟着没，否则留下一个"按了什么都不做"的空壳 ——
+      // 那正是 §5.4.1 第 8 条拒绝静音键时用的同一条理由。
+      // 只 destroy 不置 null：controller.hud 这个读数要还能拿到（它的按钮回调已经是死的，
+      // 调用不抛 —— tests/hud-boot.test.js 钉着这一点）。
+      if (hud) hud.destroy();
       if (activeController === controller) activeController = null;
     },
   };
+
+  // ---- 挂 HUD（计划 3 Task 5）----
+  // 位置要紧：必须在 controller 之后（它要读 setTimeScale/setMuted/saveState 那套），
+  // 也必须在 world 装完档之后（否则第一帧的卡会读到一个还没恢复完的世界）。
+  // options.hud === false 是测试与"我就是想要一个没界面的缸"的注入口，
+  // 与 options.renderer / audio / input 同形。
+  if (options.hud !== false) {
+    hud = mountHud(document, {
+      controller,
+      audioState,
+      onFeed: (kind) => feedAt(kind, 0.5, 0.5),
+      // **hear() 在全仓的第一个生产者。** 它要的三个东西都得现算：
+      //   mood —— 只用来定"这个词值多少分"（CONFIG.heard.moodPrice），**不上 HUD**；
+      //   need —— 最紧的那条需求（hear 的 opts.need 是必填项，没有默认）；
+      //   rng   —— 必须是 speechRng：hear 内部会 next()，走主流会让
+      //            "关掉文字层 ⇒ 世界逐字节相同"那条承诺当场作废。
+      //            那条由 tests/hud-boot.test.js 的「主流一步不许动」钉着。
+      onTell: (creature, text) => {
+        if (!creature) return;
+        hudStats.tells += 1;
+        const mood = moodOf(creature.emotions, creature.needs, creature.memory,
+          { adversity: creature.mourn > 0 });
+        const heard0 = creature.heard.length;
+        hear(creature, text, world.speechRng, world.time,
+          { mood, need: mostUrgent(creature.needs) });
+        hudStats.wordsHeard += creature.heard.length - heard0;
+      },
+      // customName 的**生产者**。它的消费者在 Task 6（同窝去重不许覆盖玩家取的名）。
+      onRename: (creature, name) => {
+        if (!creature) return;
+        if (!name) { hudStats.rejectedNames += 1; return; }
+        creature.name = name;
+        creature.customName = true;
+        hudStats.renames += 1;
+      },
+      onScatter: (xPx, yPx) => scatterAt(xPx / viewport.width, yPx / viewport.height),
+      // 文字层开关写的是 **world**，不是 CONFIG（CONFIG 深冻结，而且它是默认值不是运行时状态）。
+      // 读回来也是 world.speechEnabled（sim.js 的 restoreWorld 认这个字段），所以设置页
+      // 不需要自己存一份 —— 少一处状态就少一处会不一致的地方。
+      onSpeech: (on) => { world.speechEnabled = !!on; },
+    });
+    // 八张肖像**在开缸时就交给浏览器**（README 那句 "load images once, do not instantiate
+    // Image during frame rendering"）。用一个游离的 <img> 预热缓存：真浏览器会为它发请求，
+    // 而它不挂在任何地方，不参与布局。等玩家第一次打开信息卡时图已经在内存里了。
+    for (const src of hud.preload) {
+      const warm = document.createElement('img');
+      warm.setAttribute('src', src);
+      warm.setAttribute('alt', '');
+    }
+  }
 
   window.addEventListener('resize', resize);
   resize();

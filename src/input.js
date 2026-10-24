@@ -120,6 +120,12 @@ export function createHandTracker(opts) {
     // upAt 让"有一次已完成的按压还没被消费"这件事本身可读。
     downAt: NO_TIME,
     upAt: NO_TIME,
+    // 按下点与抬起点（**归一化**，与 pos 同一坐标系）。
+    // 为什么不用消费者自己从 poll 的 pos 累加位移：一次"按下+抬起整个掉在同一帧间隙"的
+    // 快按，poll 一次都看不见那只手，累加出来是 0 也**不知道它发生在哪儿**。
+    // 有了这两个点，手势层算"按下到抬起的直线跨度"就够了 —— 代价是"绕一圈回到原点"
+    // 的划动会被读成点按，那是可接受的取舍（真人不会那样投食），写在这里而不是藏着。
+    downX: 0, downY: 0, upX: 0, upY: 0,
     active: false,      // 有可用读数（state() 非 null）
     lastInsertT: NO_TIME,
     samples: { t: new Float64Array(max), x: new Float64Array(max), y: new Float64Array(max) },
@@ -239,16 +245,27 @@ export function createHandTracker(opts) {
     // 症状是点一下开卡、再点一下同一只，卡却关不掉。
     tracker.upAt = NO_TIME;
     observe(t, clientX, clientY, cssWidth, cssHeight);
+    tracker.downX = tracker.reading.x;
+    tracker.downY = tracker.reading.y;
   };
 
   // 手离开了。**必须**把 active 清掉并把缓冲倒空：
   // 留着的话下一次按下的第一笔速度会跟上一次的手势做差（跨手势的假速度可以大到几十），
   // 于是"刚伸出的手"会被当成猛戳，生物在玩家每次重新伸手时都被吓一次。
-  tracker.release = (t) => {
+  tracker.release = (t, clientX, clientY, cssWidth, cssHeight) => {
     // 抬起时刻记一笔就走，**downAt 不许清**：按住多久是"抬起之后"才要算的。
     // 残留的限制只有一条：upAt 是一个单槽寄存器，"同一帧里完成两次按压"会丢第一次 ——
     // 那要两个完整的按下+抬起挤在 16.7ms 内，人手做不到，所以不为此上一队列。
     tracker.upAt = Number.isFinite(t) ? t : NO_TIME;
+    // 抬起点。坐标缺省时（某些 lostpointercapture）**退回按下点**而不是清零 ——
+    // 清成 (0,0) 会让"在缸边长按撒食"变成"在左上角点按"，那是指错地方而不是没指地方。
+    if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
+      tracker.upX = normalize(clientX, cssWidth);
+      tracker.upY = normalize(clientY, cssHeight);
+    } else {
+      tracker.upX = tracker.downX;
+      tracker.upY = tracker.downY;
+    }
     tracker.down = false;
     tracker.active = false;
     tracker.count = 0;
@@ -313,9 +330,9 @@ export function attachInput(target, onHand, opts) {
     vh = s && s.height > 0 ? s.height : 1;
   }
 
-  function lift() {
+  function lift(ev) {
     trackedId = null;
-    tracker.release(now());
+    tracker.release(now(), ev && ev.clientX, ev && ev.clientY, vw, vh);
     if (reported) {
       reported = false;
       onHand(null);
@@ -344,7 +361,7 @@ export function attachInput(target, onHand, opts) {
   const onUp = (ev) => {
     if (trackedId === null) return;
     if (ev && ev.pointerId !== undefined && ev.pointerId !== trackedId) return;
-    lift();
+    lift(ev);
   };
 
   // lostpointercapture 是"捕获被系统收回"的兜底（例如目标被移除）。

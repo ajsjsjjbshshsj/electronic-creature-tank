@@ -246,9 +246,12 @@ export function mountHud(doc, deps) {
   const card = el(doc, 'div', 'hud-card', root);
 
   // ---- 右上：倍速 / 暂停 / 静音 / 设置 ----
-  // 音频被浏览器拒绝时**不挂静音键**（spec §5.4.1 第 8 条）：一个按了永远没反应的按钮
-  // 不是"降级"，是骗人。
-  const audioBlocked = !!(d.audioState && d.audioState.ok === false);
+  // 音频被浏览器**明确拒绝**时才不挂静音键（spec §5.4.1 第 8 条）：一个按了永远没反应的
+  // 按钮不是"降级"，是骗人。
+  // ⚠️ 必须同时判 tried：开缸那一刻 audioState 还是 `{tried:false, ok:false}`（AudioContext
+  // 要等第一次真实手势才创建），那时 ok 也是 false —— 只看 ok 会让静音键**永远不出现**，
+  // 直到玩家按下第一下才补上，而那正是按钮该在的地方。
+  const audioBlocked = !!(d.audioState && d.audioState.tried && d.audioState.ok === false);
   for (const s of CONFIG.timeScales) {
     const b = button(doc, controls, `${s}×`, 'hud-scale');
     b.addEventListener('click', () => api.pressScale(s));

@@ -1903,3 +1903,48 @@ grep 级判据对它是瞎的。这就是为什么那条测试要写成行为级
 食物标签少一个 · 好感度从 CSS 变量改成写进文字（那条专抓 §6.3"不写数字"）。
 
 **顺带**：`--safe-*` 四个变量（`css/main.css:37-42` 声明后一直没人消费）从这一版起真的被用了。
+
+### Task 5（2026-10-23 做完）—— 接线；一条判据**连骗我两次**，最后换了测法
+
+**接上的东西：**`state.paused` + `controller.setPaused/getPaused`（不往 `CONFIG.timeScales` 加 0，
+理由见 §Global Constraints 第 5 条与代码注释里的"攒一格补一大步"）；`consumeGesture()` 每帧收一次
+已完成的按压；`dispatchGesture` 把 tap/hold/swipe 分发到开卡 / 改名 / 撒食；`feedAt`/`scatterAt`
+走 `spawnFood`；**`hear()` 在全仓的第一个生产者**；`mountHud(document, deps)`；step 末尾 `hud.frame`；
+`stop()` 摘 HUD；`boot({hud:false})` 注入口。
+
+**计划里写的三处，实现时改了：**
+
+| # | 计划 | 实际 | 为什么 |
+|---|---|---|---|
+| 1 | 手势层自己累加每帧位移算 `movedPx` | `input.js` 补 `downX/downY/upX/upY`，跨度用按下点↔抬起点直线算 | 一次"按下+抬起整个掉在同一帧间隙"的快按，`poll` 一次都看不见那只手 —— 累加出来是 0，而且**不知道它发生在哪儿**。代价（绕一圈回到原点的划动会被读成点按）写在注释里，不藏 |
+| 2 | 时钟用 `state.lastT`，"不引入新调用点" | 按压时刻仍走 `input.js` 的 `defaultNow` | 用最后一次 rAF 的时间戳的话，同一帧间隙内的 down 与 up 读到**同一个 t** ⇒ 长按永远判不出来。`defaultNow` 本来就在 input.js 里，不是新引入的 |
+| 3 | `stop()` 里 `hud = null` | 只 `destroy()`，不置 null | `controller.hud` 这个读数 stop 之后还要拿得到；置 null 会让"停了再按按钮不抛"那条测试直接 TypeError |
+
+**一条判据连骗两次 —— 这是本轮最值得记的事。**
+判据：「tell 只许走 `speechRng`，不许碰模拟主流」（全局约束第 7 条的直接推论）。
+
+1. 第一版写 `JSON.stringify(world.rng)` 前后比对。探针（把 `hear` 的 rng 参数换成 `world.rng`）**活着**。
+   根因：mulberry32 的状态是**闭包里的一个数**（`rng.js:5`），对象上全是函数，stringify 恒等于 `{}`。
+2. 第二版改成"两缸同种子、只差一次 tell，之后各抽三个数比对"。探针**又活着**。
+   根因更深：那只个体的 `curious` 让 `selectCandidates` 走了 `uniq.length <= n` 的**早退分支**，
+   一次随机数都没消费 ⇒ 两缸当然相同。判据不是"弱"，是**根本没跑到那条路径上**。
+   而且我给它配的反向哨兵（"speechRng 必须不同"）也是假的：tell 改了 `heard` ⇒ 之后出词不同
+   ⇒ speechRng 消耗自然不同，它测的并不是"hear 从哪儿抽的数"。
+3. 第三版不比结果，**直接数调用**：两个 rng 各包一层计数器，tell 之后主流必须 0 次、
+   `speechRng` 必须 > 0 次（后者不成立就报"这条在空转"），并把 `curious` 设成 0 强制走抽样那条路。
+   这回探针死了。
+
+**推论（写下来防再犯）：** 判"某段代码没碰某个资源"时，**数它对那个资源的调用次数**，
+不要用"前后状态相同"来反推 —— 状态相同可能只是因为**根本没走到那儿**。
+
+**十道探针全红：** 暂停旗标不生效 · tell 走主流 · 改名不置 customName · 空名字照写 ·
+投食不查上限 · 按压用 `>=` 判（重复消费）· 不挂 `hud.frame` · stop 不摘 HUD ·
+`hud:false` 被忽略 · onTell 不调 hear（反证那条判据不空转）。
+
+**顺带修掉的一条真 bug：**静音键的显隐原本只看 `audioState.ok === false`。开缸那一刻它是
+`{tried:false, ok:false}`（AudioContext 要等第一次真实手势才创建），只看 `ok` 会让那颗按钮
+**永远不出现**。条件补上 `tried`。这条是 boot 级测试逼出来的 —— 纯层测试里我手写的
+`audioState` 恰好是 `{tried:true, ok:true}`，看不见。
+
+**波及面如实记：** `boot()` 现在会挂 HUD，所以 6 个既有测试文件里那 11 处 `boot({...})`
+全部加了 `hud: false`（它们的 document 桩没有 `body`）。HUD 自己的路径由本文件覆盖。

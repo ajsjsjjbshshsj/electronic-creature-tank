@@ -333,3 +333,13 @@ test('整棵 HUD 树里搜不到"心情"二字（§13.2 第 4 条的最后一道
   hud.setCard(mk({ emotions: { anger: 1 } }), W([mk({ emotions: { anger: 1 } })]));
   assert.ok(!dump(root).includes('心情'), dump(root).slice(0, 400));
 });
+
+test('还没试过音频时静音键**要在**：只看 ok 会把它永远藏掉（Task 5 抓到的一条）', () => {
+  // 开缸那一刻真页面的 audioState 是 {tried:false, ok:false} —— AudioContext 要等
+  // 第一次真实手势才创建。如果判据只看 ok===false，静音键就**永远不出现**，
+  // 直到玩家按下第一下才补上，而那正是按钮该在的位置旁边。
+  const { root } = mount({ audioState: { tried: false, ok: false, reason: null } });
+  assert.ok(find(root, 'button', 'hud-mute'), '还没试过就当"被拒绝"，静音键从此消失');
+  const blocked = mount({ audioState: { tried: true, ok: false, reason: 'unsupported' } });
+  assert.equal(find(blocked.root, 'button', 'hud-mute'), null, '明确被拒绝时才该藏');
+});

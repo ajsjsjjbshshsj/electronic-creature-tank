@@ -715,7 +715,7 @@ test('main.js 接上真 renderer 后，身体真的被画进了主 ctx（每只 
   g.requestAnimationFrame = (cb) => { raf.push(cb); return raf.length; };
   g.cancelAnimationFrame = () => {};
   try {
-    const controller = boot({ canvas: canvasEl, seed: 20261023 });
+    const controller = boot({ hud: false, canvas: canvasEl, seed: 20261023 });
     const step = () => raf[raf.length - 1];
     for (let i = 0; i <= 30; i++) step()(i * (1000 / 60));
     const n = controller.bodies.size;

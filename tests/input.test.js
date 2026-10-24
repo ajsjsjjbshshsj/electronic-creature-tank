@@ -574,7 +574,7 @@ test('boot 之后：一次真实指针手势必须把 world.playerHand 写进内
   g.cancelAnimationFrame = () => {};
   try {
     // 不注入手势层本身 —— 这条要验的就是**真的** attachInput 被接上了 boot。
-    const controller = boot({ canvas: target, seed: 20261026, renderer: { draw() {}, onResize() {} } });
+    const controller = boot({ hud: false, canvas: target, seed: 20261026, renderer: { draw() {}, onResize() {} } });
     const world = controller.world;
     assert.equal(world.playerHand, null, '开缸时手不在缸里');
     assert.ok(controller.input, 'controller 必须暴露 input（性能与台账都靠它取证）');
@@ -697,5 +697,35 @@ test('抬手之后再来一次按下，前一次的 upAt 被清干净（不重�
   clock = 700;
   target.emit('pointerdown', PEV(10, 10, 1));
   assert.equal(input.tracker.upAt, NO_TIME, '新的一次按下必须让"上一次已完成"这件事失效');
+  input.detach();
+});
+
+test('按下点与抬起点都留得住（掉在同一帧间隙里的快按也要有"发生在哪儿"）', () => {
+  const t = tracker();
+  t.press(1000, 450, 310, 900, 620);
+  assert.equal(t.downX, 0.5);
+  assert.equal(t.downY, 0.5);
+  t.release(1010, 450, 310, 900, 620);
+  assert.equal(t.upX, 0.5);
+  assert.equal(t.upY, 0.5);
+});
+
+test('release 拿不到坐标时抬起点**退回按下点**，不清成 (0,0)', () => {
+  // 清成原点的话，"在缸边长按撒食"会变成"在左上角点按"：指错地方比没指地方更糟。
+  const t = tracker();
+  t.press(1000, 810, 558, 900, 620);
+  t.release(1600);
+  assert.equal(t.upX, t.downX);
+  assert.equal(t.upY, t.downY);
+  assert.ok(t.upX > 0.8 && t.upY > 0.8, '抬起点被清掉了');
+});
+
+test('attachInput 端到端：抬起点就是手指离开屏幕的那个位置', () => {
+  const target = makeTarget();
+  const input = attachInput(target, () => {}, { now: () => 500 });
+  target.emit('pointerdown', PEV(300, 200, 9));
+  target.emit('pointerup', PEV(300, 200, 9));
+  assert.ok(Math.abs(input.tracker.upX - 300 / W) < 1e-9, `${input.tracker.upX}`);
+  assert.ok(Math.abs(input.tracker.upY - 200 / H) < 1e-9);
   input.detach();
 });
