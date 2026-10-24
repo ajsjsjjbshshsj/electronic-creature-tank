@@ -1146,7 +1146,7 @@ test('boot：按下之前一次都没创建音频图；首次 pointerdown 才创
     const g = createGraphStub({});
     let made = 0;
     window.AudioContext = function FakeAudioContext() { made += 1; return g; };
-    const controller = boot({
+    const controller = boot({ hud: false,
       canvas: target, seed: 20261022,
       renderer: { draw() {}, onResize() {} },
     });
@@ -1186,7 +1186,7 @@ test('boot：工厂抛错时降级 —— 缸照常跑、原因可读、不重�
     const origWarn = console.warn;
     console.warn = (...args) => { warns.push(args.join(' ')); };
     window.AudioContext = function Boom() { tries += 1; throw new Error('NotAllowedError'); };
-    const controller = boot({ canvas: target, seed: 20261023, renderer: { draw() {}, onResize() {} } });
+    const controller = boot({ hud: false, canvas: target, seed: 20261023, renderer: { draw() {}, onResize() {} } });
     try {
       const step = () => raf[raf.length - 1];
       target.emit('pointerdown', pointer(300, 300));
@@ -1215,7 +1215,7 @@ test('boot：本浏览器没有 AudioContext 时是"不支持"，可读、只打
     const origWarn = console.warn;
     let warns = 0;
     console.warn = () => { warns += 1; };
-    const controller = boot({ canvas: target, seed: 20261024, renderer: { draw() {}, onResize() {} } });
+    const controller = boot({ hud: false, canvas: target, seed: 20261024, renderer: { draw() {}, onResize() {} } });
     try {
       target.emit('pointerdown', pointer(400, 400));
       const step = () => raf[raf.length - 1];
@@ -1236,7 +1236,7 @@ test('boot：控制器与模块级都拿得到静音；stop 会 close 音频图'
   withBrowserGlobals(({ target, raf, window }) => {
     const g = createGraphStub({});
     window.AudioContext = function Fake() { return g; };
-    const controller = boot({ canvas: target, seed: 20261025, renderer: { draw() {}, onResize() {} } });
+    const controller = boot({ hud: false, canvas: target, seed: 20261025, renderer: { draw() {}, onResize() {} } });
     try {
       target.emit('pointerdown', pointer(500, 500));
       assert.equal(controller.getMuted(), false, '默认开（spec §5.4）');
@@ -1266,7 +1266,7 @@ test('boot：注入的 audio 替身收到 consume(events, world)，main.js 不�
       close() {},
     };
     window.AudioContext = function Fake() { return createGraphStub({}); };
-    const controller = boot({ canvas: target, seed: 20261026, audio: fake, renderer: { draw() {}, onResize() {} } });
+    const controller = boot({ hud: false, canvas: target, seed: 20261026, audio: fake, renderer: { draw() {}, onResize() {} } });
     try {
       const c = controller.world.creatures[0];
       controller.world.events.push({ kind: 'say', id: c.id, text: '喵', tokens: ['喵'], mood: 'calm' });

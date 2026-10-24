@@ -420,7 +420,7 @@ test('resize 不重映射任何 c.pos（架构决定 5：spec §3.4-2 那句在�
   g.requestAnimationFrame = (cb) => { raf.push(cb); return raf.length; };
   g.cancelAnimationFrame = () => {};
   try {
-    const controller = boot({ canvas: canvasEl, renderer: spyRenderer, seed: 20261020 });
+    const controller = boot({ hud: false, canvas: canvasEl, renderer: spyRenderer, seed: 20261020 });
     const world = controller.world;
     assert.ok(typeof controller.viewport.scale === 'number' && controller.viewport.scale > 0,
       '视口必须带 scale（世界单位→CSS 像素）');
@@ -490,7 +490,7 @@ test('main.js 把 bodies 与**模拟**秒数交给 renderer.draw（4× 下水体
   g.requestAnimationFrame = (cb) => { raf.push(cb); return raf.length; };
   g.cancelAnimationFrame = () => {};
   try {
-    const controller = boot({ canvas: canvasEl, renderer: spyRenderer, seed: 20261021 });
+    const controller = boot({ hud: false, canvas: canvasEl, renderer: spyRenderer, seed: 20261021 });
     const step = () => raf[raf.length - 1];
     step()(0);                                   // 第一帧 frameDt = 0 ⇒ 0 个子步
     step()(1000 / 60);                           // 1× 下一帧：1 个子步
@@ -547,7 +547,7 @@ test('render.js 接进 main.js 后能在 Node 里跑起来（真 renderer，不�
   g.requestAnimationFrame = (cb) => { raf.push(cb); return raf.length; };
   g.cancelAnimationFrame = () => {};
   try {
-    const controller = boot({ canvas: canvasEl, seed: 20261022 });
+    const controller = boot({ hud: false, canvas: canvasEl, seed: 20261022 });
     const step = () => raf[raf.length - 1];
     for (let i = 0; i <= 60; i++) step()(i * (1000 / 60));
     assert.ok(mainCtx.count('drawImage') > 0, '真 renderer 必须往主 ctx 上贴图');

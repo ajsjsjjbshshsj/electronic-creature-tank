@@ -1241,7 +1241,7 @@ async function withTank(opts, fn) {
     };
     if ('store' in o) bootOpts.storage = o.store;
     if ('fetcher' in o) bootOpts.fetch = o.fetcher;
-    controller = boot(bootOpts);
+    controller = boot({ hud: false, ...bootOpts });
     // 默认把内核自己的出词关掉：这些用例测的是"那一拍被怎么对待"，
     // 不是"什么时候有一拍"。世界自己说话的那条路由 natural:true 单独放开（指纹对照用的就是它）。
     // ⚠️ 这只动 world.speechEnabled 这一个运行时开关（spec §4.13.1.1 第 3 条那条通道），
