@@ -6,7 +6,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CONFIG } from '../src/config.js';
-import { ALL_GENES } from '../src/genes.js';
+import { ALL_GENES, randomGenome, decode } from '../src/genes.js';
+import { createRng } from '../src/rng.js';
+import { assertColorStop } from './ctx-stub.js';
 import { SAVE_VERSION, migrate, assertCreatureShape } from '../src/save.js';
 import { ROLES } from '../src/memory.js';
 import { createWorld, tickWorld, addCreature } from '../src/sim.js';
@@ -172,7 +174,36 @@ test('assertCreatureShape 挡住缺字段与脏 role（remember() 的门绕不�
   bad4.memory = [];                                // 没迁移过的裸数组形状
   assert.throws(() => assertCreatureShape(bad4), /entries/);
   assert.ok(!ROLES.includes('wife'), '前置条件：这个 role 确实是脏的');
+
+  // ---- 基因那一半（F-17，2026-10-25）----
+  // bad3 那条的理由在基因上同样成立，而后果大一档：记忆里的 NaN 只是"它好像不认识我了"，
+  // 基因里的 NaN 会穿过 decode 变成 hue=NaN，再变成 'hsla(NaN, 70%, 73%, 0.95)' 喂给
+  // addColorStop —— 真浏览器在那里**当场抛**，于是读档之后每一帧都飞（清单 §12.11 实测表）。
+  const bad5 = structuredClone(m.creatures[0]);
+  bad5.genes.hue = [0.5];                          // 短数组：alleles[1] 是 undefined → NaN
+  assert.throws(() => assertCreatureShape(bad5), /hue/);
+  const bad6 = structuredClone(m.creatures[0]);
+  bad6.genes.sat = 0.4;                            // 不是等位基因对，而是一个裸数
+  assert.throws(() => assertCreatureShape(bad6), /sat/);
+  const bad7 = structuredClone(m.creatures[0]);
+  bad7.genes.size = ['0.2', 0.7];                  // 字符串在 JSON 里合法，乘法里变 NaN
+  assert.throws(() => assertCreatureShape(bad7), /size/);
 });
+
+test('基因脏 → decode 出 NaN → 颜色串被 ctx 桩的域检查拦下（F-17 的因果链，不是推测）', () => {
+  // 这条判据把两端接起来：上半是"这样的基因真的会算出 NaN hue"，
+  // 下半是"NaN hue 真的会变成一个真浏览器要抛的串"。缺了下半，上一行注释就是断言不出来的说法。
+  const g = randomGenome(createRng(7));
+  g.hue = [0.5];
+  const t = decode(g);
+  assert.ok(!Number.isFinite(t.hue), `前置条件：短数组基因应当解码出 NaN hue，实测 ${t.hue}`);
+  const h = (315 + t.hue * (70 / 360)) % 360;      // 与 decode 同一类线性映射，只为造一个串
+  assert.throws(() => assertColorStop(0, `hsla(${h}, 70%, 73%, 0.95)`), /域检查/);
+  // 反空对照：正常基因出来的串必须过得了同一道检查
+  const ok = decode(randomGenome(createRng(8)));
+  assertColorStop(0, `hsla(${ok.hue}, 70%, 73%, 0.95)`);
+});
+
 
 test('memory 的两种形状都接受：存档里是裸数组，运行时是 { entries }', () => {
   // 这一条守住"存档形状只有一个定义点"。若不在这里转换，每个调用方就得各写一次兼容，
