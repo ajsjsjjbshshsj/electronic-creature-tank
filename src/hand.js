@@ -4,8 +4,8 @@
 // world.playerHand 是输入层的读数，petting 是 renderer 从既有 c.beingPetted 汇总的
 // 只读布尔 —— 这里不重新判断速度、接触半径或有没有被拎住。
 //
-// 坐标系是 CSS 像素：指尖精确落在指针上；掌心沿基准偏移向右下展开，靠边时两个轴
-// 各自镜像。抚摸时只绕指尖摆动掌心（rock），所以接触点不会滑开。
+// 坐标系是 CSS 像素：指尖精确落在指针上；掌心在右上方（手从上方落到头上），靠边时
+// 两个轴各自镜像。抚摸时只绕指尖摆动掌心（rock），所以接触点不会滑开。
 
 import { CONFIG } from './config.js';
 
@@ -27,6 +27,7 @@ export function handPoseInto(out, hand, viewport, time, petting) {
   out.dirY = 1;
   out.rock = 0;
   out.contactRadius = 0;
+  out.contactPulse = 0;
 
   if (!hand || !hand.pos) return out;
   if (!finite(hand.pos.x) || !finite(hand.pos.y)) return out;
@@ -47,20 +48,17 @@ export function handPoseInto(out, hand, viewport, time, petting) {
   const cs = Math.cos(rock);
   const sn = Math.sin(rock);
   const bx = H.offsetX * size;
-  const by = H.offsetY * size;
+  const by = H.offsetY * size;            // 负值：掌在头上方
   const ox = bx * cs - by * sn;
   const oy = bx * sn + by * cs;
 
-  // 先假定从右下方伸进来；哪一侧放不下掌心就镜像哪一侧。
-  // 掌缘也算进去：只判掌心点会让半只手仍然压在屏幕外。
-  // 镜像用**未旋转偏移 + 最大 rocking 角**的保守界，而不是当下这一帧的 ox/oy ——
-  // 否则指针停在阈值附近时，手腕每摆一下都会让整只手翻到另一边。
+  // 掌缘也算进镜像边界。reach 用未旋转的偏移模长作为保守上界，而不是当下这一帧的
+  // ox/oy —— 否则指针停在阈值附近时，手腕每摆一下都会让整只手翻到另一边。
+  // x 优先向右；y 优先向上（摸头），顶部放不下时才翻到接触点下方。
   const extent = H.palmRadius * size;
-  const turn = out.petting ? H.rockAngle : 0;
-  const maxOx = bx * Math.cos(turn) + by * Math.sin(turn);
-  const maxOy = bx * Math.sin(turn) + by * Math.cos(turn);
-  const dirX = tipX + maxOx + extent > w ? -1 : 1;
-  const dirY = tipY + maxOy + extent > h ? -1 : 1;
+  const reach = Math.hypot(bx, by);
+  const dirX = tipX + reach + extent > w ? -1 : 1;
+  const dirY = tipY - reach - extent < 0 ? -1 : 1;
 
   out.active = true;
   out.tipX = tipX;
@@ -72,5 +70,8 @@ export function handPoseInto(out, hand, viewport, time, petting) {
   out.dirY = dirY;
   out.rock = rock;
   out.contactRadius = out.petting ? size * H.contactRadius : 0;
+  out.contactPulse = out.petting
+    ? (1 - Math.cos(t * H.contactPulseRate)) * 0.5
+    : 0;
   return out;
 }

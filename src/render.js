@@ -1635,13 +1635,13 @@ function plushCapsule(ctx, ax, ay, bx, by, radius, strokeWidth) {
   ctx.moveTo(ax, ay);
   ctx.lineTo(bx, by);
   ctx.lineWidth = radius * 2 + strokeWidth * 2;
-  ctx.strokeStyle = CONFIG.colors.rose;
+  ctx.strokeStyle = CONFIG.colors.handShade;
   ctx.stroke();
   ctx.beginPath();
   ctx.moveTo(ax, ay);
   ctx.lineTo(bx, by);
   ctx.lineWidth = radius * 2;
-  ctx.strokeStyle = CONFIG.colors.sakura;
+  ctx.strokeStyle = CONFIG.colors.handSkin;
   ctx.stroke();
 }
 
@@ -1656,15 +1656,17 @@ export function drawHandLayer(ctx, renderer, viewport) {
 
   ctx.save();
   // 接触光先画：它属于指尖下方的水面，不该压在手掌上。
+  // 抚摸时两圈半径随 contactPulse 向外展开并淡出——这是"手在动"的第二个读秒通道。
   if (pose.petting) {
-    ga(ctx, H.contactAlpha, 1);
+    const pulse = pose.contactPulse;
+    ga(ctx, H.contactAlpha * (1 - pulse * 0.35), 1);
     ctx.strokeStyle = CONFIG.colors.sakura;
     ctx.lineWidth = H.contactLineWidth;
     ctx.beginPath();
-    ctx.arc(pose.tipX, pose.tipY, pose.contactRadius, 0, TAU);
+    ctx.arc(pose.tipX, pose.tipY, pose.contactRadius * (0.90 + pulse * 0.35), 0, TAU);
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(pose.tipX, pose.tipY, pose.contactRadius * 1.55, 0, TAU);
+    ctx.arc(pose.tipX, pose.tipY, pose.contactRadius * (1.35 + pulse * 0.55), 0, TAU);
     ctx.stroke();
   }
 
@@ -1672,58 +1674,60 @@ export function drawHandLayer(ctx, renderer, viewport) {
   ctx.scale(pose.dirX, pose.dirY);
   ctx.rotate(pose.rock);
   ga(ctx, H.alpha, 1);
-  ctx.fillStyle = CONFIG.colors.sakura;
-  ctx.strokeStyle = CONFIG.colors.rose;
+  ctx.fillStyle = CONFIG.colors.handSkin;
+  ctx.strokeStyle = CONFIG.colors.handShade;
   ctx.lineWidth = H.strokeWidth;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  // 四根短指：指端间距必须大于 2×fingerRadius，否则四根会粘成一只胡萝卜。
-  // 第一根的终点精确落在局部 (0,0)，也就是屏幕上的指针。
+  // 短手腕先垫在掌后：手是从屏幕外伸进来的，不是一颗悬空的圆。
   const fingerR = H.fingerRadius * pose.size;
+  plushCapsule(ctx,
+    H.offsetX * pose.size, (H.offsetY + 0.06) * pose.size,
+    (H.offsetX + 0.05) * pose.size, (H.offsetY - 0.30) * pose.size,
+    fingerR * 2.5, H.strokeWidth);
+
+  // 四根短指从宽掌的下缘垂到接触点；第一根终点精确落在局部 (0,0)，也就是指针。
   for (let i = 0; i < 4; i++) {
     const t = i / 3;
-    const bx = (H.offsetX - 0.24 + t * 0.52) * pose.size;
-    const by = (H.offsetY - 0.25 + t * 0.06) * pose.size;
-    const tx = (H.offsetX - 0.56 + t * H.fingerSpread) * pose.size;
-    const ty = (H.offsetY - 0.84 + t * H.fingerDrop) * pose.size;
+    const bx = (H.offsetX - 0.16 + t * 0.48) * pose.size;
+    const by = (H.offsetY + 0.22 + t * 0.01) * pose.size;
+    const tx = (H.offsetX - 0.18 + t * H.fingerSpread) * pose.size;
+    const ty = (t * H.fingerDrop) * pose.size;
     plushCapsule(ctx, bx, by, tx, ty, fingerR, H.strokeWidth);
   }
-  // 拇指从掌的左下侧伸出去，和四指方向明显不同；它是"这是一只手"最便宜的那条线索。
+  // 拇指朝左下岔开；它让"这是一只手"在 40px 下也读得出来。
   plushCapsule(ctx,
-    (H.offsetX - 0.15) * pose.size, (H.offsetY + 0.12) * pose.size,
-    (H.offsetX - 0.47) * pose.size, (H.offsetY + 0.02) * pose.size,
-    fingerR * 1.12, H.strokeWidth);
+    (H.offsetX - 0.02) * pose.size, (H.offsetY + 0.08) * pose.size,
+    (H.offsetX - 0.54) * pose.size, (H.offsetY + 0.18) * pose.size,
+    fingerR * 1.2, H.strokeWidth);
 
-  // 圆掌：掌缘落在 pose.palm 推出来的方位；镜像与 rocking 都由上面的变换承担。
+  // 手掌：掌缘落在 pose.palm 推出来的方位；镜像与 rocking 都由上面的变换承担。
   ctx.beginPath();
   ctx.ellipse(H.offsetX * pose.size, H.offsetY * pose.size,
     H.palmWidth * pose.size, H.palmHeight * pose.size, 0, 0, TAU);
-  ctx.fillStyle = CONFIG.colors.sakura;
+  ctx.fillStyle = CONFIG.colors.handSkin;
   ctx.fill();
   ctx.lineWidth = H.strokeWidth;
-  ctx.strokeStyle = CONFIG.colors.rose;
+  ctx.strokeStyle = CONFIG.colors.handShade;
   ctx.stroke();
 
-  // 掌垫：一枚中心垫 + 三枚小趾垫。只用来把「这是肉垫」说清楚，不参与接触判定。
-  ga(ctx, H.padAlpha, 1);
-  ctx.fillStyle = CONFIG.colors.blush;
+  // 掌背两道很浅的折线：只是让肉色块有"手背"的方向，不参与任何判定。
+  ga(ctx, 0.24, 1);
+  ctx.strokeStyle = CONFIG.colors.handShade;
+  ctx.lineWidth = H.strokeWidth * 0.8;
   ctx.beginPath();
-  ctx.ellipse(H.offsetX * pose.size, H.offsetY * pose.size,
-    H.padRadius * pose.size, H.padRadius * pose.size * 0.82, 0, 0, TAU);
-  ctx.fill();
-  const padX = H.offsetX;
-  const padY = H.offsetY;
-  const pr = H.padRadius * pose.size * 0.62;
+  ctx.moveTo((H.offsetX - 0.12) * pose.size, (H.offsetY + 0.12) * pose.size);
+  ctx.quadraticCurveTo(
+    H.offsetX * pose.size, (H.offsetY + 0.20) * pose.size,
+    (H.offsetX + 0.14) * pose.size, (H.offsetY + 0.10) * pose.size);
+  ctx.stroke();
   ctx.beginPath();
-  ctx.ellipse((padX - 0.11) * pose.size, (padY - 0.13) * pose.size, pr, pr, 0, 0, TAU);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse((padX + 0.06) * pose.size, (padY - 0.15) * pose.size, pr, pr, 0, 0, TAU);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse((padX + 0.15) * pose.size, (padY + 0.03) * pose.size, pr, pr, 0, 0, TAU);
-  ctx.fill();
+  ctx.moveTo((H.offsetX - 0.06) * pose.size, (H.offsetY - 0.04) * pose.size);
+  ctx.quadraticCurveTo(
+    (H.offsetX + 0.05) * pose.size, (H.offsetY + 0.02) * pose.size,
+    (H.offsetX + 0.16) * pose.size, (H.offsetY - 0.06) * pose.size);
+  ctx.stroke();
   ctx.restore();
   return pose;
 }
@@ -1820,7 +1824,7 @@ export function createRenderer(opts) {
     petTime: 0,           // 从本次抚摸开始累计的模拟秒；rocking 从 0 渐入，不从全局相位跳进来
     handPose: {           // 手部几何的复用容器（零分配；字段由 handPoseInto 写满）
       active: false, petting: false, tipX: 0, tipY: 0, palmX: 0, palmY: 0,
-      size: 0, dirX: 1, dirY: 1, rock: 0, contactRadius: 0,
+      size: 0, dirX: 1, dirY: 1, rock: 0, contactRadius: 0, contactPulse: 0,
     },
     // ---- B16 的每帧复用容器：drawCreature 逐只写它，各层从这里读（**零分配**，spec §5.3）----
     // ⚠️ 它是**绘制参数**，不是状态：里面没有任何计时器，所有读数都是 drawCreature 开头

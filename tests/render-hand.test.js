@@ -64,6 +64,7 @@ function createLogCtx() {
       set(v) {
         value = v;
         ops.push(`set:${name}`);
+        calls.push({ op: `set:${name}`, args: [v] });
         counts.set(name, (counts.get(name) || 0) + 1);
       },
     });
@@ -163,6 +164,45 @@ test('抚摸成立时同一个指尖多出接触光，且掌心进入 rocking', 
   assert.equal(pettedCtx.count('drawImage'), 0);
 });
 
+test('抚摸的接触圈在两帧之间真的展开，不是静态装饰', () => {
+  const world = createWorld({ seed: 741 });
+  const r = makeRenderer(world);
+  r.hand = handAt(0.5, 0.5);
+  r.petting = true;
+  const radiiAt = (t) => {
+    r.petTime = t;
+    const ctx = createLogCtx();
+    const pose = drawHandLayer(ctx, r, DESKTOP);
+    return {
+      pulse: pose.contactPulse,
+      radii: ctx.calls.filter((c) => c.op === 'arc').map((c) => c.args[2]),
+    };
+  };
+  const early = radiiAt(0.1);
+  const late = radiiAt(0.5);
+  assert.equal(early.radii.length, 2, '前置条件：两圈接触光');
+  assert.ok(late.pulse > early.pulse + 0.5,
+    `接触脉冲必须真的展开：${early.pulse} → ${late.pulse}`);
+  for (let i = 0; i < 2; i++) {
+    assert.ok(late.radii[i] > early.radii[i] + 1,
+      `第 ${i + 1} 圈半径必须向外走：${early.radii[i]} → ${late.radii[i]}`);
+  }
+});
+
+test('手心是肉色而不是星绒绒的粉色', () => {
+  const world = createWorld({ seed: 742 });
+  const r = makeRenderer(world);
+  r.hand = handAt(0.5, 0.5);
+  r.petting = false;
+  const ctx = createLogCtx();
+  drawHandLayer(ctx, r, DESKTOP);
+  const fills = ctx.calls.filter((c) => c.op === 'set:fillStyle').map((c) => c.args[0]);
+  const strokes = ctx.calls.filter((c) => c.op === 'set:strokeStyle').map((c) => c.args[0]);
+  assert.ok(fills.includes(CONFIG.colors.handSkin), '手掌/手指必须用肉色填充');
+  assert.ok(strokes.includes(CONFIG.colors.handShade), '手形描边必须用更深的肤色');
+  assert.ok(!fills.includes(CONFIG.colors.sakura), '手本体不许继续使用樱花粉');
+});
+
 test('绘制真的消费 pose：指尖/方向/摆动/掌位不是画在固定位置', () => {
   const world = createWorld({ seed: 738 });
   const r = makeRenderer(world);
@@ -183,10 +223,9 @@ test('绘制真的消费 pose：指尖/方向/摆动/掌位不是画在固定位
   assert.ok(Math.abs(rot.args[0] - pose.rock) < 1e-12,
     `rotate 必须用 pose.rock：${rot.args[0]} vs ${pose.rock}`);
 
-  const firstLine = ctx.call('lineTo');
-  assert.ok(firstLine, '前置条件：手指胶囊有终点');
-  assert.ok(Math.abs(firstLine.args[0]) < 1e-9 && Math.abs(firstLine.args[1]) < 1e-9,
-    `第一根手指的指尖必须精确落在 (0,0)：${firstLine.args}`);
+  const fingerTips = ctx.calls.filter((c) => c.op === 'lineTo');
+  assert.ok(fingerTips.some((c) => Math.abs(c.args[0]) < 1e-9 && Math.abs(c.args[1]) < 1e-9),
+    `必须有一根手指的指尖精确落在 (0,0)：${JSON.stringify(fingerTips.map((c) => c.args))}`);
 
   const palm = ctx.call('ellipse');
   const lx = CONFIG.hand.offsetX * pose.size;
@@ -213,11 +252,19 @@ test('rocking 从本次抚摸起点渐入，不会在第一帧跳满', () => {
 
   r.draw(ctx, world, bodies, DESKTOP, dt);
   assert.ok(Math.abs(r.petTime - dt) < 1e-12, '抚摸计时必须从本次接触开始');
-  assert.ok(Math.abs(r.handPose.rock) < 0.01,
+  assert.ok(Math.abs(r.handPose.rock) < 0.03,
     `第一帧摆动必须接近 0（渐入），实测 ${r.handPose.rock}`);
 
-  for (let i = 0; i < 60; i++) r.draw(ctx, world, bodies, DESKTOP, dt);
-  assert.ok(r.handPose.rock > 0.05, `约 1 秒后摆动必须长出来，实测 ${r.handPose.rock}`);
+  let maxRock = 0;
+  let maxPulse = 0;
+  for (let i = 0; i < 60; i++) {
+    r.draw(ctx, world, bodies, DESKTOP, dt);
+    maxRock = Math.max(maxRock, Math.abs(r.handPose.rock));
+    maxPulse = Math.max(maxPulse, r.handPose.contactPulse);
+  }
+  assert.ok(maxRock > 0.12,
+    `约 1 秒内摆动必须长到看得见（>0.12 rad），实测峰值 ${maxRock}`);
+  assert.ok(maxPulse > 0.8, `接触圈也必须在同一段里明显展开，实测峰值 ${maxPulse}`);
 
   c.beingPetted = false;
   r.draw(ctx, world, bodies, DESKTOP, dt);

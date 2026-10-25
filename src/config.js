@@ -730,26 +730,25 @@ const CONFIG = {
   // 手只在按下时存在（world.playerHand 非 null），没有任何输入层的第二条状态。
   // 这里只放表现层的尺寸与动作常数；抚摸成立与否仍读内核的 c.beingPetted。
   hand: {
-    minPx: 48,                 // 手掌基准尺寸下限（CSS px）：手机上再小就读不出是手
-    maxPx: 76,                 // 上限：桌面上不能大到盖住整只成体
-    viewportRatio: 0.09,       // 短边 × 此值；再做上下夹取
-    offsetX: 0.56,             // 指尖 → 掌心的基准偏移（× 手掌尺寸）
-    offsetY: 0.84,
-    palmRadius: 0.34,          // 掌缘外扩；边缘镜像要把它算进去，否则掌心仍在屏幕外
-    palmWidth: 0.34,           // 掌心椭圆的半宽（× 手掌尺寸）
-    palmHeight: 0.30,          // 掌心椭圆的半高
-    fingerRadius: 0.06,        // 单根手指的胶囊半宽；太粗会四根粘成一只胡萝卜
-    fingerSpread: 0.60,        // 四指指端的横向总跨度（相邻间距 = 此值 / 3）
-    fingerDrop: 0.18,          // 四指指端的纵向落差
-    padRadius: 0.055,          // 掌垫小圆点半径
-    rockRate: 2.2,             // 抚摸时手腕摆动的角速度（rad/s）
-    rockAngle: 0.1,            // 最大摆角（rad）：只摆掌，指尖不动
-    contactRadius: 0.22,       // 指尖接触光半径（× 手掌尺寸）
-    contactAlpha: 0.55,        // 接触光透明度
-    contactLineWidth: 1.4,     // 接触光描边（CSS px）
-    alpha: 0.78,               // 手整体透明度：能看出是实体手，又不遮住下面的生物
-    padAlpha: 0.36,            // 掌垫细节透明度
-    strokeWidth: 1.6,          // 掌缘与手指描边（CSS px）
+    minPx: 40,                 // 布局尺度下限（CSS px）：比旧版小一号，避免盖住整只成体
+    maxPx: 56,                 // 上限
+    viewportRatio: 0.07,       // 短边 × 此值；再做上下夹取
+    offsetX: 0.18,             // 指尖 → 掌心的横向偏移（× 布局尺度）；掌心在右侧
+    offsetY: -0.48,            // 纵向偏移为负：手从上落到头上，而不是从右下戳上来
+    palmRadius: 0.50,          // 掌缘外扩；边缘镜像要把它算进去，否则掌心仍在屏幕外
+    palmWidth: 0.46,           // 掌心椭圆的半宽：宽掌比圆掌更像手背
+    palmHeight: 0.22,          // 掌心椭圆的半高
+    fingerRadius: 0.05,        // 单根手指的胶囊半宽
+    fingerSpread: 0.54,        // 四指指端的横向总跨度（相邻间距 = 此值 / 3）
+    fingerDrop: 0.05,          // 四指指端的纵向落差
+    rockRate: 3.8,             // 抚摸时手腕摆动的角速度（rad/s）
+    rockAngle: 0.28,           // 最大摆角（rad）：只摆掌，指尖不动；这一档要肉眼读得出在摸
+    contactRadius: 0.24,       // 指尖接触光基准半径（× 布局尺度）
+    contactAlpha: 0.60,        // 接触光透明度
+    contactLineWidth: 1.3,     // 接触光描边（CSS px）
+    contactPulseRate: 5.6,     // 接触圈展开的角速度（rad/s），与手腕摆动错开相位
+    alpha: 0.90,               // 肉色手要更像实体，但半透明仍能看到下面的头
+    strokeWidth: 1.25,         // 掌缘与手指描边（CSS px）
   },
 
   // ---- 叫声（spec §5.4 的声音表 + §5.4.1 的落地裁定，2026-10-22 B18）----
@@ -868,6 +867,9 @@ const CONFIG = {
     // 纯白的眼白贴在粉色卷毛上会读成"贴纸"，而 spec §4.2 那条"不用纯黑"是同一个理由的两端。
     eyeWhite: '#FFF2F8',
     eyeHighlight: '#FFFFFF',   // 瞳孔高光那一笔是纯白：它要的就是"湿"的反光
+    // 玩家的手是真人手的颜色，不再借用生物那套樱花粉；深一号的描边负责在深紫底上读出手形。
+    handSkin: '#F2C9B8',
+    handShade: '#C98B78',
     sakura: '#FFC8DE',
     peach: '#FF9EB5',
     coral: '#FF8FA3',
