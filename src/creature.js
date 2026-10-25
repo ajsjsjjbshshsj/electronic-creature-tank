@@ -107,6 +107,10 @@ export function createCreature(opts) {
     // 同上，服务于"戳"（spec §6.1）的上升沿。戳与抚摸是同一根手指、不同速度，
     // 反应完全相反 —— 两条 episode 因此必须各自独立，不能合成一个"手在动"的布尔。
     beingPoked: false,
+    // 同上，服务于"拎"（spec 2026-10-24 §5）的上升沿。
+    // 它必须自己一条：一次拎起发一次 grabbedHappy/grabbedRough，
+    // 每 tick 发的话一次拖拽就会把 joy 或 fear 瞬间推到端点。
+    held: false,
     begIgnored: 0,
     mourn: 0,          // 哀悼剩余秒数（spec 4.11）
 

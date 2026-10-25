@@ -299,7 +299,8 @@ test('applyEvent 可以让某分量下降（负冲击）', () => {
 test('所有 EVENT_KINDS 都在 CONFIG 中有定义且不会抛错', () => {
   assert.deepEqual(
     [...EVENT_KINDS].sort(),
-    ['bumped', 'death', 'fed', 'ignored', 'laid', 'petted', 'poked', 'startled'],
+    ['bumped', 'death', 'fed', 'grabbedHappy', 'grabbedRough', 'ignored', 'laid',
+     'petted', 'poked', 'startled'],
   );
   const e = createEmotions();
   for (const kind of EVENT_KINDS) {
@@ -420,9 +421,13 @@ const MAGNITUDES = {
   startled: { fear: 0.6 },
   death:    { fear: 0.25, joy: -0.4 },
   ignored:  { anger: 0.25, joy: -0.2 },
+  // 拎着玩的两张方向表（Task 3）。scale 由调用方按 enjoy 与 (1 − enjoy) 给，
+  // 所以这里钉的是**满 scale 那一格**的幅度；两行必须成对，少一行就等于只有一种方向。
+  grabbedHappy: { joy: 0.3, fear: -0.15 },
+  grabbedRough: { anger: 0.2, fear: 0.25, joy: -0.2 },
 };
 
-test('八种事件冲击的幅度与正负号被硬编码字面量逐一钉住（mated→laid、rejected 随孤雌删除、ignored 随升级链新增）', () => {
+test('十种事件冲击的幅度与正负号被硬编码字面量逐一钉住（mated→laid、rejected 随孤雌删除、ignored 随升级链、grabbed* 随拎着玩）', () => {
   // 为什么必须有这一条：spec 8.1 对本模块的要求是「事件冲击幅度正确」，
   // 而 brief 的既有用例只给了**下界**（startled 后 fear > 0.5）、**比例**
   // （scale = 0.5 时恰好一半）与**范围**（clamp 在 [0,1]）。把 startled 的
@@ -431,7 +436,7 @@ test('八种事件冲击的幅度与正负号被硬编码字面量逐一钉住�
   // —— 数量级写错不会让任何测试变红，只会让整个交互节奏悄悄变味。
   //
   // 起点选择是这条测试的全部难点：正冲击从 0.25 起步、负冲击从 0.75 起步，
-  // 于是八个事件的所有分量都落在 (0,1) 的**严格内部**，clamp01 不参与运算，
+  // 于是十个事件的所有分量都落在 (0,1) 的**严格内部**，clamp01 不参与运算，
   // 断言到的就是常量本身而不是被边界削平后的残值。这正是 needs.test.js 里
   // 「约 120 秒」那条测试当年犯的错（窗口越过 clamp，于是检验的是 clamp01）。
   // 下面的守卫趟会把「其实已经 clamp 了」当场暴露出来，而不是让量级断言给出

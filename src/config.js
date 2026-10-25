@@ -249,6 +249,12 @@ const CONFIG = {
     inertia: 1.6,              // 每秒趋近目标值的比例系数
     eventMagnitude: {          // 事件冲击：立即生效，不走惯性
       poked:    { fear: 0.45, anger: 0.25, joy: -0.3 },
+      // 拎着玩的两个方向（spec 2026-10-24 §5）。刻意写成**两行**而不是一行带符号：
+      // applyEvent 对表里每一项乘**同一个** scale，一行写不出"不开心时 joy 降而 anger 升"。
+      // 生产者只有一处：sim.js tickCreature 的 c.held 上升沿，按 enjoy 与 (1 − enjoy) 互补缩放。
+      // grabbedRough 的每一项绝对值都不许超过 poked 对应项 —— 由 tests/config.test.js 钉。
+      grabbedHappy: { joy: 0.3, fear: -0.15 },
+      grabbedRough: { anger: 0.2, fear: 0.25, joy: -0.2 },
       petted:   { joy: 0.4, fear: -0.2 },
       fed:      { joy: 0.3 },
       bumped:   { anger: 0.35, fear: 0.1 },
@@ -442,6 +448,32 @@ const CONFIG = {
                                // （那个是模型给的名字上限，这个是玩家手打的）
     confirmArmedMs: 4000,      // "清空存档"的确认态停留时长。超过它没按第二下就自己收回 ——
                                // armed 的按钮一直亮着，等于下一次随手一按就把一缸清了。
+  },
+  grab: {
+    // 拎着玩（spec 2026-10-24 §3–§5）。阈值分两类，别混：
+    //   ① pullOutRatio 是**手感量**，只能由玩家的手一票否决（清单 §11 那一格）。
+    //      这里的初值是几何推定：behavior.petContactRatio 1.15 是"擦到毛边就算摸"，
+    //      而"拎起来"要让指尖整个越出星臂尖之外，故取 1.5（≈ 臂尖外再 0.35 倍半径）。
+    //      守卫只钉"不许与抚摸重叠"那条不等式，不钉绝对值 —— 绝对值错了不会红，
+    //      只有人手会抱怨"要拔老高才拎得起"。
+    //   ② followStiffness 是**数学量**，由 Task 2 的脚本量出来回填（95% 收敛用时 + 过冲帧数）。
+    pullOutRatio: 1.5,
+    followStiffness: 900,      // 实测回填：95% 收敛 183.3 ms、过冲 0 帧、ω·dt = 0.500。
+                               // 扫描到的边界：k=1600 已能到 150 ms 但 ω·dt=0.667；
+                               // k=2500 出现 88 帧过冲（ω·dt=0.83）⇒ 半隐式在粗步长下不是真临界阻尼。
+                               // 取"零过冲 + 离振铃点有 2.8× 裕度"这一档；嫌钝就往上调，
+                               // 但 ω·dt < 0.8 那条守卫会先拦住你（tests/grab.test.js）。
+    shakeSpeedFloor: 0.06,     // 归一化单位/秒：手速低于它不算"摇"。刻意远低于 HAND_SPEED_POKE 0.25 ——
+                               // 那两条量的不是同一件事：这条量"有没有在动"，那条分"温柔还是粗暴"。
+    shakePerSecond: 0.16,      // 每秒不适累积系数（再乘 (1 − enjoy) 与超速量）
+    affectionRate: 0.03,       // 只有 enjoy > 0.5 才买好感；取 petAffectionRate 0.06 的一半 ——
+                               // 拎着是被动承受，摸是主动讨好，不该等价
+    familiarityRate: 0.04,     // "认识"照旧买，与被它替掉的那条手停附近通道**同值**：
+                               // 玩家侧的认识速度不变，变的只是来源（叠加就是 0.08/s，见 Task 3 判据）
+    w: { clingy: 0.5, affection: 0.5, irritable: 0.35 },   // enjoyOf：三条 [0,1] 信号的归一化加权平均
+                               // （irritable 取反参与，所以易怒 = 不享受）。归一化是为了让
+                               // 默认个体**恰好**落在 0.5 中位 —— 三项直接相加会算出 0.825，
+                               // 全缸一律"喜欢被拎"，R-2 就白立了（tests/grab.test.js 钉住）
   },
   fluff: {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型

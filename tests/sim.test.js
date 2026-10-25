@@ -9,9 +9,11 @@ import { MOODS } from '../src/emotions.js';
 import { hear } from '../src/heard.js';
 import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION } from '../src/behavior.js';
+import { serialize, migrate } from '../src/save.js';
 import { thresholds } from '../src/personality.js';
 import {
   createWorld, tickWorld, perceive, addCreature, spawnFood, aliveCreatures, worldStats,
+  restoreWorld,
 } from '../src/sim.js';
 
 const step = (world, seconds, dt = 1 / 60) => {
@@ -1958,4 +1960,283 @@ test('playerHand 缺 down / appeared 时按 false 处理（老形状不许崩，
   assert.doesNotThrow(() => step(w, 1));
   assert.equal(c.beingPoked, false, '缺 down 就当没按下 —— 反过来会把每次快速移动都当成戳');
   assert.equal(c.beingPetted, false);
+});
+
+// ================================================================ 拎着玩（grab & carry，2026-10-24 Task 3）
+//
+// 内核侧的判据。这一段最要紧的一条是"拖一只 ≠ 连续戳"：
+// 不处理的话 isPoking（按下 + 手速快 + 贴上身体）对拖拽三条全满足，
+// 玩家得到的不是"我拎起了它"而是"我一动它就被连扎"。
+// 断的是**次数**（数出来就是 0）—— 断"情绪没变"在分支根本没走到时也会绿。
+
+// 夹具：默认缸（createWorld 自带初代）+ 把每只钉成 idle。
+// 钉 idle 的理由与 petTank 那条一模一样：不锁的话它自己游走，而手是固定的，
+// 接触会一会儿断一会儿，于是"拎的语义"测成了随机游走。
+const grabWorld = (opts = {}) => {
+  const w = createWorld({ seed: 20261024, ...opts });
+  w.foods.length = 0;
+  for (const c of w.creatures) {
+    c.intent = { kind: 'idle', minDuration: 1e9 };
+    ensure(c.memory, PLAYER_ID);
+  }
+  return w;
+};
+
+test('senses.playerHand.grab 不是 world.playerHand.grab 那个对象（跨帧必须拷贝）', () => {
+  const w = grabWorld();
+  const c = w.creatures[0];
+  const grab = { id: c.id };
+  w.playerHand = { pos: { x: c.pos.x, y: c.pos.y }, speed: 0, down: true, appeared: false, grab };
+  const s = perceive(w, c);
+  assert.deepEqual(s.playerHand.grab, { id: c.id });
+  assert.notEqual(s.playerHand.grab, grab,
+    '按引用搬 ⇒ 表现层改一个字段就等于写了内核的感知（main.js:932 那条 ⚠️ 说的正是这种）');
+});
+
+test('被拎的那只不受感知半径限制（甩到对面不许静默脱手）', () => {
+  const w = grabWorld();
+  const c = w.creatures[0];
+  w.playerHand = { pos: { x: 0.99, y: 0.01 }, speed: 1.2, down: true, appeared: false,
+    grab: { id: c.id } };
+  const far = Math.hypot(0.99 - c.pos.x, 0.01 - c.pos.y);
+  assert.ok(far > CONFIG.perceiveRadius * 1.5, `夹具得把手拉到感知半径之外，实距 ${far.toFixed(3)}`);
+  const s = perceive(w, c);
+  assert.ok(s.playerHand && s.playerHand.grab,
+    `半径门外 grab 就丢了 ⇒ 内核每 tick 追一个不存在的 pos（dist=${far.toFixed(3)}）`);
+});
+
+// ⚠️ needs.safety 存的是**不安全度**（spec §4.4 四条都是匮乏度；needs.js:74 的 recovery 是 `-=`，
+// :82 的 startle 是 `+=`）。所以"被吓到"= 这个数**变大**。写反一次就会得到一条
+// 永远绿的假判据 —— 这也是本文件里所有 safety 断言的读法。
+test('同一段"按下 + 快 + 贴上"的手样本：没拎是戳，拎住了就不是戳', () => {
+  const oneTick = (grabId) => {
+    const w = grabWorld();
+    const c = w.creatures[0];
+    c.traits.personality.clingy = 0.95;     // 排除"因为享受所以走了别的路径"这种巧合
+    c.traits.personality.irritable = 0;
+    c.pos = { x: 0.5, y: 0.5 };
+    w.playerHand = { pos: { x: 0.5, y: 0.5 }, speed: 0.5, down: true, appeared: false,
+      grab: grabId === null ? null : { id: grabId } };
+    const s0 = c.needs.safety;
+    tickWorld(w, CONFIG.fixedDt);
+    return { pokes: w.events.filter((e) => e.kind === 'poke').length,
+      dStartle: c.needs.safety - s0, id: c.id };
+  };
+  const poking = oneTick(null);
+  assert.ok(poking.pokes >= 1, `夹具失效：同样的手样本没 grab 时也没发 poke（${poking.pokes}）`);
+  assert.ok(poking.dStartle > 0.1,
+    `没拎时也没被 startle（Δ不安全度=${poking.dStartle.toFixed(3)}）—— 这条判据在空转`);
+  const held = oneTick(poking.id);
+  assert.equal(held.pokes, 0, '被拎的那只还是被发了 poke');
+  assert.ok(held.dStartle < 0.05,
+    `被拎住反而被吓了（Δ不安全度=${held.dStartle.toFixed(3)}）：让路只让了一半？`);
+});
+
+test('拎着 A 快速划过 B ⇒ B 的 poke 照发（让路必须逐只判，不是整只手一刀切）', () => {
+  const w = grabWorld();
+  const a = w.creatures[0];
+  const b = w.creatures[1];
+  b.pos = { x: 0.5, y: 0.5 };
+  a.pos = { x: 0.12, y: 0.12 };              // A 离得远，纯粹用来当"手里那只"
+  w.playerHand = { pos: { x: 0.5, y: 0.5 }, speed: 0.6, down: true, appeared: false,
+    grab: { id: a.id } };
+  tickWorld(w, CONFIG.fixedDt);
+  assert.ok(w.events.some((e) => e.kind === 'poke' && e.id === b.id),
+    `B 没被算成戳（整只手一刀切了？）：${JSON.stringify(w.events.map((e) => e.kind))}`);
+  assert.ok(!w.events.some((e) => e.kind === 'poke' && e.id === a.id), 'A 却被扎了');
+});
+
+// 拎着时 familiarity 只剩 carryEffects 一条通道。这条存在的理由很具体：
+// CONFIG.grab.familiarityRate 与被它替掉的那条**同值**（0.04/s），
+// 所以写成叠加就是 0.08/s —— 玩家看不出来，只有速率断言抓得住。
+test('拎着时 familiarity 只从一条通道来（一秒恰好买到 grab.familiarityRate）', () => {
+  const w = grabWorld();
+  const c = w.creatures[0];
+  const m = get(c.memory, PLAYER_ID);
+  m.familiarity = 0.2; m.affection = 0;      // 从中间值起，免得钳位把差异吃掉
+  const before = m.familiarity;
+  for (let i = 0; i < 60; i += 1) {
+    w.playerHand = { pos: { x: c.pos.x, y: c.pos.y }, speed: 0, down: true, appeared: false,
+      grab: { id: c.id } };
+    tickWorld(w, CONFIG.fixedDt);
+    w.events.length = 0;
+  }
+  const gained = get(c.memory, PLAYER_ID).familiarity - before;
+  const want = CONFIG.grab.familiarityRate;
+  assert.ok(gained > 0, '一条都没买到 ⇒ 夹具没真拎起来（grab 转发了吗？）');
+  assert.ok(gained < want * 1.6,
+    `一秒买到 ${gained.toFixed(4)}，远超多通道叠加的嫌疑（单通道 = ${want.toFixed(4)}）`);
+});
+
+// 上升沿必须靠寄存器而不是"这帧速度过阈值"判次数：倍速子步会把同一份手样本喂进多个 tick。
+test('抓住之后 grab 事件只发一次；重复拎要重复发', () => {
+  const w = grabWorld();
+  const c = w.creatures[0];
+  const hand = (on) => {
+    w.playerHand = { pos: { x: c.pos.x, y: c.pos.y }, speed: 0, down: on, appeared: false,
+      grab: on ? { id: c.id } : null };
+  };
+  hand(true);
+  let first = 0;
+  for (let i = 0; i < 20; i += 1) { tickWorld(w, CONFIG.fixedDt); first += w.events.filter((e) => e.kind === 'grab').length; w.events.length = 0; }
+  assert.equal(first, 1, `一次拎发了 ${first} 个 grab 事件`);
+  assert.equal(c.held, true);
+  hand(false);
+  tickWorld(w, CONFIG.fixedDt);
+  assert.equal(c.held, false, '松手之后寄存器没归零 ⇒ 下一次拎不会再发事件');
+  hand(true);
+  let second = 0;
+  for (let i = 0; i < 20; i += 1) { tickWorld(w, CONFIG.fixedDt); second += w.events.filter((e) => e.kind === 'grab').length; w.events.length = 0; }
+  assert.equal(second, 1, `第二次拎发了 ${second} 个`);
+});
+
+// R-2 的机器形式：性格与好感决定方向。两行的 scale 若都写成 1，抗拒的那只 joy 会涨（又哭又笑）。
+test('同一句话拎两只：黏人又好感的享受，易怒又陌生的抗拒', () => {
+  const run = (o) => {
+    const w = grabWorld();
+    const c = w.creatures[0];
+    c.traits.personality.clingy = o.clingy;
+    c.traits.personality.irritable = o.irritable;
+    ensure(c.memory, PLAYER_ID);
+    const m = get(c.memory, PLAYER_ID);
+    m.affection = o.aff; m.familiarity = 1;
+    // ⚠️ 起点必须落在 (0,1) 的**严格内部**：初代个体的 joy 出厂是 0，
+    // 于是 grabbedRough 那个 −0.2 被 clamp01 整个吃掉，测出来的是情绪惯性回收（+0.012），
+    // 而不是冲击本身 —— 这正是 emotions.test.js 那条"起点选择"注释警告过的错法。
+    c.emotions.joy = 0.55; c.emotions.anger = 0.25; c.emotions.fear = 0.25;
+    const j0 = c.emotions.joy, a0 = c.emotions.anger, f0 = c.emotions.fear;
+    w.playerHand = { pos: { x: c.pos.x, y: c.pos.y }, speed: 0, down: true, appeared: false,
+      grab: { id: c.id } };
+    tickWorld(w, CONFIG.fixedDt);
+    return { dj: c.emotions.joy - j0, da: c.emotions.anger - a0, df: c.emotions.fear - f0,
+      ev: w.events.find((e) => e.kind === 'grab') };
+  };
+  const happy = run({ clingy: 1, irritable: 0, aff: 1 });
+  const mad = run({ clingy: 0, irritable: 1, aff: 0 });
+  assert.ok(happy.ev.enjoy > 0.999, `夹具该把 enjoy 推到顶，实为 ${happy.ev.enjoy}`);
+  assert.ok(mad.ev.enjoy < 0.001, `夹具该把 enjoy 推到底，实为 ${mad.ev.enjoy}`);
+  // ⚠️ 断**确切幅度**而不是断符号：探针 P4 把 grabbedRough 的 scale 从 (1 − enjoy) 写成 1，
+  // 只断符号的两端夹具抓不住它 —— enjoy=0 时 1−enjoy 本来就等于 1，两种写法数值相同。
+  // 顶端那一格才分得开：enjoy=1 时正解是"rough 完全不参与"（+0.3），
+  // 错写是"rough 满额也上"（+0.3 − 0.2 = +0.1）。
+  assert.ok(happy.dj > 0.25, `享受的那只 joy 只涨了 ${happy.dj.toFixed(3)}（期望满 +0.3）= 两行没互补`);
+  assert.ok(mad.dj < -0.15, `抗拒的那只 joy 变了 ${mad.dj.toFixed(3)}（期望约 −0.2）`);
+  assert.ok(mad.da > 0 && mad.df > 0);
+  assert.ok(happy.ev.enjoy > mad.ev.enjoy);
+});
+
+// ---------------------------------------------------------------- 运动接管（R-6）
+// 被拎的那只走独立的临界阻尼追随，不复用 moveToward —— 后者把速率钳在 baseSpeed，
+// 症状是"一拖就脱手"。下面这三条量的都是"跟不跟手"与"松手甩不甩得出去"。
+test('拎着手在缸对面：身体朝手追，且速度可以超过 baseSpeed（moveToward 做不到）', () => {
+  const w = grabWorld();
+  const c = w.creatures[0];
+  c.pos = { x: 0.2, y: 0.5 };
+  w.playerHand = { pos: { x: 0.8, y: 0.5 }, speed: 0.6, down: true, appeared: false,
+    grab: { id: c.id } };
+  const x0 = c.pos.x;
+  tickWorld(w, CONFIG.fixedDt);
+  assert.ok(c.pos.x > x0, `没朝手走：${x0} → ${c.pos.x}`);
+  const free = createWorld({ seed: 20261024 });     // 对照：同一只不被拎，走 moveToward 的上限
+  assert.ok(c.vel.x > CONFIG.motion.baseSpeed,
+    `速度没超过 baseSpeed（${c.vel.x.toFixed(3)} ≤ ${CONFIG.motion.baseSpeed}）= 还是那条被钳的腿`);
+  assert.ok(free, '夹具对照缸建不出来');
+});
+
+// ⚠️ 这条刻意**不**断"needs 逐字节不变" —— decayNeeds 每 tick 都在动（拎着 moving=true 还多耗
+// energy），那种断言会在正确实现上红。要钉的是"撞墙这件事本身不额外吓人"，
+// 所以拿同一种子、同一只、只差手位的两条 run 比 Δ不安全度。
+const carryTo = (handX, seed = 20261024) => {
+  const w = grabWorld({ seed });
+  const c = w.creatures[0];
+  c.pos = { x: 0.2, y: 0.5 };              // 从左边出发，不然"到没到墙"根本没说
+  const s0 = c.needs.safety;
+  for (let i = 0; i < 240; i += 1) {
+    w.playerHand = { pos: { x: handX, y: 0.5 }, speed: 0.8, down: true, appeared: false,
+      grab: { id: c.id } };
+    tickWorld(w, CONFIG.fixedDt);
+    w.events.length = 0;
+  }
+  const g = w.creatures.find((x) => x.id === c.id);
+  return { x: g.pos.x, vx: g.vel.x, dSafety: g.needs.safety - s0 };
+};
+
+test('拖到墙外：身体一路追到右壁、被 clampPos 截住、撞墙那轴速度归零、且不额外吓人', () => {
+  const open = carryTo(0.5);          // 手在缸中央 ⇒ 全程不碰墙
+  const wall = carryTo(5);            // 手在缸外 ⇒ 一路压到右壁
+  assert.ok(wall.x > 0.85,
+    `夹具在空转：根本没被拖到墙边（x=${wall.x.toFixed(3)}）—— 没有 held 运动律时这条就会这样绿`);
+  assert.ok(Math.abs(open.x - 0.5) < 0.12, `对照缸跑歪了：open.x=${open.x.toFixed(3)}`);
+  assert.ok(wall.x <= 1 - CONFIG.motion.wallMargin + 1e-9, `越界了：${wall.x}`);
+  assert.ok(wall.vx <= 1e-9, `撞墙那轴还在往外推：${wall.vx}`);
+  assert.ok(wall.dSafety <= open.dSafety + 1e-6,
+    `撞墙比不撞墙更吓人（Δ不安全度 wall=${wall.dSafety.toFixed(4)} open=${open.dSafety.toFixed(4)}）`);
+});
+
+test('松手那一下 vel 不归零（惯性），下一 tick 决策重新接管', () => {
+  const w = grabWorld();
+  const c = w.creatures[0];
+  c.pos = { x: 0.4, y: 0.5 };
+  w.playerHand = { pos: { x: 0.5, y: 0.5 }, speed: 0.6, down: true, appeared: false,
+    grab: { id: c.id } };
+  tickWorld(w, CONFIG.fixedDt);
+  const fling = c.vel.x;
+  assert.ok(fling > 0, `追随没给出朝手方向的速度：${fling}`);
+  w.playerHand = { pos: { x: 0.5, y: 0.5 }, speed: 0.6, down: false, appeared: false, grab: null };
+  tickWorld(w, CONFIG.fixedDt);
+  assert.equal(c.held, false);
+  assert.ok(c.vel.x > 0, `松手即归零 = 甩不出去（${c.vel.x}）`);
+});
+
+// spec §6 那张表的最后一行："个体间碰撞照旧参与"。
+// ⚠️ 这条一开始写成"a 与 b 重叠、手按在 a 上" —— 那种夹具**在没有 held 运动律时也是绿的**
+// （a 本来就会把 b 推开），什么也没钉。现在改成：把 a 拖**进** b，
+// 于是"b 被推开"只有在 a 真的被手带着走时才发生。
+test('把 a 拖进 b：邻居被推开（held 分支不许顺手跳过碰撞）', () => {
+  const w = grabWorld();
+  const a = w.creatures[0];
+  const b = w.creatures[1];
+  a.pos = { x: 0.2, y: 0.5 };
+  b.pos = { x: 0.5, y: 0.5 };
+  const bx0 = b.pos.x;
+  for (let i = 0; i < 90; i += 1) {
+    w.playerHand = { pos: { x: 0.5, y: 0.5 }, speed: 0.3, down: true, appeared: false,
+      grab: { id: a.id } };
+    tickWorld(w, CONFIG.fixedDt);
+    w.events.length = 0;
+  }
+  assert.ok(a.pos.x > 0.45, `a 没被拖到手边（${a.pos.x.toFixed(3)}）：这条又在空转`);
+  assert.ok(Math.abs(b.pos.x - bx0) > 1e-4,
+    `b 一点没被推开（${bx0} → ${b.pos.x}）：held 分支把碰撞也跳过了？`);
+});
+
+test('held 是瞬时寄存器：入档再读回来是 false，序列化里没有 "held" 这个键', () => {
+  const w = grabWorld();
+  const c = w.creatures[0];
+  w.playerHand = { pos: { x: c.pos.x, y: c.pos.y }, speed: 0, down: true, appeared: false,
+    grab: { id: c.id } };
+  tickWorld(w, CONFIG.fixedDt);
+  assert.equal(c.held, true, '夹具没把这只拎起来，这条在空转');
+  const doc = serialize(w);
+  assert.ok(!/"held"/.test(JSON.stringify(doc)), '表现层瞬时状态入档了（spec §7.2）');
+  const w2 = createWorld({ seed: 1, initialCreatures: 0 });
+  restoreWorld(w2, migrate(JSON.parse(JSON.stringify(doc))));
+  assert.equal(w2.creatures.find((x) => x.id === c.id).held, false,
+    '读档后 held 残留 ⇒ 那只一进场就被判成"正被拎着"，而没有人会去清它');
+});
+
+test('同种子同手样本跑 300 tick ⇒ fingerprint 逐字段相同（含被拎的那只）', () => {
+  const run = () => {
+    const w = grabWorld({ seed: 20261024 });
+    const c = w.creatures[0];
+    for (let i = 0; i < 300; i += 1) {
+      const a = 0.5 + 0.2 * Math.sin(i / 9);
+      w.playerHand = { pos: { x: a, y: 0.5 }, speed: 0.3, down: true, appeared: i === 0,
+        grab: { id: c.id } };
+      tickWorld(w, CONFIG.fixedDt);
+      w.events.length = 0;
+    }
+    return JSON.stringify(fingerprint(w));
+  };
+  assert.equal(run(), run());
 });

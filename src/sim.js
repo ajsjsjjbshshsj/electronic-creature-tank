@@ -44,6 +44,7 @@ import {
   kinshipOf, crowdingFactor, layEggs, tickEgg, hatch, registerKinship, reserveEggSeq,
 } from './breeding.js';
 import { decide, EAT_DIST, HAND_SPEED_POKE } from './behavior.js';
+import { heldStep, enjoyOf, carryEffects } from './grab.js';
 
 // 与 needs / emotions / memory / behavior 里的同名函数同型：两个比较对 NaN 都是 false，
 // 所以 NaN 会**原样穿过**。这里刻意不加逐调用的有限性守卫（60Hz × 24 只的热路径），
@@ -352,6 +353,7 @@ function restoreCreature(c) {
   out.resting = false;
   out.beingPetted = false;
   out.beingPoked = false;
+  out.held = false;        // 读档后没有人正被拎着 —— 手属于输入层，档里那份 playerHand 早作废了
   return out;
 }
 
@@ -517,14 +519,25 @@ export function perceive(world, c) {
   let playerHand = null;
   if (world.playerHand) {
     const d = Math.hypot(world.playerHand.pos.x - c.pos.x, world.playerHand.pos.y - c.pos.y);
+    // down / appeared 必须一起转发：perceive 返回的是**新建的对象**，
+    // 漏抄字段就等于在感知层把输入信号丢了 —— 症状是"戳它完全没反应"，
+    // 而 input.js 与 world.playerHand 两边都是对的，最难查的那种断链。
+    const grabId = world.playerHand.grab ? world.playerHand.grab.id : null;
+    const grabbed = grabId !== null && grabId === c.id;
     // 手比同类更"显眼"：感知半径放宽到 1.5 倍，好让玩家一伸手就有反应。
-    if (d <= R * 1.5) {
-      // down / appeared 必须一起转发：perceive 返回的是**新建的对象**，
-      // 漏抄字段就等于在感知层把输入信号丢了 —— 症状是"戳它完全没反应"，
-      // 而 input.js 与 world.playerHand 两边都是对的，最难查的那种断链。
+    // ⚠️ 正被拎着的那只不受这道半径门限制：追随是有滞后度的，手甩到缸对面时
+    //    个体一时跟不上，若在这里被半径挡掉，grab 就**静默消失** ——
+    //    症状是拎着拎着娃娃自己落地，且没有任何事件说明发生过这件事。
+    if (d <= R * 1.5 || grabbed) {
       playerHand = {
         pos: world.playerHand.pos, dist: d, speed: world.playerHand.speed,
         down: !!world.playerHand.down, appeared: !!world.playerHand.appeared,
+        // grab 必须是**新对象**。main.js:932 那条 ⚠️ 说"pos 按引用搬是安全的，因为本 tick 用完"，
+        // 而抓的语义是跨帧的（c.held 会活过很多 tick）—— 按引用搬就得到隔帧读到别人的 id。
+        // ⚠️ 这里刻意**不按 c 筛**（原实现筛了，于是 isHeld 里那句 id === c.id 永远不会为假，
+        // 成了一条没有 bug 能翻它的死条件）。perceive 的职责是转发输入，"这只正被拎着"
+        // 的判定只写在 isHeld 一处 —— 探针 P2（把它改成整只手一刀切）现在抓得住。
+        grab: grabId === null || grabId === undefined ? null : { id: grabId },
       };
     }
   }
@@ -557,6 +570,16 @@ export function perceive(world, c) {
 
 // ---------------------------------------------------------------- 情绪情境
 
+// 被拎住的那只。三个谓词（戳 / 贴上抚摸 / 手停附近）都在开头让路，且**只让给它自己** ——
+// 拎着 A 划过 B 时 B 仍然算被戳。让路点只写在这一处：
+// 散到各调用方的 `if (grab) skip` 早晚会被下一个消费者漏掉。
+// senses.playerHand.grab 在 perceive 里已经按"是不是这只"筛过（sim.js 的感知段），
+// 所以这里只判有无。
+function isHeld(c, senses) {
+  const h = senses.playerHand;
+  return !!h && !!h.grab && h.grab.id === c.id;
+}
+
 // "玩家真的理它了"的唯一判定：**温柔的手**且**近到能碰上**。
 // 这个谓词有两个消费者，必须是同一个定义点，否则会出现
 // "熟悉度按 A 距离累积、冷落计时按 B 距离归零"这种自相矛盾：
@@ -568,11 +591,20 @@ function isPetting(senses) {
   return !!h && h.speed <= HAND_SPEED_POKE && h.dist < CONFIG.perceiveRadius * 0.5;
 }
 
+// 抚摸谓词的"逐只"版本：被拎住的那只不让路的话，它的 familiarity 会由两条通道同时供给
+// —— 而 CONFIG.grab.familiarityRate 与这条**同值**（0.04/s），叠加成 0.08/s 玩家看不出来，
+// 只有 tests/sim.test.js 那条速率断言抓得住。两个消费者（熟悉度通道、冷落计时）必须同一判据，
+// 所以包一层而不是在各调用点散着写 if (isHeld)。
+function isPettingNear(c, senses) {
+  return !isHeld(c, senses) && isPetting(senses);
+}
+
 // 抚摸的第二层判定：在 isPetting（温柔 + 够近）之上还要求**贴上身体**。
 // 接触半径读 sizeOf(c)/1000 —— 与 resolve() 里两只身体的接触距离同一口径。
 // 刻意不写成 `dist < 某个固定常数`：幼体与成体的"贴上去"差着一个数量级，
 // 固定数会让"摸一只幼体"变成必须把手插进它身体里才算。
 function isBeingPetted(c, senses) {
+  if (isHeld(c, senses)) return false;      // 被拎住 ⇒ "贴着身体"是追随的结果，不是玩家在摸
   const h = senses.playerHand;
   if (!h || h.speed > HAND_SPEED_POKE) return false;
   return inContact(c, h);
@@ -590,6 +622,7 @@ function inContact(c, hand) {
 // 而"没按下的快速移动"只是手划过，不该被当成攻击。
 // 缺 down 一律按 false 处理 —— 反过来（当成 true）会把每次快速划过都判成戳。
 function isPoking(c, senses) {
+  if (isHeld(c, senses)) return false;      // 拖拽天然满足"按下 + 快 + 贴上"，不让路就等于一路扎
   const h = senses.playerHand;
   if (!h || !h.down) return false;
   if (h.speed <= HAND_SPEED_POKE) return false;
@@ -627,6 +660,25 @@ function emotionCtx(c, senses) {
 // ---------------------------------------------------------------- 行动执行
 
 function executeIntent(world, c, senses, dt) {
+  // 被拎住 ⇒ 本 tick 的运动由"追随手"接管，正常意图一帧都不执行（spec 2026-10-24 §4 / R-6）。
+  // 刻意**不**复用下面的 moveToward：那条把速率钳在 CONFIG.motion.baseSpeed，
+  // 手快拖时身体追不上，症状就是"一拖就脱手"——而这件功能卖的正是"拎得起来"。
+  // 决策照旧在 tickCreature 里跑（本函数之后才轮到），所以松手之后下一 tick 自然接管，
+  // 这里不需要任何"恢复"逻辑。
+  if (isHeld(c, senses)) {
+    const s = heldStep({ pos: c.pos, vel: c.vel, target: senses.playerHand.pos,
+      dt, k: CONFIG.grab.followStiffness });
+    c.pos.x = clampPos(s.x);
+    c.pos.y = clampPos(s.y);
+    // 被墙截住的那个轴向速度归零：墙不存弹性能量（与 moveToward 撞墙的既有语义一致），
+    // 也免得松手时那一点"朝墙里冲"的速度把个体甩进墙里再抖一下。
+    c.vel.x = c.pos.x === s.x ? s.vx : 0;
+    c.vel.y = c.pos.y === s.y ? s.vy : 0;
+    c.moving = true;
+    c.resting = false;
+    return;
+  }
+
   const intent = c.intent;
   c.moving = false;
   c.resting = false;
@@ -902,7 +954,7 @@ function tickCreature(world, c, dt) {
   // 刻意只给"认识"不给"喜欢"：喜欢必须由计划 3 的抚摸输入买来。
   // 光是把手放在那儿就能刷好感的话，卖萌会退化成一个挂机计时器，
   // 而 spec 6.1 的整个要点是"温柔与否有区别"。
-  if (isPetting(senses)) {
+  if (isPettingNear(c, senses)) {
     adjustMemory(c.memory, PLAYER_ID, 0, 0.04 * dt);
   }
 
@@ -920,6 +972,41 @@ function tickCreature(world, c, dt) {
   // 跨过第二级那一刻发**一次** ignored 冲击。用 before/after 比较而不是挂标记：
   // 计时器本身单调，跨点只会发生一次，加一个 c.ignoredFired 字段反而多一个
   // 需要归零路径的状态（上一轮在 brood 结算上踩过"一次性标记挂错地方"的坑）。
+  // ---- 拎（spec 2026-10-24 §5）----
+  // 上升沿走 c.held 寄存器，与 beingPetted / beingPoked 同族：倍速子步会把同一份手样本
+  // 喂进多个 tick，靠"这帧手速过阈值"判次数必然翻倍（tests/sim.test.js 那条钉的就是这个）。
+  const heldNow = isHeld(c, senses);
+  if (heldNow !== c.held) {
+    const enjoy = enjoyOf(c, affectionFor(c.memory, PLAYER_ID));
+    if (heldNow) {
+      c.held = true;
+      applyEvent(c.emotions, 'grabbedHappy', enjoy);
+      applyEvent(c.emotions, 'grabbedRough', 1 - enjoy);
+      world.events.push({ kind: 'grab', id: c.id, enjoy });
+    } else {
+      c.held = false;
+      // speed 是"松手那一拍手有多快"—— 表现层拿它决定要不要出一声"哎呀"。
+      // 没有手了（抬起）时读不到 speed，退回本个体的速度大小，那是同一件事的近似。
+      world.events.push({ kind: 'release', id: c.id, enjoy,
+        speed: senses.playerHand ? senses.playerHand.speed
+          : Math.hypot(c.vel.x, c.vel.y) });
+    }
+  }
+  if (heldNow) {
+    const eff = carryEffects({
+      enjoy: enjoyOf(c, affectionFor(c.memory, PLAYER_ID)),
+      speed: senses.playerHand.speed, dt,
+    });
+    // 三个情绪各自钳位；这里刻意**不**用 applyEvent —— 它是"一次冲击"的形状，
+    // 而摇是连续累积，走 inertia 那条路会让 60Hz 与 120Hz 攒出不同结果。
+    c.emotions.joy = clamp01(c.emotions.joy + eff.joy);
+    c.emotions.anger = clamp01(c.emotions.anger + eff.anger);
+    c.emotions.fear = clamp01(c.emotions.fear + eff.fear);
+    if (eff.affection > 0 || eff.familiarity > 0) {
+      adjustMemory(c.memory, PLAYER_ID, eff.affection, eff.familiarity);
+    }
+  }
+
   // ---- 抚摸（spec §6.1）----
   // 温柔的手**贴着身体**才算摸：贴着才买好感，靠近只买熟悉度。
   // 这条分工是 spec §6.1 的全部要点（"温柔与否有区别"），也是"挂机刷好感"
@@ -958,7 +1045,7 @@ function tickCreature(world, c, dt) {
     applyEvent(c.emotions, 'startled');
   }
 
-  const petting = isPetting(senses);
+  const petting = isPettingNear(c, senses);
   if (petting || !senses.playerHand) {
     c.begIgnored = 0;
   } else {

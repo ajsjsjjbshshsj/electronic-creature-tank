@@ -100,6 +100,7 @@ import {
 // 那个全局，作为**实参**传进去，所以 hud.js 里连那个名字都不出现。
 import { classifyPress, pickCreature } from './gestures.js';
 import { mountHud } from './hud.js';
+import { bodyRadius, pulledOut } from './grab.js';
 import { hear } from './heard.js';
 import { moodOf } from './emotions.js';
 import { mostUrgent } from './needs.js';
@@ -939,9 +940,56 @@ export function boot(opts) {
   //   · 决策层写意图目标点时取的是 .x / .y 两个标量（不是 pos 引用）。
   //   两件事各由 tests/input.test.js 的一条钉住（「复用同一个对象是安全的」那条）。
   //   哪天内核改成把 senses.playerHand.pos 存进跨帧结构，这里就必须改成每次交付一份拷贝。
-  const input = options.input || attachInput(canvasEl, (hand) => {
+  // 拎（spec 2026-10-24 §3 / §4）：候选在按压的第一次交付（appeared）上 pick，之后**粘住**到抬起为止。
+  // 刻意不在 pointerdown 上再挂一个监听：input.js 的 appeared 已经是那条上升沿，
+  // 多挂一个就多一处"谁先跑"的时序问题，而 pickCreature 需要的坐标那一刻还没归一化好。
+  let grabCandidate = null;   // 按到的那一只（抬起前不改）
+  let grabId = null;          // 已经拎住的 id（手带离身体之后才非 null）
+  let pressHadGrab = false;   // 这一把按住期间拎起过没有 —— 抬起之后 consumeGesture 还要读它
+  const grabState = { candidateId: null, grabId: null, grabbed: 0, lost: 0, suppressed: 0 };
+
+  const onHand = (hand) => {
+    if (!hand) {
+      // 手离开缸：撤掉抓，但**不清 pressHadGrab** —— 抬起那一帧的顺序是
+      // poll(交 null) → consumeGesture，清了就没有人来让 swipe 退位了（撒一路食物的那个 bug）。
+      grabCandidate = null; grabId = null;
+      grabState.candidateId = null; grabState.grabId = null;
+      world.playerHand = null;
+      return;
+    }
+    if (hand.appeared) {
+      const hit = pickCreature(world.creatures, viewport,
+        hand.pos.x * viewport.width, hand.pos.y * viewport.height);
+      grabCandidate = hit ? hit.id : null;
+      grabId = null;
+      pressHadGrab = false;
+    }
+    if (grabCandidate !== null) {
+      const cand = world.creatures.find((x) => x.id === grabCandidate);
+      // ⚠️ 这一支必须在**已经拎住**时也跑：只判 grabId === null 的话，手里那只死了
+      //    grab 会一直挂着，内核每 tick 都在追一个不存在的 pos（画面上一团空气在动）。
+      //    dying 期间它还在 creatures 里，所以 !cand 不成立 —— alive 那一半才是主力。
+      if (!cand || cand.alive === false) {
+        grabCandidate = null; grabId = null;
+        grabState.lost += 1;
+      } else if (grabId === null) {
+        const d = Math.hypot(hand.pos.x - cand.pos.x, hand.pos.y - cand.pos.y);
+        // 距离与半径都在**世界归一化**坐标里比（bodyRadius = sizeOf/1000，
+        // 与内核 inContact 同一把尺）；moveTo 那种 CSS 像素换算只发生在测试的 emit 一侧。
+        if (pulledOut({ handDist: d, r: bodyRadius(cand) })) {
+          grabId = cand.id;
+          pressHadGrab = true;
+          grabState.grabbed += 1;
+        }
+      }
+    }
+    grabState.candidateId = grabCandidate;
+    grabState.grabId = grabId;
+    // 载荷扩展：world.playerHand 仍然是表现层**唯一**可写的字段（spec §4.1 / §7.2 那条边界不破）。
+    hand.grab = grabId === null ? null : { id: grabId };
     world.playerHand = hand;
-  }, {
+  };
+  const input = options.input || attachInput(canvasEl, onHand, {
     // 尺寸来源用**已有的视口**而不是元素的 clientWidth：
     // 那样手势期间一次布局读取都没有（input.js 默认会读元素尺寸，那是给
     // 没有视口对象的调用方用的；这里有更便宜的东西）。
@@ -1037,6 +1085,13 @@ export function boot(opts) {
     const movedPx = Math.hypot(tr.upX - tr.downX, tr.upY - tr.downY)
       * Math.max(viewport.width, viewport.height);
     hudStats.gestures += 1;
+    // 这一把真的拎起过 ⇒ 不许再按 swipe 撒食：那等于"拎着走一趟就撒一路食物"。
+    // 记 suppressed 而不是静默 return —— 被吞掉的那一次手势要查得到（spec §7.7）。
+    if (pressHadGrab) {
+      pressHadGrab = false;
+      grabState.suppressed += 1;
+      return;
+    }
     dispatchGesture(tr.upX * viewport.width, tr.upY * viewport.height, heldMs, movedPx);
   }
 
@@ -1135,6 +1190,9 @@ export function boot(opts) {
     input,           // B17：暴露给 devtools 与测试取证（metrics 里那三个计数器）
     get audio() { return audio; },        // B18：懒创建，所以按之前是 null、按之后是那个实例
     audioState,      // { tried, ok, reason } —— 降级是否发生的**唯一**可读证据
+    grabState,       // { candidateId, grabId, grabbed, lost, suppressed } —— 拎这件事的同形读数。
+                     // ⚠️ 必须是**同一个对象引用**而不是 getter 里新建一份快照：
+                     // 快照读得到初值却读不到之后的变化，测试就永远只能看见 0（清单 §9.4 那个形状）。
     getMuted() { return audio ? audio.getMuted() : muted; },
     setMuted(value) {
       // **所有权写清楚**：有音频时真相在 audio 里（它的 `muted` 初始值可被注入，spec §5.4

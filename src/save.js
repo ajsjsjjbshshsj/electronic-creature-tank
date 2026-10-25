@@ -189,7 +189,7 @@ export function assertCreatureShape(c) {
 export const CREATURE_SKIP_FIELDS = Object.freeze([
   'traits', 'thresholds', 'speech',
   'intent', 'intentTime', 'moving', 'resting',
-  'beingPetted', 'beingPoked',
+  'beingPetted', 'beingPoked', 'held',
 ]);
 
 // 世界的**运行时容器**：这些不是"状态"，而是状态赖以计算的机器，存下来必然失真。

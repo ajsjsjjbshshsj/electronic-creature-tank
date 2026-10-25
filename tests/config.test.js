@@ -100,18 +100,23 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   //    它自带一份 DEFAULTS 兜底（那时 CONFIG.hud 还不存在），Task 3 把那份收编了，
   //    于是"两处数字要同步改"这个隐患从结构上消失。行为侧由 tests/gestures.test.js 与
   //    tests/hud.test.js 钉；这里只钉"这一段的形状"。
-  assert.equal(visited.length, 61, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 61 → 63、53 → 54（2026-10-24 拎着玩 Task 1）：新增 **CONFIG.grab 一段**（两个节点：
+  //    grab 与其 w 子表；七个键里六个标量 + 一个权重子表）。
+  //    事件表的两行（grabbedHappy / grabbedRough）**留到 Task 3** 与生产者同时加 ——
+  //    constraints.test.js 那条"每种事件种类都要有生产者"会在只有行没有生产者时红，
+  //    这是计划原文的一处顺序错。数字用 node -e 跑出来：Task 1 后 63 / 54，Task 3 加两行后 **65 / 54**。
+  assert.equal(visited.length, 65, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'api', 'audio', 'avatar', 'behavior', 'blink', 'body', 'bodyPoints',
     'broody', 'colors', 'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize',
     'eggTint', 'eggsPerClutch', 'emotions', 'eye', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt',
-    'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'gridCell', 'heard', 'hop', 'hud',
+    'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'grab', 'gridCell', 'heard', 'hop', 'hud',
     'hueRange', 'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
     'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
     'populationCap', 'render', 'save', 'speech', 'stage', 'star', 'tail', 'timeScales',
-  ], 'CONFIG 顶层键名（53 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 53);
+  ], 'CONFIG 顶层键名（54 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 54);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -128,6 +133,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.save',                                                                // C-1 新增（存档落地的两个常数 + 两个键名）
     'CONFIG.avatar', 'CONFIG.avatar.file',                                        // 计划 3 Task 2 新增（HUD 肖像层：目录 + 那张八行表）
     'CONFIG.hud',                                                                 // 计划 3 Task 3 新增（HUD 的九个常数，其中三个是 gestures.js 的真相源）
+    'CONFIG.grab', 'CONFIG.grab.w', 'CONFIG.emotions.eventMagnitude.grabbedRough',  // 拎着玩（Task 1 常数 + Task 3 两张事件行）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -211,11 +217,12 @@ test('记忆容量 12，三条衰减率齐备', () => {
     '亲属的淡忘必须比普通关系慢，否则"近乎不忘"不成立');
 });
 
-test('情绪惯性与八个事件冲击都在（mated→laid，rejected 随求偶制删除，ignored 随升级链新增）', () => {
+test('情绪惯性与十个事件冲击都在（mated→laid、rejected 随孤雌删除、ignored 随升级链、grabbed* 随拎着玩）', () => {
   assert.equal(CONFIG.emotions.inertia, 1.6);
   const kinds = Object.keys(CONFIG.emotions.eventMagnitude).sort();
   assert.deepEqual(kinds,
-    ['bumped', 'death', 'fed', 'ignored', 'laid', 'petted', 'poked', 'startled']);
+    ['bumped', 'death', 'fed', 'grabbedHappy', 'grabbedRough', 'ignored', 'laid',
+     'petted', 'poked', 'startled']);
   // 'rejected' 曾经的生产者只有一处：求偶被拒。孤雌下那个场景不存在了，
   // 所以整个事件种类删掉 —— 留一个永远不会被 applyEvent 到的种类，
   // 就是 Task 9 复查抓过的"无生产者的字段"。
@@ -1016,4 +1023,50 @@ test('存档落地的四项常数：节奏用模拟秒、下限严格低于最�
   const fastestWallMs = (S.everySimSec / Math.max(...CONFIG.timeScales)) * 1000;
   assert.ok(S.minIntervalMs < fastestWallMs,
     `minIntervalMs(${S.minIntervalMs}) 必须严格小于最快倍速下的自然节奏(${fastestWallMs}ms)，否则节流会吃掉计划内的落盘`);
+});
+
+// ---------------------------------------------------------------- 拎着玩（grab & carry）
+// 这一段是 2026-10-24 计划的 Task 1。两条判据里只有形状那条是钉数的，
+// 另一条是**关系判据** —— 它拦的不是"谁改了数值"，而是"把两个手感旋钮调到互相打架"。
+// 事件表那两行（grabbedHappy / grabbedRough）**不在这里**：
+// tests/constraints.test.js 有一条"每种情绪事件种类都必须有生产者"，
+// 所以加行必须与 Task 3 的生产者同一个提交落地，否则那一轮收尾不绿。
+// 这是计划本身的一处顺序错，见 plans/2026-10-24-grab-and-carry.md 的执行日志。
+test('CONFIG.grab 一段的形状（七个键：六个标量 + 一个三项权重子表）', () => {
+  assert.deepEqual(Object.keys(CONFIG.grab).sort(),
+    ['affectionRate', 'familiarityRate', 'followStiffness', 'pullOutRatio',
+     'shakePerSecond', 'shakeSpeedFloor', 'w'],
+    `CONFIG.grab 键集变了：${Object.keys(CONFIG.grab).sort()}`);
+  assert.deepEqual(Object.keys(CONFIG.grab.w).sort(), ['affection', 'clingy', 'irritable']);
+  for (const [k, v] of Object.entries(CONFIG.grab)) {
+    if (k === 'w') continue;
+    assert.ok(Number.isFinite(v) && v > 0, `${k} 必须是正数，实为 ${v}`);
+  }
+});
+
+// 越界阈值必须严格大于抚摸接触阈值，否则"拎"与"摸"同时为真，Task 3 的让路规则白写。
+test('pullOutRatio 必须严格大于 petContactRatio —— 否则摸与拎重叠', () => {
+  assert.ok(CONFIG.grab.pullOutRatio > CONFIG.behavior.petContactRatio,
+    `重叠了：pullOutRatio ${CONFIG.grab.pullOutRatio} ≤ petContactRatio ${CONFIG.behavior.petContactRatio}`);
+});
+
+// R-3 的机器形式之一：被拎起来不许比被戳一下更疼。
+// 逐项比绝对值而不是比总和 —— 总和相同而方向调换（fear 换成 joy）也能骗过总数比较。
+test('grabbedRough 不许比 poked 更疼（逐项对比绝对值）', () => {
+  const rough = CONFIG.emotions.eventMagnitude.grabbedRough;
+  const poked = CONFIG.emotions.eventMagnitude.poked;
+  for (const [k, v] of Object.entries(rough)) {
+    assert.ok(Math.abs(v) <= Math.abs(poked[k] ?? 0) + 1e-12,
+      `${k}：被拎 ${v} 比被戳 ${poked[k]} 还狠，那没人敢碰娃娃了`);
+  }
+});
+
+// 两行必须成对：applyEvent 对每一项乘同一个 scale，
+// 少一行就等于"被拎起来只有一种方向"，R-2（性格 × 好感）当场失效。
+test('grabbedHappy 与 grabbedRough 必须成对存在，且符号方向相反', () => {
+  const happy = CONFIG.emotions.eventMagnitude.grabbedHappy;
+  const rough = CONFIG.emotions.eventMagnitude.grabbedRough;
+  assert.ok(happy.joy > 0, '享受那一行该升 joy');
+  assert.ok(rough.joy < 0, '抗拒那一行该降 joy —— 两行同号就等于只有一行');
+  assert.ok(rough.anger > 0 && rough.fear > 0);
 });

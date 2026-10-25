@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { boot } from '../src/main.js';
 import { CONFIG } from '../src/config.js';
-import { makeDoc, find, findAll } from './dom-stub.js';
+import { makeDoc, find, findAll, textOf } from './dom-stub.js';
+import { bodyRadius } from '../src/grab.js';
 
 // ================================================================ HUD 的 boot 级接线（Task 5）
 //
@@ -98,10 +99,16 @@ async function withHudTank(opts, fn) {
   const PEV = (x, y, id) => ({ clientX: x, clientY: y, pointerId: id === undefined ? 1 : id });
   // 一次完整的按下+抬起。**同步发**：默认时钟下 heldMs ≈ 0 ⇒ classifyPress 判成 tap。
   const tapAt = (x, y) => { canvas.emit('pointerdown', PEV(x, y)); canvas.emit('pointerup', PEV(x, y)); frame(); };
+  // 拖动的三个原语，**分开 emit**：tapAt 把按下与抬起同步发完，
+  // 那套写法造不出"按住之后手已经在别处"的状态 —— 而拎的全部语义就在那一段里。
+  // 每个都跟一帧：input.poll 只在帧里交付，不跟帧的话 grab 永远不会被算第二次。
+  const pressAt = (x, y) => { canvas.emit('pointerdown', PEV(x, y)); frame(); };
+  const moveTo = (x, y) => { canvas.emit('pointermove', PEV(x, y, 1)); frame(); };
+  const releaseAt = (x, y) => { canvas.emit('pointerup', PEV(x, y, 1)); frame(); };
   try {
     controller = boot(bootOpts);
     return await fn({
-      controller, doc, canvas, frame, run, tapAt, boot,
+      controller, doc, canvas, frame, run, tapAt, pressAt, moveTo, releaseAt, boot,
       // 长按没有假时钟可用（attachInput 的 now 走浏览器时钟，见 input.js 的 defaultNow），
       // 所以这里在**抬起之后**直接改写 tracker 的两个时刻字段 —— 手势层对它们只做减法。
       // 顺序要紧：先 emit 再改。反过来改完再 emit 的话，pointerup 里的 release()
@@ -409,3 +416,110 @@ test('听词走 speechRng：模拟主流一次都不许被碰（全局约束第 
   assert.ok(speechBox.n > 0,
     `speechRng 一次都没被消费（${speechBox.n}）⇒ hear 没走到抽样，上面那个 0 是假的`);
 }));
+
+// ================================================================ 拎（grab & carry）Task 4 接线
+//
+// 这几条钉的是"表现层算出的那只，就是内核接手的那只"。
+// 当初在 A′（给 playerHand 加载荷）与 A″（内核按世界距离自推）之间选 A′，
+// 全部理由就是下面第一条 —— 所以它必须用"与信息卡同一只"这个自己的判据来钉，
+// 而不是"grab 非空"这种 A″ 也能满足的弱断言。
+test('按下去开卡的是哪只 ⇒ 把它带离之后拎起的也是那一只', () => withHudTank(
+  { seed: 20261024 }, ({ controller, doc, pressAt, moveTo, releaseAt, screenOf }) => {
+    const w = controller.world;
+    const c = w.creatures[0];
+    const s = screenOf(c);
+    // ① 点按语义不许被抢：tap 仍然只开卡
+    pressAt(s.x, s.y);
+    releaseAt(s.x, s.y);
+    const card = find(doc.body, 'div', 'hud-card');
+    assert.ok(card._class.has('is-open'), 'tap 开卡这条既有语义被 grab 抢掉了');
+    assert.ok(textOf(card).includes(c.name), `卡里不是它：${textOf(card).slice(0, 40)}`);
+
+    // ② 同一点按下但不动 ⇒ 还不算拎（手在身上滑是抚摸，不许抢走那条通道）
+    pressAt(s.x, s.y);
+    assert.equal(w.playerHand.grab, null, '手还在身上就判成拎，抚摸通道会被抢走');
+    // ③ 带离身体 ⇒ 拎起的就是①里那只
+    // ⚠️ far 是**世界单位**，moveTo 收 **CSS 像素**：少乘一次 viewport.width 在 900px 视口下
+    // 只差 0.026px，测试会永远停在"还没带离"，看起来像实现没生效 —— 这类 off-by-scale 最难查。
+    const far = CONFIG.grab.pullOutRatio * bodyRadius(c) * 1.2;
+    moveTo(s.x + far * controller.viewport.width, s.y);
+    assert.equal(w.playerHand.grab && w.playerHand.grab.id, c.id,
+      `拎起的不是点的那只：${w.playerHand.grab && w.playerHand.grab.id}`);
+    assert.equal(c.held, true, '内核没接住（senses 转发了 grab 吗？）');
+    releaseAt(s.x + far * controller.viewport.width, s.y);
+    assert.equal(w.playerHand, null, '抬起之后手还留在世界里');
+  }));
+
+test('粘住：拎起之后手穿过另一只，grab.id 仍是先那一只', () => withHudTank(
+  { seed: 20261024 }, ({ controller, pressAt, moveTo, screenOf }) => {
+    const w = controller.world;
+    const a = w.creatures[0];
+    const b = w.creatures[1];
+    const sa = screenOf(a), sb = screenOf(b);
+    pressAt(sa.x, sa.y);
+    const far = CONFIG.grab.pullOutRatio * bodyRadius(a) * 1.2;
+    moveTo(sa.x + far * controller.viewport.width, sa.y);
+    assert.equal(w.playerHand.grab.id, a.id, '夹具就没拎起来，这条在空转');
+    moveTo(sb.x, sb.y);                       // 手整个落到 b 身上
+    assert.equal(w.playerHand.grab.id, a.id, `手里换成了别的：${w.playerHand.grab.id}`);
+    assert.equal(b.held, false, 'b 被内核判成被拎了');
+    assert.ok(a.held, 'a 反而松了');
+  }));
+
+test('拎着的那只死了 ⇒ grab 立刻撤掉，且 lost 记了一笔（绝不静默）', () => withHudTank(
+  { seed: 20261024 }, ({ controller, pressAt, moveTo }) => {
+    const w = controller.world;
+    const a = w.creatures[0];
+    const sa = { x: a.pos.x * controller.viewport.width, y: a.pos.y * controller.viewport.height };
+    pressAt(sa.x, sa.y);
+    const far = CONFIG.grab.pullOutRatio * bodyRadius(a) * 1.2;
+    const hx = sa.x + far * controller.viewport.width;
+    moveTo(hx, sa.y);
+    assert.equal(w.playerHand.grab.id, a.id, '夹具没拎起来');
+    assert.equal(controller.grabState.lost, 0);
+    const grabbed0 = controller.grabState.grabbed;
+    a.alive = false;                          // dying 期间它还在 creatures 里，所以 !cand 那条不成立
+    moveTo(hx, sa.y);
+    assert.equal(w.playerHand.grab, null,
+      `死掉的个体还留在手里：${w.playerHand.grab && w.playerHand.grab.id}`);
+    assert.equal(controller.grabState.lost, 1, '每一次撤手都要有计数（spec §7.7）');
+    assert.equal(controller.grabState.grabbed, grabbed0, 'lost 不该顺带再算一次 grabbed');
+  }));
+
+// 拖完那一下仍然满足 classifyPress 的 swipe（累计位移必超 tapMaxPx），
+// 不拦的话"拎着走一趟"= 撒一路食物 —— 那是这条功能最容易顺手做出来的副作用。
+test('拎着一只走再松手：一把都不撒食，且 suppressed 记了数', () => withHudTank(
+  { seed: 20261024 }, ({ controller, pressAt, moveTo, releaseAt, screenOf }) => {
+    const w = controller.world;
+    const a = w.creatures[0];
+    const sa = screenOf(a);
+    const foods0 = w.foods.length;
+    pressAt(sa.x, sa.y);
+    const far = CONFIG.grab.pullOutRatio * bodyRadius(a) * 1.2;
+    moveTo(sa.x + far * controller.viewport.width, sa.y);
+    moveTo(sa.x + 3 * far * controller.viewport.width, sa.y);
+    const hx = sa.x + 3 * far * controller.viewport.width;
+    releaseAt(hx, sa.y);
+    assert.equal(w.foods.length, foods0,
+      `拖一趟撒了 ${foods0 - w.foods.length} 份：swipe 没让位给 grab`);
+    assert.equal(controller.grabState.suppressed, 1,
+      `让掉的那把没记数（${controller.grabState.suppressed}）⇒ 静默吞手势，spec §7.7 不允许`);
+  }));
+
+// controller.grabState 必须是**同一个活对象**，不是每次访问新建的快照。
+// 这条是清单 §9.4 那条学费的直接兑现：audioState 当年就差点写成快照 ——
+// 快照读得到初值、读不到之后的变化，于是所有计数判据都只能看见 0。
+test('grabState 是活引用：取住它之后再一次拎起，手里那个对象跟着变', () => withHudTank(
+  { seed: 20261024 }, ({ controller, pressAt, moveTo, releaseAt, screenOf }) => {
+    const live = controller.grabState;
+    const g0 = live.grabbed;
+    const a = controller.world.creatures[1];
+    const sa = screenOf(a);
+    pressAt(sa.x, sa.y);
+    const far = CONFIG.grab.pullOutRatio * bodyRadius(a) * 1.2;
+    moveTo(sa.x + far * controller.viewport.width, sa.y);
+    releaseAt(sa.x + far * controller.viewport.width, sa.y);
+    assert.ok(live.grabbed > g0,
+      `第二次拎起没反映在**先前取到的那个对象**上（${g0} → ${live.grabbed}）⇒ 访问器在给快照`);
+    assert.equal(controller.grabState, live, '每次访问返回的不是同一个对象');
+  }));
