@@ -8,7 +8,7 @@ import { ALL_GENES, randomGenome } from '../src/genes.js';
 import { MOODS } from '../src/emotions.js';
 import { hear } from '../src/heard.js';
 import { layEggs } from '../src/breeding.js';
-import { MIN_DURATION } from '../src/behavior.js';
+import { MIN_DURATION, EAT_HUNGER } from '../src/behavior.js';
 import { serialize, migrate } from '../src/save.js';
 import { thresholds } from '../src/personality.js';
 import {
@@ -2239,4 +2239,122 @@ test('同种子同手样本跑 300 tick ⇒ fingerprint 逐字段相同（含被
     return JSON.stringify(fingerprint(w));
   };
   assert.equal(run(), run());
+});
+
+// ================================================================ 手喂（2026-10-25）
+//
+// 把饿的那只拖到食物上就算喂。批准的设计里三条约束各自对应一条判据：
+//   ① 门槛沿用内核觅食那对数（EAT_DIST 与 hunger 门）⇒ 手喂**不新开供给通道**；
+//   ② 吃下去的结算与它自己吃必须是同一个函数 ⇒ "两边逐字段相同"（两处各写一遍，
+//      冰晶的 `calms` 这种后加分支就会只进一边）；
+//   ③ 唯一的差别是好感：手喂买一点，速率比抚摸低。
+
+const feedFixture = (o = {}) => {
+  const w = createWorld({ seed: 20261025 });
+  w.foods.length = 0;
+  const c = w.creatures[0];
+  c.pos = { x: 0.5, y: 0.5 };
+  c.vel = { x: 0, y: 0 };
+  c.needs.hunger = o.hunger === undefined ? 0.9 : o.hunger;
+  ensure(c.memory, PLAYER_ID);
+  const m = get(c.memory, PLAYER_ID);
+  m.affection = 0; m.familiarity = 1;
+  const f = spawnFood(w, o.kind || 'algae', { x: 0.5, y: 0.5 });
+  // 锁死 minDuration：不许重新决策，否则"它自己走过去吃"与"手把它放到食物上"
+  // 两条路会被 decide() 的随机噪声搅在一起
+  c.intent = o.selfEat ? { kind: 'eat', targetId: f.id, minDuration: 1e9 }
+    : { kind: 'idle', minDuration: 1e9 };
+  // 两边的**手**摆同一个位置、同一个速度（speed 0 ⇒ 不算粗暴，emotionCtx.novelty 同值），
+  // 只有 grab 不同 —— 这是②那条"逐字段相同"能成立的前提，不是凑巧。
+  w.playerHand = { pos: { x: 0.5, y: 0.5 }, speed: 0, down: true, appeared: false,
+    grab: o.held ? { id: c.id } : null };
+  return { w, c, f, m };
+};
+
+const afterOneTick = (o) => {
+  const { w, c, m } = feedFixture(o);
+  // ⚠️ 三个混淆源都得按住，这条比较才只比"吃这一口"：
+  //   ① c.held 预置 true —— 否则"被拎起来的上升沿"（grabbedHappy / grabbedRough，
+  //      实测 fear +0.152 / anger +0.122）会混进来。现实顺序也正是"先拎起来、再拖到食物上"。
+  //   ② beingPetted 预置 true —— 自吃那一侧的手是"贴着身体不动"，正满足抚摸判据，
+  //      上升沿会发 petted（实测 joy +0.4，就是第一次跑这条时那 0.389 的差）。
+  //      预置只关掉**事件**，连续的那点好感照旧买（下面的关系式算的就是它）。
+  //   ③ 情绪留 1e-5 容差 —— 被拎的那只 moving=true，energy 一 tick 多耗 4.9e-5，
+  //      而情绪目标读 energy ⇒ 惯性挪动量差一点。合法分叉，不是结算漂移。
+  if (o.held) c.held = true;
+  c.beingPetted = true;
+  const h0 = c.needs.hunger, j0 = c.emotions.joy, a0 = c.emotions.anger, f0 = c.emotions.fear;
+  tickWorld(w, CONFIG.fixedDt);
+  return {
+    dHunger: c.needs.hunger - h0, dJoy: c.emotions.joy - j0,
+    dAnger: c.emotions.anger - a0, dFear: c.emotions.fear - f0,
+    foods: w.foods.length, aff: m.affection,
+    kinds: w.events.filter((e) => e.kind === 'eat').map((e) => e.foodKind),
+  };
+};
+
+test('饿的拎到食物上：吃了、hunger 降、食物少一份、事件里有 eat', () => {
+  const r = afterOneTick({ held: true });
+  assert.equal(r.foods, 0, `手喂没吃：还剩 ${r.foods} 份`);
+  assert.ok(r.dHunger < -0.4, `hunger 没怎么降：${r.dHunger.toFixed(4)}`);
+  assert.deepEqual(r.kinds, ['algae']);
+  assert.ok(r.dJoy > 0, 'fed 该让 joy 涨（它自己吃也是这个）');
+});
+
+// 反空判据：这条与上一条共用夹具，只改 hunger。"份数不减"在分支根本没走到时同样成立，
+// 是上一条（饿 → 确实少一份）让它有意义。
+test('饱的拎到食物上：一份都不减、好感也不涨（手喂不新开供给通道）', () => {
+  const r = afterOneTick({ held: true, hunger: 0.01 });
+  assert.equal(r.foods, 1, '不饿也被喂进去了');
+  assert.deepEqual(r.kinds, []);
+  assert.equal(r.aff, 0, `不饿也记好感：${r.aff} ⇒ 闸门没生效`);
+});
+
+test('同一份食物：自吃与手喂的结算逐字段相同，好感差恰好等于 feedAffection 减抚摸那一格', () => {
+  const self = afterOneTick({ selfEat: true });
+  const hand = afterOneTick({ held: true });
+  assert.equal(self.foods, 0, '夹具：自吃那一侧也没吃到，比较在空转');
+  assert.equal(hand.foods, 0);
+  assert.deepEqual(hand.kinds, self.kinds);
+  // 饥饿是**逐位**相同的：decay 里饥饿不随 moving 变（needs.js:47-52 只读体型与贪吃），
+  // 所以两边唯一的不同来源就是那口 feed。这条不留容差。
+  assert.equal(hand.dHunger, self.dHunger);
+  // 三条情绪留 1e-5：被拎的那只 moving=true ⇒ 这一 tick 的 energy 比自吃那只多耗 4.9e-5，
+  // 而 emotion 的目标值读 energy ⇒ 惯性往目标挪的量差一点点。**这是合法的分叉，不是结算漂移**，
+  // 写死 0 会红得没有道理。1e-5 又远小于任何一处"忘了 calms / 忘了 fed"的量级（0.05~0.45）。
+  for (const k of ['dJoy', 'dAnger', 'dFear']) {
+    assert.ok(Math.abs(hand[k] - self[k]) < 1e-5,
+      `${k} 两边差 ${(hand[k] - self[k]).toExponential(3)} ⇒ 结算不再是同一个函数了`);
+  }
+  // 自吃那一侧的手也贴着身体 ⇒ 它顺带买到一格抚摸好感；手喂那一侧抚摸被让路、
+  // 买到的是 feedAffection。所以差是**两个常数之差**，不是 feedAffection 本身。
+  const want = CONFIG.grab.feedAffection - CONFIG.behavior.petAffectionRate * CONFIG.fixedDt;
+  assert.ok(Math.abs((hand.aff - self.aff) - want) < 1e-12,
+    `好感差 ${(hand.aff - self.aff).toExponential(4)}，期望 ${want.toExponential(4)}`);
+});
+
+test('从一堆食物上拖过去：吃到不饿就停口，不会把整缸吸干', () => {
+  const per = CONFIG.food.algae.energy;
+  const w = createWorld({ seed: 20261026 });
+  w.foods.length = 0;
+  const c = w.creatures[0];
+  c.needs.hunger = 1;
+  c.pos = { x: 0.3, y: 0.5 };
+  ensure(c.memory, PLAYER_ID);
+  for (let i = 0; i < 10; i += 1) spawnFood(w, 'algae', { x: 0.31 + i * 0.04, y: 0.5 });
+  let eaten = 0;
+  for (let i = 0; i < 240 && w.foods.length > 0; i += 1) {
+    const x = 0.3 + i * 0.004;
+    w.playerHand = { pos: { x, y: 0.5 }, speed: 1.0, down: true, appeared: false,
+      grab: { id: c.id } };
+    tickWorld(w, CONFIG.fixedDt);
+    eaten += w.events.filter((e) => e.kind === 'eat').length;
+    w.events.length = 0;
+  }
+  const want = Math.ceil((1 - EAT_HUNGER) / per);
+  assert.ok(Math.abs(eaten - want) <= 1,
+    `吃掉 ${eaten} 份，按 feedAmount ${per} 与闸门 ${EAT_HUNGER} 应为 ${want} 上下`);
+  assert.ok(c.needs.hunger <= EAT_HUNGER + 0.02,
+    `停口时还饿着：${c.needs.hunger.toFixed(3)}`);
+  assert.ok(w.foods.length >= 6, `整缸被吸干（剩 ${w.foods.length} 份）：闸门没起作用`);
 });
