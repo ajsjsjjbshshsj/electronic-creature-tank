@@ -726,6 +726,32 @@ const CONFIG = {
     hopStretchAir: 1.10,       // 滞空中点的竖向尺度（拉长 10%；与压扁共用一条 sin 弧）
   },
 
+  // ---- 玩家的手（2026-10-25，按控制方批准的设计）----
+  // 手只在按下时存在（world.playerHand 非 null），没有任何输入层的第二条状态。
+  // 这里只放表现层的尺寸与动作常数；抚摸成立与否仍读内核的 c.beingPetted。
+  hand: {
+    minPx: 48,                 // 手掌基准尺寸下限（CSS px）：手机上再小就读不出是手
+    maxPx: 76,                 // 上限：桌面上不能大到盖住整只成体
+    viewportRatio: 0.09,       // 短边 × 此值；再做上下夹取
+    offsetX: 0.56,             // 指尖 → 掌心的基准偏移（× 手掌尺寸）
+    offsetY: 0.84,
+    palmRadius: 0.34,          // 掌缘外扩；边缘镜像要把它算进去，否则掌心仍在屏幕外
+    palmWidth: 0.34,           // 掌心椭圆的半宽（× 手掌尺寸）
+    palmHeight: 0.30,          // 掌心椭圆的半高
+    fingerRadius: 0.06,        // 单根手指的胶囊半宽；太粗会四根粘成一只胡萝卜
+    fingerSpread: 0.60,        // 四指指端的横向总跨度（相邻间距 = 此值 / 3）
+    fingerDrop: 0.18,          // 四指指端的纵向落差
+    padRadius: 0.055,          // 掌垫小圆点半径
+    rockRate: 2.2,             // 抚摸时手腕摆动的角速度（rad/s）
+    rockAngle: 0.1,            // 最大摆角（rad）：只摆掌，指尖不动
+    contactRadius: 0.22,       // 指尖接触光半径（× 手掌尺寸）
+    contactAlpha: 0.55,        // 接触光透明度
+    contactLineWidth: 1.4,     // 接触光描边（CSS px）
+    alpha: 0.78,               // 手整体透明度：能看出是实体手，又不遮住下面的生物
+    padAlpha: 0.36,            // 掌垫细节透明度
+    strokeWidth: 1.6,          // 掌缘与手指描边（CSS px）
+  },
+
   // ---- 叫声（spec §5.4 的声音表 + §5.4.1 的落地裁定，2026-10-22 B18）----
   // 分工与 eye / render 两段完全一致：**数在这里，映射与调度在 src/audio.js**（纯函数、
   // Node 里全测），而 AudioContext 只出现在 src/main.js。
