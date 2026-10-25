@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mountHud } from '../src/hud.js';
-import { heartFillFor } from '../src/hud.js';
+import { heartFillFor, radarFor } from '../src/hud.js';
 import { CONFIG } from '../src/config.js';
 import { createEmotions } from '../src/emotions.js';
 import { createNeeds } from '../src/needs.js';
@@ -272,6 +272,33 @@ test('雷达图的 svg / polygon 必须在 SVG 命名空间里，class 挂在 cl
   assert.equal(poly.namespaceURI, SVG_NS);
   assert.ok(poly.getAttribute('class'), 'class 没挂到 class 属性上（SVGElement.className 是只读的）');
   assert.ok(doc.createdNS.includes('polygon'), 'polygon 没走 createElementNS');
+});
+
+test('雷达图把九个轴名画出来：逐字等于 radarFor 的 axis（O-4：数据没被 DOM 层丢掉）', () => {
+  const { hud, root } = mount();
+  const c = mk({ id: 'z', aff: 0.4 });
+  hud.setCard(c, W([c]));
+  const svg = find(root, 'svg', 'hud-radar');
+  const texts = findAll(svg, 'text').map(textOf);
+  assert.deepEqual(texts, radarFor(c.traits).map((p) => p.axis),
+    `九个轴名不对：${JSON.stringify(texts)}`);
+  // 反空对照：九个必须各不相同，否则"有九个 text"这件事本身不算证据
+  assert.equal(new Set(texts).size, 9, `轴名有重复：${JSON.stringify(texts)}`);
+});
+
+test('折线不许长到把轴名吃掉：顶点半径上界 < 标签半径（两处几何只有一个定义点）', () => {
+  const { hud, root } = mount();
+  const c = mk({ id: 'z' });
+  hud.setCard(c, W([c]));
+  const svg = find(root, 'svg', 'hud-radar');
+  const poly = find(svg, 'polygon');
+  const pts = poly.getAttribute('points').split(' ').map((p) => p.split(',').map(Number));
+  const rMax = Math.max(...pts.map(([x, y]) => Math.hypot(x - 50, y - 50)));
+  const labels = findAll(svg, 'text');
+  const rLabel = Math.min(...labels.map((n) =>
+    Math.hypot(Number(n.attrs.x) - 50, Number(n.attrs.y) - 50)));
+  assert.ok(rMax < rLabel, `顶点最远 ${rMax.toFixed(1)} 已经压上标签半径 ${rLabel.toFixed(1)} ⇒ 字会被折线盖住`);
+  assert.ok(rLabel <= 49, `标签跑到 0..100 方框外了：${rLabel.toFixed(1)}`);
 });
 
 test('肖像的 src 来自 avatarSrc：八种状态出八张不同的脸', () => {

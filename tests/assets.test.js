@@ -58,6 +58,15 @@ test('--heart-fill 这个名字在 hud.js 与 css/main.css 之间不许漂移', 
   assert.ok(css.includes('var(--heart-fill'), 'css 侧不再消费它 ⇒ 写进去也没人画');
 });
 
+// 雷达图的轴名是 SVG <text>：默认 fill 是黑的，压在 rgba(20,10,40) 的卡上等于隐形。
+// 桩里没有样式，所以"画了九个轴名"在判据里可以是"九个看不见的字"—— 跨文件钉住。
+test('.hud-radar 的轴名文字必须有 fill 规则（SVG 文字默认黑色 = 暗底上隐形）', () => {
+  const css = read('../css/main.css');
+  const js = read('../src/hud.js');
+  assert.match(js, /svgEl\(doc,\s*'text'/, 'hud.js 不再画轴名了');
+  assert.match(css, /\.hud-radar\s+text\s*\{[^}]*fill:/);
+});
+
 test('index.html 用 type="module" 引 /src/main.js，且声明了 viewport-fit=cover', () => {
   const html = read('../index.html');
   assert.match(html, /<script[^>]+type=["']module["'][^>]+src=["']\/src\/main\.js["']/);

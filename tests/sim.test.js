@@ -6,6 +6,7 @@ import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '.
 import { createCreature, sizeOf } from '../src/creature.js';
 import { ALL_GENES, randomGenome } from '../src/genes.js';
 import { MOODS } from '../src/emotions.js';
+import { WORD_POOL } from '../src/lexicon.js';
 import { hear } from '../src/heard.js';
 import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION, EAT_HUNGER } from '../src/behavior.js';
@@ -2357,4 +2358,41 @@ test('从一堆食物上拖过去：吃到不饿就停口，不会把整缸吸�
   assert.ok(c.needs.hunger <= EAT_HUNGER + 0.02,
     `停口时还饿着：${c.needs.hunger.toFixed(3)}`);
   assert.ok(w.foods.length >= 6, `整缸被吸干（剩 ${w.foods.length} 份）：闸门没起作用`);
+});
+
+// ================================================================ 端到端：教它一个词，它自己会说出来
+//
+// hear / recall / speech 的前缀各自都有判据，但**接起来通不通**此前一条都没钉 ——
+// 而 spec §6.3 那句"你叫它，它回头；过几代它自己会喊"正是这条通道存在的理由。
+// 中间任何一环断掉（比如 speak 不再把 recall 的结果塞进 ctx.heard），
+// 缸里仍然"会说话"，只是永远不会提那个词，而单测全绿。
+test('教它一个词，它会在内核里自己说出来（heard → recall → speech → say 全链路）', () => {
+  const w = createWorld({ seed: 4242 });
+  const c = w.creatures[0];
+  // 用一个**不在词表里、也不是任何同伴名字**的串：这样"它说出来了"只可能是从 heard 里来的，
+  // 而不是 WORD_POOL 本来就有那 13 个词，也不是走了 ctx.other.name 那条前缀。
+  const TOKEN = '咕咕噜';
+  assert.ok(!WORD_POOL.includes(TOKEN), '判据词撞进词表了 ⇒ 这条判据会假绿');
+  assert.ok(!w.creatures.some((o) => o !== c && o.name === TOKEN), '判据词撞了别的个体的名字');
+  c.name = TOKEN;                       // spec 的那个形状：它学会的第一个词是自己的名字
+  // 心情定价格：anger −0.8 < suppressBelow −0.6 ⇒ **被骂着学会的词它自己再也不提**。
+  // 这条是 2026-10-25 真页面那一趟量出来的（「星尘」学在愤怒里，永远召不回），
+  // 所以判据必须学在 happy(+0.6) 里 —— 否则测的是"价格闸门"而不是"链路通不通"。
+  const teach = () => hear(c, TOKEN, w.speechRng, w.time, { mood: 'happy', need: 'hunger' });
+  teach();
+  assert.equal(c.heard.length, 1, '一个词都没存进去：tokenize 或 selectCandidates 断了');
+  assert.equal(c.heard[0].token, TOKEN, '存进去的不是那个词');
+  const said = [];
+  for (let i = 0; i < Math.round(1200 * 60); i++) {
+    // 让它一直是"最饿"的那只：recall 的线索是**此刻最紧的需求**，换线索就不提它了。
+    c.needs.hunger = 0.9; c.needs.social = 0.1; c.needs.energy = 0.6; c.needs.safety = 0;
+    if (i > 0 && i % (240 * 60) === 0) teach();   // 隔几分钟再听一遍（uses↑ ⇒ 半衰期加倍）
+    tickWorld(w, CONFIG.fixedDt);
+    for (const ev of w.events) if (ev.kind === 'say' && ev.id === c.id) said.push(ev.text);
+    w.events.length = 0;
+  }
+  assert.ok(said.length > 20,
+    `这只 1200 秒里只说了 ${said.length} 句：夹具不对，下面那条"说出来了"不算证据`);
+  assert.ok(said.some((s) => s.includes(TOKEN)),
+    `教了 6 遍、饿了 1200 秒，一次也没提那个词：${JSON.stringify(said.slice(0, 6))}`);
 });
