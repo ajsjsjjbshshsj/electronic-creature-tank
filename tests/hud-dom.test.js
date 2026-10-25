@@ -6,7 +6,7 @@ import { CONFIG } from '../src/config.js';
 import { createEmotions } from '../src/emotions.js';
 import { createNeeds } from '../src/needs.js';
 import { createMemory, remember } from '../src/memory.js';
-import { makeDoc, find, findAll, textOf, dump, click, countListeners } from './dom-stub.js';
+import { makeDoc, find, findAll, textOf, dump, click, fire, countListeners } from './dom-stub.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -84,6 +84,10 @@ function mount(over = {}) {
     onRename: (c, name) => calls.push(['rename', c && c.id, name]),
     onScatter: (x, y) => calls.push(['scatter', x, y]),
     onSpeech: (v) => calls.push(['speech', v]),
+    // 拖拽投食：hud 只上报像素，"在不在缸内"由调用方判（默认全算缸内，
+    // 要测"松手在缸外"那一半的用例自己传一个假的谓词进来）。
+    onCarryDrop: (kind, x, y) => calls.push(['carryDrop', kind, x, y]),
+    carryInside: 'carryInside' in over ? over.carryInside : (() => true),
   });
   return { doc, hud, calls, root: doc.body };
 }
@@ -737,4 +741,125 @@ test('源码守卫：draft.key 从不被赋给任何节点（S4/S10 都逼不出
   assert.ok(!/(\.value|\.textContent|setAttribute\([^)]*\))\s*=[^;\n]*draft\.key(?![A-Za-z])/.test(src),
     '有人把 draft.key 写进节点了 —— 那正是"key 只写不读"这条承诺破掉的地方');
   assert.ok(/type', 'password'/.test(src), 'key 输入框不再是 password 型');
+});
+
+// ================================================================ 拖拽投食（spec §6.1 表第一行）
+//
+// 判据盯的四件事：① 按下不等于投出去（必须拖到缸里松手）；② hud 只上报**像素**，
+// 判"在不在缸内"的是调用方（hud 不许知道 canvas 语义）；③ 临时监听器挂几次就摘几次
+// —— 泄漏在 DOM 测试里通常是隐形的，所以这里数次数；④ 点按那条老路不许被拖拽抢走。
+// 刻意**不跟 pointerId**：多指属 spec §10 范围外，跟了就是第二套输入模型。
+
+const feedBtn = (root, i = 0) => findAll(root, 'button', 'hud-feed')[i];
+const grab = (node, x, y) => fire(node, 'pointerdown', { clientX: x, clientY: y });
+
+test('拖拽：按下不松什么都不投，但"正托着"这件事读得到', () => {
+  const { hud, root, doc, calls } = mount();
+  grab(feedBtn(root), 300, 700);
+  assert.equal(calls.filter((c) => c[0] === 'carryDrop').length, 0, '还没松手就投了');
+  assert.equal(hud.state.carry.kind, 'algae', '携带状态读不出来 = 取消那半条判据无从成立');
+  assert.equal(doc.docListenerCount('pointerup'), 1,
+    '携带期间没挂 doc 级监听 ⇒ 手指一移出按钮就永远松不了手');
+});
+
+test('拖拽：松手在缸内 ⇒ 上报的是松手处的像素，不是缸中央', () => {
+  const { hud, root, doc, calls } = mount();
+  grab(feedBtn(root), 300, 700);
+  doc.emit('pointermove', { clientX: 120, clientY: 240 });
+  doc.emit('pointerup', { clientX: 120, clientY: 240 });
+  const drops = calls.filter((c) => c[0] === 'carryDrop');
+  assert.equal(drops.length, 1, JSON.stringify(calls));
+  assert.deepEqual(drops[0], ['carryDrop', 'algae', 120, 240]);
+  assert.equal(hud.state.carry.kind, null, '松手之后还带着 ⇒ 下一次点哪儿都会投');
+  assert.equal(doc.docListenerCount('pointerup'), 0, '监听器泄漏：一次拖拽挂一套，摘不干净就是越拖越卡');
+  assert.equal(doc.docListenerCount('pointermove'), 0, '监听器泄漏（move）');
+});
+
+test('拖拽：松手在缸外 ⇒ 不投，且"被取消"这件事计数读得到', () => {
+  const { hud, root, doc, calls } = mount({ carryInside: () => false });
+  grab(feedBtn(root), 300, 700);
+  doc.emit('pointerup', { clientX: 300, clientY: 760 });
+  assert.equal(calls.filter((c) => c[0] === 'carryDrop').length, 0, '缸外松手也投了');
+  assert.equal(hud.state.carryCancelled, 1, '撤回要被查得到（与 grabState.suppressed 同一条纪律）');
+  assert.equal(doc.docListenerCount('pointerup'), 0, '取消这条路径也要摘监听');
+});
+
+test('拖拽：pointercancel（手机被系统抢走手势）算取消，不留一颗悬在半空', () => {
+  const { hud, root, doc, calls } = mount();
+  grab(feedBtn(root), 300, 700);
+  doc.emit('pointercancel', {});
+  assert.equal(calls.filter((c) => c[0] === 'carryDrop').length, 0);
+  assert.equal(hud.state.carry.kind, null);
+  assert.equal(hud.state.carryCancelled, 1);
+  assert.equal(doc.docListenerCount('pointercancel'), 0, 'cancel 之后监听还挂着 = 下一次拖拽叠两套');
+});
+
+test('拖拽：一次拖拽只投一颗，且连拖两次都成立（状态机不许卡死）', () => {
+  const { hud, root, doc, calls } = mount();
+  for (const x of [100, 200]) {
+    grab(feedBtn(root), 300, 700);
+    doc.emit('pointermove', { clientX: x, clientY: 300 });
+    doc.emit('pointerup', { clientX: x, clientY: 300 });
+  }
+  const drops = calls.filter((c) => c[0] === 'carryDrop');
+  assert.equal(drops.length, 2, JSON.stringify(drops));
+  assert.deepEqual(drops.map((d) => d[2]), [100, 200]);
+});
+
+test('拖拽：三种食物都能拖，上报的 kind 逐键对得上', () => {
+  const { root, doc, calls } = mount();
+  const btns = findAll(root, 'button', 'hud-feed');
+  assert.equal(btns.length, Object.keys(CONFIG.food).length);
+  btns.forEach((b, i) => {
+    grab(b, 10, 10);
+    doc.emit('pointerup', { clientX: 40, clientY: 50 });
+  });
+  assert.deepEqual(calls.filter((c) => c[0] === 'carryDrop').map((c) => c[1]),
+    Object.keys(CONFIG.food));
+});
+
+test('拖拽：点按那条老路不许被抢走（按下+原地松手 ⇒ 仍走 pressFeed 落中央）', () => {
+  const { root, doc, calls } = mount({ carryInside: (x, y) => y < 600 });
+  const b = feedBtn(root);
+  grab(b, 300, 700);                       // 700 在食物条那一带 ⇒ 不算缸内
+  doc.emit('pointerup', { clientX: 300, clientY: 700 });
+  click(b);                                // 真浏览器里原地按下抬起之后还会补一个 click
+  const feeds = calls.filter((c) => c[0] === 'feed');
+  assert.equal(feeds.length, 1, JSON.stringify(calls));
+  assert.equal(feeds[0][1], 'algae');
+});
+
+test('拖拽：携带中的 ghost 类跟着"在不在缸内"走（CSS 的另一半，桩里看不见样式）', () => {
+  const { root, doc } = mount({ carryInside: (x, y) => y < 400 });
+  const ghost = find(root, 'div', 'hud-carry');
+  assert.ok(ghost, '没有 .hud-carry 这个节点');
+  assert.ok(!ghost._class.has('is-carrying'), '没拖就显示着 = 一颗悬在屏幕上的食物');
+  grab(feedBtn(root), 300, 700);
+  assert.ok(ghost._class.has('is-carrying'));
+  assert.ok(ghost._class.has('is-outside'), '按下处就在食物条上，一开始就该是"缸外"那副样子');
+  doc.emit('pointermove', { clientX: 150, clientY: 200 });
+  assert.ok(!ghost._class.has('is-outside'), '拖进缸里了还不亮 ⇒ 玩家不知道松手会不会投');
+  doc.emit('pointermove', { clientX: 150, clientY: 700 });
+  assert.ok(ghost._class.has('is-outside'));
+  doc.emit('pointerup', { clientX: 150, clientY: 700 });
+  assert.ok(!ghost._class.has('is-carrying'), '松手之后 ghost 还挂在屏幕上');
+});
+
+test('拖拽：destroy 时正在携带 ⇒ 三个临时监听器必须一个不剩', () => {
+  const { hud, root, doc } = mount();
+  grab(feedBtn(root), 300, 700);
+  assert.ok(doc.docListenerCount('pointermove') > 0, '前置条件：确实挂着');
+  hud.destroy();
+  for (const t of ['pointermove', 'pointerup', 'pointercancel']) {
+    assert.equal(doc.docListenerCount(t), 0, `destroy 之后还留着 ${t} ⇒ 换缸一次就漏一套`);
+  }
+});
+
+test('拖拽：hud 不许知道 canvas 语义 —— 它只许上报像素', () => {
+  const src = readFileSync(fileURLToPath(new URL('../src/hud.js', import.meta.url)), 'utf8');
+  // ⚠️ 只认**调用形状**，不认裸词：第一版写的是 /viewport|clientWidth|getBoundingClientRect/，
+  // 结果它撞在 F-15 那条注释里（"getBoundingClientRect 是 0×0"）上假红了一次。
+  // 源码判据读的是代码，注释里出现同一个词是常态 —— 这类守卫写宽了就是等着被人注释掉。
+  assert.ok(!/\.viewport\b|\.clientWidth\b|\.getBoundingClientRect\s*\(/.test(src),
+    'hud.js 里出现了视口/布局读数 ⇒ "在不在缸内"这个判断漏进 HUD 了，它该问调用方');
 });

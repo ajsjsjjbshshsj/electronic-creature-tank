@@ -105,6 +105,24 @@ export function makeNode(tag, doc, ns) {
 export function makeDoc() {
   const doc = {
     created: [], createdNS: [], body: null, __focused: null,
+    // 文档级监听器要**记得住**：拖拽投食那套临时监听（pointermove / pointerup /
+    // pointercancel 挂在 doc 上）唯一的证据就是"挂了几次、摘了几次"，
+    // 空实现会让"泄漏一个监听器"这件事在测试里彻底隐形。
+    listeners: {},
+    // 用 `this` 而不是闭包里的 `doc`：真 DOM 的方法脱离接收者调用会抛
+    // "Illegal invocation"，写成闭包捕获就等于又替平台撒一次谎（§12.11 那一族）。
+    addEventListener(type, fn) { (this.listeners[type] || (this.listeners[type] = [])).push(fn); },
+    removeEventListener(type, fn) {
+      const a = this.listeners[type] || [];
+      const i = a.indexOf(fn);
+      if (i >= 0) a.splice(i, 1);
+    },
+    emit(type, ev) { for (const fn of (doc.listeners[type] || []).slice()) fn(ev); },
+    docListenerCount(type) { return (doc.listeners[type] || []).length; },
+    // 真文档有它；main.js 的"松手时手指底下是不是缸"就靠它。默认谁都不命中，
+    // 需要命中的测试自己改 __hitAt（与 __focused 同一个路子）。
+    elementFromPoint(x, y) { return doc.__hitAt ? doc.__hitAt(x, y) : null; },
+    __hitAt: null,
     createElement(tag) { const n = makeNode(tag, doc); doc.created.push(n.tagName); return n; },
     // 真 DOM 里 SVG 只能这么造：`createElement('svg')` 给的是 HTMLUnknownElement（F-15）。
     createElementNS(ns, tag) {
@@ -118,7 +136,6 @@ export function makeDoc() {
         _class: new Set(), listeners: {}, _text: String(t) };
     },
     getElementById(id) { return doc.__byId[id] || null; },
-    addEventListener() {}, removeEventListener() {},
     __byId: {},
   };
   doc.body = makeNode('body', doc);
@@ -178,6 +195,13 @@ export function dump(node) {
 /** 点一下：只派发给这个节点自己（本桩不做冒泡，HUD 的按钮都是直接绑的）。 */
 export function click(node) {
   for (const fn of (node.listeners.click || []).slice()) fn({ preventDefault() {}, target: node });
+}
+
+/** 派发任意事件类型（拖拽那一路要 pointerdown / pointermove / pointerup / pointercancel）。 */
+export function fire(node, type, ev) {
+  const e = Object.assign({ preventDefault() {}, target: node, type }, ev || {});
+  for (const fn of (node.listeners[type] || []).slice()) fn(e);
+  return e;
 }
 
 /** 数整棵树上的监听器总数：destroy() 之后必须是 0。 */

@@ -113,3 +113,19 @@ test('.gitattributes 把 .bat 钉成 CRLF（唯一的双击产物，不能赌 cm
   assert.match(attrs, /^\*\.bat\s+text\s+eol=crlf\s*$/m, '缺了 .bat 的 CRLF 例外');
   assert.match(attrs, /^\*\s+text=auto\s+eol=lf\s*$/m, '全仓库仍应是 LF');
 });
+
+// 拖拽投食的三处 CSS 契约（2026-10-25）。桩里没有样式也没有命中测试，
+// 所以"ghost 挡住了 elementFromPoint"和"触摸被浏览器当成滚动"这两件事
+// 在 DOM 判据里完全隐形 —— 与 F-12 / F-14 同一条纪律：跨文件的两个定义点，双向钉。
+test('拖拽投食的 CSS 契约不许漂：ghost 的类、不吃命中、食物条不吞手势', () => {
+  const css = read('../css/main.css');
+  const js = read('../src/hud.js');
+  for (const cls of ['is-carrying', 'is-outside']) {
+    assert.ok(css.includes(`.hud-carry.${cls}`), `hud.js 在写 ${cls}，CSS 里没有这条规则 ⇒ 写了等于没写`);
+    assert.ok(js.includes(`'${cls}'`), `CSS 还按 .hud-carry.${cls} 画，而 hud.js 已经不写了`);
+  }
+  assert.match(css, /\.hud-carry\s*\{[^}]*pointer-events:\s*none/,
+    'ghost 吃命中的话，手指底下永远是它自己 ⇒ 拖什么都算"缸外"，一颗也投不出去');
+  assert.match(css, /\.hud-feed\s*\{[^}]*touch-action:\s*none/,
+    '食物条上的横向拖拽会被触摸手势解释成滚动 ⇒ 半路 pointercancel，症状是食物自己消失');
+});
