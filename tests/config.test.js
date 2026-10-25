@@ -105,7 +105,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   //    事件表的两行（grabbedHappy / grabbedRough）**留到 Task 3** 与生产者同时加 ——
   //    constraints.test.js 那条"每种事件种类都要有生产者"会在只有行没有生产者时红，
   //    这是计划原文的一处顺序错。数字用 node -e 跑出来：Task 1 后 63 / 54，Task 3 加两行后 **65 / 54**。
-  // ⚠️ 65 → 66、54 → 55（2026-10-25 手部视觉）：新增 **CONFIG.hand 一段**（一个节点、20 个标量）。
+  // ⚠️ 65 → 66、54 → 55（2026-10-25 手部视觉）：新增 **CONFIG.hand 一段**（一个节点、19 个标量）。
   //    形状与行为分工同 avatar/hud：几何换算由 tests/hand.test.js 钉，绘制账单由
   //    tests/render-hand.test.js 钉；这里只钉"这一段确实存在且没有被悄悄拓宽"。
   assert.equal(visited.length, 66, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
@@ -1053,22 +1053,25 @@ test('CONFIG.grab 一段的形状（八个键：七个标量 + 一个三项权�
 
 // ---------------------------------------------------------------- 玩家的手（2026-10-25）
 // 形状由 hand.js 的 handPoseInto 消费；这里钉键集与几条互相打架会立刻出症状的关系。
-test('CONFIG.hand 的二十个视觉旋钮齐备，尺寸、透明度与手指分离两端自洽', () => {
+test('CONFIG.hand 的十九个视觉旋钮齐备，摸头朝向、尺寸与手指分离自洽', () => {
   const H = CONFIG.hand;
   assert.deepEqual(Object.keys(H).sort(), [
-    'alpha', 'contactAlpha', 'contactLineWidth', 'contactRadius', 'fingerDrop', 'fingerRadius',
-    'fingerSpread', 'maxPx', 'minPx', 'offsetX', 'offsetY', 'padAlpha', 'padRadius',
+    'alpha', 'contactAlpha', 'contactLineWidth', 'contactPulseRate', 'contactRadius',
+    'fingerDrop', 'fingerRadius', 'fingerSpread', 'maxPx', 'minPx', 'offsetX', 'offsetY',
     'palmHeight', 'palmRadius', 'palmWidth', 'rockAngle', 'rockRate', 'strokeWidth',
     'viewportRatio',
   ], `CONFIG.hand 键集变了：${Object.keys(H).sort()}`);
-  assert.equal(Object.keys(H).length, 20);
+  assert.equal(Object.keys(H).length, 19);
   for (const [k, v] of Object.entries(H)) {
-    assert.ok(Number.isFinite(v) && v > 0, `${k} 必须是正数，实为 ${v}`);
+    assert.ok(Number.isFinite(v), `${k} 必须是有限数，实为 ${v}`);
+    if (k === 'offsetY') assert.ok(v < 0, '掌心必须在接触点上方（摸头），offsetY 必须为负');
+    else assert.ok(v > 0, `${k} 必须是正数，实为 ${v}`);
   }
+  assert.deepEqual([H.minPx, H.maxPx, H.viewportRatio], [40, 56, 0.07],
+    '手要比上一版小一号；40–56 是布局尺度');
   assert.ok(H.minPx < H.maxPx, `最小手掌 ${H.minPx} 必须小于上限 ${H.maxPx}`);
-  assert.ok(H.alpha <= 1 && H.padAlpha <= 1 && H.contactAlpha <= 1, '透明度不许越过 1');
-  assert.ok(H.padAlpha < H.alpha && H.contactAlpha < H.alpha,
-    '掌垫与接触光都必须比手本体更淡，否则细节会喧宾夺主');
+  assert.ok(H.alpha <= 1 && H.contactAlpha <= 1, '透明度不许越过 1');
+  assert.ok(H.contactAlpha < H.alpha, '接触光必须比手本体更淡，否则会喧宾夺主');
   assert.ok(H.rockAngle > 0 && H.rockAngle < 0.5, '抚摸摆动必须看得见又不至于把手甩飞');
   assert.ok(H.palmWidth > H.fingerRadius && H.palmHeight > H.fingerRadius,
     '掌心必须比手指粗，否则读出来是一把折扇');
@@ -1081,6 +1084,12 @@ test('CONFIG.hand 的二十个视觉旋钮齐备，尺寸、透明度与手指�
   assert.ok(tipGap > capsuleOuter,
     `最小手掌上四指仍会粘连：指端间距 ${tipGap} ≤ 胶囊外径 ${capsuleOuter}`);
   assert.ok(H.contactLineWidth < H.minPx * 0.1, '接触光描边要细，不能用手指的线宽');
+  assert.ok(H.contactPulseRate > H.rockRate * 1.2,
+    '接触圈必须比手腕摆得更快、错开相位，否则两个动作糊成一个');
+  assert.match(CONFIG.colors.handSkin, /^#[0-9a-f]{6}$/i);
+  assert.match(CONFIG.colors.handShade, /^#[0-9a-f]{6}$/i);
+  assert.notEqual(CONFIG.colors.handSkin, CONFIG.colors.sakura,
+    '手必须换成人手的肉色，不再借用星绒绒的樱花粉');
 });
 
 // 越界阈值必须严格大于抚摸接触阈值，否则"拎"与"摸"同时为真，Task 3 的让路规则白写。
