@@ -249,6 +249,12 @@ const CONFIG = {
     inertia: 1.6,              // 每秒趋近目标值的比例系数
     eventMagnitude: {          // 事件冲击：立即生效，不走惯性
       poked:    { fear: 0.45, anger: 0.25, joy: -0.3 },
+      // 拎着玩的两个方向（spec 2026-10-24 §5）。刻意写成**两行**而不是一行带符号：
+      // applyEvent 对表里每一项乘**同一个** scale，一行写不出"不开心时 joy 降而 anger 升"。
+      // 生产者只有一处：sim.js tickCreature 的 c.held 上升沿，按 enjoy 与 (1 − enjoy) 互补缩放。
+      // grabbedRough 的每一项绝对值都不许超过 poked 对应项 —— 由 tests/config.test.js 钉。
+      grabbedHappy: { joy: 0.3, fear: -0.15 },
+      grabbedRough: { anger: 0.2, fear: 0.25, joy: -0.2 },
       petted:   { joy: 0.4, fear: -0.2 },
       fed:      { joy: 0.3 },
       bumped:   { anger: 0.35, fear: 0.1 },
