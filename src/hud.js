@@ -304,6 +304,7 @@ export function mountHud(doc, deps) {
     muteBtn.addEventListener('click', () => api.pressMute());
   }
   const familyBtn = button(doc, controls, '家谱', 'hud-family-btn');
+  familyBtn.setAttribute('aria-expanded', 'false');
   familyBtn.addEventListener('click', () => api.setFamilyOpen(!state.familyOpen,
     state.card ? state.card.id : undefined));
   const gearBtn = button(doc, controls, '设置', 'hud-gear');
@@ -363,15 +364,16 @@ export function mountHud(doc, deps) {
   el(doc, 'h2', 'hud-family-title', familyHead).textContent = '家谱';
   const familyClose = button(doc, familyHead, '关闭', 'hud-family-close');
   const familyLegend = el(doc, 'div', 'hud-family-legend', family);
-  familyLegend.textContent = '同母相邻 = 同胞 · 实线 = 母亲 → 孩子 · 虚线 = 伙伴 · 空心点 = 起点无母亲记录 · 只画当前活着的个体';
+  familyLegend.textContent = '同母 = 同胞 · 实线 = 母亲 → 孩子 · 虚线 = 伙伴 · 虚线圈 = 起点无母亲记录 · 只画当前活着的个体';
   const familyScroll = el(doc, 'div', 'hud-family-scroll', family);
   const familyEmpty = el(doc, 'p', 'hud-family-empty', familyScroll);
-  familyEmpty.textContent = '缸里还没有个体';
+  familyEmpty.textContent = '没有活着的个体';
   const familySvg = svgEl(doc, 'svg', 'hud-family-tree', familyScroll);
 
   const state = {
     card: null, settingsOpen: false, familyOpen: false,
-    familyFocusId: null, familyNodes: 0, familyOpens: 0, _lastFamilyAt: -Infinity,
+    familyFocusId: null, familyNodes: 0, familyOpens: 0, familyFocusY: 0,
+    familySig: '', _lastFamilyAt: -Infinity,
     lastInputAt: 0, now: 0, _lastCardAt: -Infinity,
     frames: 0, cardRenders: 0, cardOpens: 0, saveLineWrites: 0,
     feeds: 0, tells: 0, tellTruncated: 0, tellDropped: 0, renames: 0, rejectedNames: 0,
@@ -429,18 +431,37 @@ export function mountHud(doc, deps) {
     familyKeyOn = true;
   }
 
-  function renderFamily(world) {
+  function renderFamily(world, scrollToFocus) {
     const model = familyModelFor(world, state.familyFocusId);
     state.familyFocusId = model.focusId;
     state.familyNodes = model.nodes.length;
-    clear(familySvg);
+    let sig = model.focusId || '';
+    for (const n of model.nodes) sig += `|n:${n.id}:${n.name}:${n.hue}:${n.depth}`;
+    for (const e of model.edges) sig += `|e:${e.kind}:${e.from}:${e.to}`;
+    const same = sig === state.familySig;
+    state.familySig = sig;
     familyEmpty.classList.toggle('is-hidden', model.nodes.length > 0);
     familySvg.classList.toggle('is-hidden', model.nodes.length === 0);
     if (model.nodes.length === 0) {
+      if (!same) clear(familySvg);
       familySvg.removeAttribute('viewBox');
       state._lastFamilyAt = state.now;
       return;
     }
+    if (same) {
+      // 数据没变就一个节点都不重建：否则每 250ms 一次会把滚动位置拉回焦点、
+      // 把正在用键盘浏览的人踢回 body（真页面抓到的 24 节点主场景缺陷）。
+      if (scrollToFocus) {
+        familyScroll.scrollTop = Math.max(0, state.familyFocusY - 120);
+      }
+      state._lastFamilyAt = state.now;
+      return;
+    }
+    const prevTop = familyScroll.scrollTop || 0;
+    const active = doc.activeElement;
+    const restoreId = scrollToFocus ? state.familyFocusId
+      : (active && active.dataset ? active.dataset.id : null);
+    clear(familySvg);
     const layout = layoutFamily(model);
     familySvg.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`);
     familySvg.setAttribute('width', String(layout.width));
@@ -452,6 +473,7 @@ export function mountHud(doc, deps) {
       path.setAttribute('d', e.d);
       if (e.dashed) path.setAttribute('stroke-dasharray', '4 4');
     }
+    const groups = new Map();
     for (const n of layout.nodes) {
       const cls = ['hud-family-node'];
       if (n.isFocus) cls.push('is-focus');
@@ -461,6 +483,9 @@ export function mountHud(doc, deps) {
       g.setAttribute('role', 'button');
       g.setAttribute('tabindex', '0');
       g.setAttribute('aria-label', n.name);
+      groups.set(n.id, g);
+      const full = svgEl(doc, 'title', null, g);
+      full.textContent = n.name;
       // 44px 的可点区：圆点本身只有 10px，直接拿它当触控目标是骗人的。
       const hit = svgEl(doc, 'rect', 'hud-fam-hit', g);
       hit.setAttribute('x', String(n.x - 10));
@@ -487,7 +512,12 @@ export function mountHud(doc, deps) {
         }
       });
     }
-    familyScroll.scrollTop = Math.max(0, layout.focusY - 120);
+    state.familyFocusY = layout.focusY;
+    familyScroll.scrollTop = scrollToFocus ? Math.max(0, layout.focusY - 120) : prevTop;
+    if (restoreId) {
+      const again = groups.get(restoreId);
+      if (again && again.focus) again.focus();
+    }
     state._lastFamilyAt = state.now;
   }
 
@@ -753,6 +783,9 @@ export function mountHud(doc, deps) {
     setSettingsOpen(open) {
       const want = !!open;
       if (want === state.settingsOpen) return;
+      // 家谱是覆盖层。设置页开在它下面会得到"点了设置什么也看不见"的面板；
+      // 想进设置就先退出家谱，两者不叠。
+      if (want && state.familyOpen) api.setFamilyOpen(false);
       state.settingsOpen = want;
       if (want) { state.settingsOpens += 1; buildPanel(); }
       else if (panel) { panel.box.remove(); panel = null; }   // 关了就**拆掉**：key 框少活一会儿
@@ -764,7 +797,7 @@ export function mountHud(doc, deps) {
       if (want === state.familyOpen) {
         if (want && focusId !== undefined) {
           state.familyFocusId = focusId;
-          renderFamily(latestWorld);
+          renderFamily(latestWorld, true);
         }
         return;
       }
@@ -774,11 +807,13 @@ export function mountHud(doc, deps) {
         if (focusId !== undefined) state.familyFocusId = focusId;
         else if (state.card) state.familyFocusId = state.card.id;
         family.classList.add('is-open');
+        familyBtn.setAttribute('aria-expanded', 'true');
         attachFamilyKey();
-        renderFamily(latestWorld);
+        renderFamily(latestWorld, true);
         familyClose.focus();
       } else {
         family.classList.remove('is-open');
+        familyBtn.setAttribute('aria-expanded', 'false');
         detachFamilyKey();
         familyBtn.focus();
       }
@@ -788,7 +823,7 @@ export function mountHud(doc, deps) {
     setFamilyFocus(id) {
       if (!id) return;
       state.familyFocusId = id;
-      if (state.familyOpen) renderFamily(latestWorld);
+      if (state.familyOpen) renderFamily(latestWorld, true);
       pulse();
     },
     setEndpoint(v) { draft.endpoint = String(v == null ? '' : v); state.endpointRejected = 0; paintPanel(); },
@@ -887,7 +922,7 @@ export function mountHud(doc, deps) {
         renderCard(state.card, world);
       }
       if (state.familyOpen && nowMs - state._lastFamilyAt >= H.cardRefreshMs) {
-        renderFamily(latestWorld);
+        renderFamily(latestWorld, false);
       }
       // 淡出淡的是" chrome "，不是玩家正在读的那张表：卡或设置页开着的时候不许淡。
       // 真页面实测（F-16）—— 卡片开着、98 秒没动手，`.hud` 挂上 is-dim ⇒ 整块 opacity .25，

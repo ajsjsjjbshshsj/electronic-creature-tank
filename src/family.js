@@ -15,8 +15,36 @@ const MAX_LABEL_CHARS = 9;
 const text = (v) => (typeof v === 'string' && v.length > 0 ? v : '');
 const finite = (v) => (typeof v === 'number' && Number.isFinite(v));
 const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-const nodeKey = (n) => `${n.name}\u0000${n.id}`;
 const alive = (c) => c && c.alive !== false && c.stage !== 'dead';
+
+// 数字感知排序（"泡泡·2" 在 "泡泡·10" 前）。不依赖 localeCompare —— 它在不同设备
+// 上可能取到不同 collation，而同一份存档在手机与电脑上必须给出同一棵树。
+function naturalCompare(a, b) {
+  const pa = String(a).match(/\d+|\D+/g) || [];
+  const pb = String(b).match(/\d+|\D+/g) || [];
+  const n = Math.min(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const x = pa[i];
+    const y = pb[i];
+    if (x === y) continue;
+    const dx = /^\d+$/.test(x);
+    const dy = /^\d+$/.test(y);
+    if (dx && dy) {
+      const c = Number(x) - Number(y);
+      if (c !== 0) return c;
+      if (x.length !== y.length) return x.length - y.length;
+    } else {
+      return byText(x, y);
+    }
+  }
+  return pa.length - pb.length;
+}
+function compareNodes(a, b) {
+  const g = a.generation - b.generation;
+  if (g !== 0) return g;
+  const n = naturalCompare(a.name, b.name);
+  return n !== 0 ? n : naturalCompare(a.id, b.id);
+}
 
 function truncateLabel(name) {
   const chars = Array.from(name);
@@ -37,7 +65,6 @@ export function familyModelFor(world, focusId) {
       name: text(c.name) || c.id,
       hue: c.traits && finite(c.traits.hue) ? c.traits.hue : 330,
       generation: finite(c.generation) ? c.generation : 1,
-      stage: text(c.stage),
       motherId,
       depth: 0,
     };
@@ -49,10 +76,9 @@ export function familyModelFor(world, focusId) {
     if (!children.has(n.motherId)) children.set(n.motherId, []);
     children.get(n.motherId).push(n);
   }
-  for (const group of children.values()) group.sort((a, b) => byText(nodeKey(a), nodeKey(b)));
+  for (const group of children.values()) group.sort(compareNodes);
 
-  const roots = nodes.filter((n) => !n.motherId)
-    .sort((a, b) => byText(nodeKey(a), nodeKey(b)));
+  const roots = nodes.filter((n) => !n.motherId).sort(compareNodes);
   const ordered = [];
   const placed = new Set();
   const stack = new Set();
@@ -69,7 +95,7 @@ export function familyModelFor(world, focusId) {
   };
   for (const root of roots) visit(root, 0);
   // 环状/残缺数据里可能没有根：把剩下的按确定顺序补成根，绝不递归死循环。
-  for (const n of nodes.slice().sort((a, b) => byText(nodeKey(a), nodeKey(b)))) {
+  for (const n of nodes.slice().sort(compareNodes)) {
     if (!placed.has(n.id)) visit(n, 0);
   }
 
@@ -78,16 +104,16 @@ export function familyModelFor(world, focusId) {
     if (group.length < 2) continue;
     siblingGroups.push({
       motherId,
-      ids: group.map((n) => n.id).sort(byText),
+      ids: group.map((n) => n.id).sort(naturalCompare),
     });
   }
-  siblingGroups.sort((a, b) => byText(a.motherId, b.motherId));
+  siblingGroups.sort((a, b) => naturalCompare(a.motherId, b.motherId));
 
   const edges = [];
   for (const n of nodes) {
     if (n.motherId) edges.push({ from: n.motherId, to: n.id, kind: 'mother' });
   }
-  edges.sort((a, b) => byText(`${a.from}\u0000${a.to}`, `${b.from}\u0000${b.to}`));
+  edges.sort((a, b) => naturalCompare(`${a.from}|${a.to}`, `${b.from}|${b.to}`));
 
   const seenPals = new Set();
   for (const c of creatures) {
@@ -101,9 +127,9 @@ export function familyModelFor(world, focusId) {
       edges.push({ from: pair[0], to: pair[1], kind: 'companion' });
     }
   }
-  edges.sort((a, b) => byText(
-    `${a.kind}\u0000${a.from}\u0000${a.to}`,
-    `${b.kind}\u0000${b.from}\u0000${b.to}`,
+  edges.sort((a, b) => naturalCompare(
+    `${a.kind}|${a.from}|${a.to}`,
+    `${b.kind}|${b.from}|${b.to}`,
   ));
 
   return {

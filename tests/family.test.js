@@ -71,6 +71,14 @@ test('自指/环状母亲关系不递归死循环，仍会被放到一个悬空�
   assert.equal(model.nodes.length, 1);
   assert.equal(model.nodes[0].depth, 0);
   assert.deepEqual(model.roots.map((n) => n.id), ['c-loop']);
+
+  const two = W([
+    C({ id: 'c-a', name: 'A', mother: 'c-b' }),
+    C({ id: 'c-b', name: 'B', mother: 'c-a' }),
+  ]);
+  const pair = familyModelFor(two, null);
+  assert.equal(pair.nodes.length, 2);
+  assert.deepEqual(pair.nodes.map((n) => n.depth), [0, 1]);
 });
 
 test('家谱模型不写世界：同一份 world 生成前后逐字节相同', () => {
@@ -78,6 +86,25 @@ test('家谱模型不写世界：同一份 world 生成前后逐字节相同', (
   const before = JSON.stringify(world);
   familyModelFor(world, 'c-c');
   assert.equal(JSON.stringify(world), before);
+});
+
+test('名字里的编号按数值排序：泡泡·2 在 泡泡·10 之前', () => {
+  const world = W([
+    C({ id: 'c-10', name: '泡泡·10' }),
+    C({ id: 'c-2', name: '泡泡·2' }),
+    C({ id: 'c-1', name: '泡泡' }),
+  ]);
+  assert.deepEqual(familyModelFor(world, null).nodes.map((n) => n.name),
+    ['泡泡', '泡泡·2', '泡泡·10']);
+});
+
+test('超长自定义名在布局里截到 9 字，并保留全名另存', () => {
+  const long = '这是一个特别特别长的自定义名字';
+  const layout = layoutFamily(familyModelFor(W([C({ id: 'c-long', name: long })]), 'c-long'));
+  const n = layout.nodes[0];
+  assert.equal(Array.from(n.label).length, 9);
+  assert.ok(n.label.endsWith('…'));
+  assert.equal(n.name, long, '全名仍留给 SVG title / aria-label');
 });
 
 test('布局把代际排成横向缩进、行按 DFS 稳定排列，边有有限坐标', () => {
@@ -114,6 +141,7 @@ test('极深的家谱也被限制在可滚动宽度内，不产生 NaN 或负数
     assert.ok(n.x >= 0 && n.y >= 0);
   }
   assert.ok(layout.width > 0 && layout.height > 0);
+  assert.ok(layout.width < 1000, `24 代深链的布局宽度失控：${layout.width}`);
 });
 
 test('布局是纯函数：同一模型两次调用逐字段相同', () => {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mountHud } from '../src/hud.js';
-import { makeDoc, find, findAll, click, textOf, countListeners } from './dom-stub.js';
+import { makeDoc, find, findAll, click, textOf, countListeners, SVG_NS, HTML_NS } from './dom-stub.js';
 
 const C = (o) => ({
   id: o.id,
@@ -60,16 +60,35 @@ test('挂载后有家谱入口与一个默认关闭的 dialog', () => {
   assert.equal(family.attrs['aria-modal'], 'true');
   assert.ok(!family._class.has('is-open'), '默认必须关着');
   assert.equal(hud.state.familyOpen, false);
+  assert.equal(btn.attrs['aria-expanded'], 'false');
+});
+
+test('从家谱按钮进入时，焦点落在当前信息卡这只身上', () => {
+  const { hud, root } = mount();
+  hud.frame(0, WORLD);
+  hud.state.card = WORLD.creatures[1];  // 模拟 setCard 之后的状态；本用例只测入口路径
+  click(find(root, 'button', 'hud-family-btn'));
+  assert.equal(hud.state.familyOpen, true);
+  assert.equal(hud.state.familyFocusId, 'c-b');
 });
 
 test('打开家谱画出活着的节点、母亲边、悬空根与虚线伙伴边', () => {
-  const { hud, family } = openWithFocus('c-c');
+  const { doc, hud, root, family } = openWithFocus('c-c');
   assert.equal(hud.state.familyOpen, true);
   assert.ok(family._class.has('is-open'));
+  assert.equal(find(root, 'button', 'hud-family-btn').attrs['aria-expanded'], 'true');
+  const svg = find(family, 'svg', 'hud-family-tree');
+  assert.equal(svg.namespaceURI, SVG_NS, '家谱必须是 SVG，不是 HTMLUnknownElement');
+  assert.equal(family.namespaceURI, HTML_NS);
   const nodes = findAll(family, 'g', 'hud-family-node');
   assert.deepEqual(nodes.map((n) => n.dataset.id), ['c-a', 'c-b', 'c-c', 'c-d'],
     '死者不进树，漂入/失母者作为根排在后面');
-  assert.equal(findAll(family, 'circle', 'hud-family-dot').length, 4);
+  for (const n of nodes) assert.equal(n.namespaceURI, SVG_NS);
+  const dots = findAll(family, 'circle', 'hud-family-dot');
+  assert.equal(dots.length, 4);
+  assert.equal(new Set(dots.map((d) => d.attrs.fill)).size, 4, '圆点色相必须来自个体且各不相同');
+  const labels = findAll(family, 'text', 'hud-family-label').map((t) => textOf(t));
+  assert.deepEqual(labels, ['A', 'B', 'C', '外来者']);
   assert.equal(nodes.filter((n) => n._class.has('is-root')).length, 2, '两个悬空起点');
   assert.equal(nodes.filter((n) => n._class.has('is-focus')).length, 1, '焦点只能有一个');
   assert.equal(nodes.find((n) => n.dataset.id === 'c-c')._class.has('is-focus'), true);
@@ -78,7 +97,8 @@ test('打开家谱画出活着的节点、母亲边、悬空根与虚线伙伴�
   const pals = edges.filter((e) => e._class.has('is-companion'));
   assert.equal(pals.length, 1, '双向伙伴记忆只能画一条虚线');
   assert.equal(pals[0].attrs['stroke-dasharray'], '4 4');
-  assert.ok(textOf(family).includes('同母相邻'), '同胞关系必须有一条可读的图例');
+  assert.ok(textOf(family).includes('同母 = 同胞'), '同胞关系必须有一条可读的图例');
+  assert.ok(doc.createdNS.includes('svg') && doc.createdNS.includes('path'));
 });
 
 test('点一个节点只改焦点并重画，不关掉家谱', () => {
@@ -108,6 +128,29 @@ test('关闭按钮与 Escape 都能关家谱，且 Escape 监听只在打开期�
   assert.equal(doc.docListenerCount('keydown'), 0);
 });
 
+test('内容不变时 frame 不重建：滚动位置与键盘焦点都保住；数据变化时也恢复', () => {
+  const { doc, hud, family } = openWithFocus('c-b');
+  const scroll = find(family, 'div', 'hud-family-scroll');
+  scroll.scrollTop = 180;
+  const nodeB = findAll(family, 'g', 'hud-family-node').find((n) => n.dataset.id === 'c-b');
+  nodeB.focus();
+  assert.equal(doc.activeElement, nodeB);
+
+  hud.frame(300, WORLD);                    // 同内容刷新：不得清空 SVG
+  const sameB = findAll(family, 'g', 'hud-family-node').find((n) => n.dataset.id === 'c-b');
+  assert.equal(sameB, nodeB, '同内容刷新不许换掉 <g>（换掉就把键盘位置扔了）');
+  assert.equal(scroll.scrollTop, 180, '同内容刷新不许把滚动位置拉回焦点');
+  assert.equal(doc.activeElement, nodeB);
+
+  const born = C({ id: 'c-new', name: '新孩子', mother: 'c-a', generation: 2 });
+  hud.frame(600, { ...WORLD, creatures: WORLD.creatures.concat([born]) });
+  const after = findAll(family, 'g', 'hud-family-node').find((n) => n.dataset.id === 'c-b');
+  assert.ok(after, '数据变化后重建，原节点还在');
+  assert.notEqual(after, nodeB, '数据真变时必须重建');
+  assert.equal(scroll.scrollTop, 180, '重建也不能把滚动位置重置');
+  assert.equal(doc.activeElement.dataset.id, 'c-b', '重建后焦点必须回到同一个个体');
+});
+
 test('打开家谱先收起信息卡/设置页，关闭后原样恢复', () => {
   const { hud, root } = mount();
   hud.frame(0, WORLD);
@@ -118,6 +161,15 @@ test('打开家谱先收起信息卡/设置页，关闭后原样恢复', () => {
   assert.ok(!card._class.has('is-open'), '家谱盖上来时卡必须让位');
   hud.setFamilyOpen(false);
   assert.ok(card._class.has('is-open'), '关家谱后卡要回来');
+  hud.setSettingsOpen(false);
+});
+
+test('家谱开着时打开设置，会先退出家谱，避免设置页藏在它下面', () => {
+  const { hud, family } = openWithFocus('c-b');
+  hud.setSettingsOpen(true);
+  assert.equal(hud.state.familyOpen, false);
+  assert.equal(hud.state.settingsOpen, true);
+  assert.ok(!family._class.has('is-open'));
   hud.setSettingsOpen(false);
 });
 
@@ -141,7 +193,7 @@ test('空缸打开家谱显示空态，不抛也不造幽灵节点', () => {
   hud.setFamilyOpen(true);
   assert.equal(hud.state.familyOpen, true);
   assert.equal(findAll(family, 'g', 'hud-family-node').length, 0);
-  assert.ok(textOf(family).includes('还没有个体'));
+  assert.ok(textOf(family).includes('没有活着的个体'));
 });
 
 test('frame 刷新家谱以反映出生/死亡，但关闭时不重建', () => {

@@ -126,8 +126,9 @@ body {
 .hud-family-node { cursor: pointer; pointer-events: all; }
 .hud-fam-hit { fill: transparent; }
 .hud-family-dot { stroke: rgba(255, 242, 248, .65); stroke-width: 1.4; }
-.hud-family-node.is-root .hud-family-dot { stroke-dasharray: 2 2; }
+.hud-family-node.is-root .hud-family-dot { fill: rgba(20, 10, 40, .85); stroke: #ffd9e8; stroke-width: 2; }
 .hud-family-node.is-focus .hud-family-dot { stroke: #fff; stroke-width: 2.4; }
+.hud-family-node:focus .hud-fam-hit { stroke: rgba(255, 255, 255, .7); stroke-width: 1.5; }
 .hud-family-label { fill: rgba(255, 234, 246, .9); font-size: 12px; }
 
 @media (max-width: 480px) {

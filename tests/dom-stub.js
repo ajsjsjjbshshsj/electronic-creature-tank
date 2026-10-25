@@ -142,6 +142,9 @@ export function makeDoc() {
     getElementById(id) { return doc.__byId[id] || null; },
     __byId: {},
   };
+  Object.defineProperty(doc, 'activeElement', {
+    get() { return doc.__focused || doc.body; },
+  });
   doc.body = makeNode('body', doc);
   return doc;
 }
