@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { makeGradient, assertGradient, assertEllipse } from './ctx-stub.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { CONFIG } from '../src/config.js';
@@ -23,7 +24,8 @@ import {
 //   高光朝向、渐变方向、颜色对不对、sprite 画得美不美 —— 全部测不到，只能进手工清单。
 //   凡疑灵属于"只有真实渲染才看出来"的东西，这里刻意**不写**假装能测的断言。
 
-const GRADIENT_STUB = { addColorStop() {} };
+// 会抛的那一份，不是 `{ addColorStop() {} }`：见 tests/ctx-stub.js 的实测表
+const GRADIENT_STUB = makeGradient();
 
 function createStubCtx() {
   const counts = new Map();
@@ -39,14 +41,18 @@ function createStubCtx() {
     'quadraticCurveTo', 'bezierCurveTo', 'arc', 'ellipse', 'rect', 'fill', 'stroke',
     'clip', 'clearRect', 'fillRect', 'setTransform', 'translate', 'rotate', 'scale',
     'drawImage', 'fillText']) stub[m] = record(m);
+    // ellipse 的半径是第 3、4 个参数：真浏览器给负半径抛 DOMException，而
+    // record() 只认方法名不认参数，所以单独包这一层（其余方法没有域，不包）。
+    const rawEllipse = stub.ellipse;
+    stub.ellipse = (...a) => { assertEllipse(a[2], a[3]); return rawEllipse(); };
   // 渐变工厂要**既计数又返回一个可用的桩**，所以不能直接用 record()：
   // 调用方拿到返回值后会接着调 addColorStop，返回 undefined 会在测试里炸成
   // "Cannot read properties of undefined"，把真正的失败原因（每帧新建渐变）盖掉。
-  stub.createRadialGradient = () => {
+  stub.createRadialGradient = (...a) => { assertGradient('createRadial', ...a);
     counts.set('createRadialGradient', (counts.get('createRadialGradient') || 0) + 1);
     return GRADIENT_STUB;
   };
-  stub.createLinearGradient = () => {
+  stub.createLinearGradient = (...a) => { assertGradient('createLinear', ...a);
     counts.set('createLinearGradient', (counts.get('createLinearGradient') || 0) + 1);
     return GRADIENT_STUB;
   };

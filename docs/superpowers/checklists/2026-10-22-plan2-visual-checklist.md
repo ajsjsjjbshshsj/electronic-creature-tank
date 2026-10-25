@@ -692,6 +692,28 @@ const ctrl2 = mod.boot({ canvas: cv2, seed: 20261022, populationCap: 24, rendere
 - **真页面复验**：`is-dim` 在 `setCard` 后的第一帧被摘掉，opacity 0.25 → 0.376 → 1（CSS 过渡），
   关掉之后重新淡回去。
 
+### F-17（2026-10-25，顺着 §12.11 那道栅栏摸到的）：脏基因会穿过存档、在真浏览器里每帧抛
+
+> ✅ **已修**（`assertCreatureShape` 加一道"每个基因都是两个有限数"）。
+
+- **链路**：`genes.hue = [0.5]`（短数组，JSON 里完全合法）→ `phenotype` 里 `alleles[1]` 是
+  `undefined` → 乘法出 `NaN` → `clamp01(NaN)` **不兜**（`Math.min(1, NaN) === NaN`）→
+  `decode` 的 `hue` 是 NaN → 渲染层拼成 `'hsla(NaN, 70%, 73%, 0.95)'` →
+  `addColorStop` 在真浏览器**当场抛 DOMException** ⇒ 读档之后每一帧都飞。
+  裸数（`genes.sat = 0.4`）与字符串对（`['0.2', 0.7]`）同理。
+- **为什么只有这一条数会出大事**：记忆里的 NaN 只是"它好像不认识我了"（症状轻、不崩），
+  而基因是这张档里**唯一会走进颜色串的数**。
+- **为什么此前没有任何判据挡它**：`assertCreatureShape` 逐键查了记忆条目
+  （`familiarity/affection/kinship` 必须有限，注释还写着"字符串在 JSON 里合法，运算时变 NaN"），
+  **但没查基因**；而 `migrate()` 只补**缺的键**，键在而值畸形它照收。
+  渲染测试那边则是四份各抄一份的 `GRADIENT_STUB = { addColorStop() {} }` —— 桩替平台撒了第三次谎。
+- **修法**：检查放在 `assertCreatureShape` 里（紧跟记忆那条，同一个位置、同一类理由），
+  于是坏档走的是既有的 `'corrupt-moved'` 隔离路径 —— "这份档读不懂，已留证据"，
+  而不是"读进来然后每帧抛"。
+- **判据**：坏形状三种各一条（短数组 / 裸数 / 字符串对），加一条**因果链**判据
+  （`decode` 出 NaN hue ⇒ 那个颜色串真被 §12.11 那道域检查拦下；反空对照是正常基因出来的串必须过）。
+  这一条是刻意不写成"断言一个说法"：它把"会算出 NaN"与"NaN 会被浏览器拒"两端都钉住。
+
 ### 6.5 §6 的逐条状态（2026-10-25 刷新，**这张表是 §6 的唯一去处**）
 
 | 编号 | 一句话 | 状态 | 谁能关 |
@@ -711,7 +733,8 @@ const ctrl2 = mod.boot({ canvas: cv2, seed: 20261022, populationCap: 24, rendere
 | F-13 | 真页面点一只生物就抛 TypeError（`children.length = 0`） | ✅ 已修（2026-10-25）**并顺手把桩修对**：`dom-stub.children` 改只读视图 | — |
 | F-14 | 好感心形永远空着（`style['--x']=v` 进不了层叠） | ✅ 已修（2026-10-25，真页面复验 `getComputedStyle` 读到 0.50002） | — |
 | F-15 | 雷达图一个像素都没画（`createElement('svg')`） | ✅ 已修（2026-10-25，真页面复验 `SVGPolygonElement` 89.1×57，原 0×0） | — |
-| F-16 | 卡开着时整块 HUD 淡成 0.25（看不清但点得动） | ✅ 已修（2026-10-25，含反向判据"都关了要淡回去"） | — |
+| F-16 | 卡开着时整块 HUD 淡成 0.25（`is-dim` 不看面板开没开） | ✅ 已修（2026-10-25，含反向判据"都关了要淡回去"） | — |
+| F-17 | 脏基因（短数组 / 裸数 / 字符串对）穿过 `migrate` → NaN 色相 → 真浏览器每帧抛 | ✅ 已修（2026-10-25，坏档改走既有的 `corrupt-moved` 隔离路径） | — |
 | O-1 | 大个体中心亮区读成死白 | 🔍 仍是观察，未量化 | 要 r ≥ 15px 的射线复量 |
 | O-2 | 淡出末段"有框没字" | 🔍 仍是观察 | 要量两个 alpha 阈值 |
 | O-3 | 光藻份数压过生物 | 🔍 仍是观察 | 要先给目标比值 |
@@ -989,6 +1012,12 @@ const ctrl2 = mod.boot({ canvas: cv2, seed: 20261022, populationCap: 24, rendere
 - **查过且安全，下一轮不必再查**：`controller.saveState`（存的是 `save.state` 对象引用，落盘层原地改字段）、
   `hud.preload` → `main.js:1264` 逐张预热（`assets/README.txt:14` 那句"load images once"有实现）、
   `preloadList()` 八张**真的在盘上**（`tests/avatar.test.js:82`）。§9.4 另记了三处不安全的并已修。
+- **同上一格（2026-10-25 补）**：`src/` 里 `document.createElement` 造的 SVG 节点只有雷达那两处，
+  已改 `createElementNS`；`style` 写点全仓库只有心形那一处，已改 `setProperty`；
+  `input.textContent` 那一处早已避开（真 `<input>` 也忽略它）；
+  而渲染层四份 ctx 桩接上域检查之后 **146 条渲染判据全绿** ⇒ 渲染层从没把负半径、
+  越界色标位置或 NaN 颜色递给过真浏览器会抛的那几个位置（实测表与栅栏本体见 §12.11）。
+
 
 ---
 
@@ -1337,6 +1366,42 @@ spec §6.3 明写了"**它学会并主动说的第一个词，很可能就是自
 所以"等它自己冒出来"那格**即使那只没饿死也永远不会冒出来**。
 这条不是 bug（它是设计：挨骂的词不该再拿来讨好），但它把那一格的**做法**改了：
 要验"它自己会喊"，得在它**开心**的时候讲给它听。判据里那句注释就是为这个写的。
+
+### 12.11 把 §12.7 那个问法用到最后一块表面：渲染层的四份 ctx 桩
+
+问法还是那一句 —— **"这一行在桩里成立，靠的是桩的哪一条偷懒？"**
+`src/` 里 DOM 写点只有 1 处（F-14）与 SVG 造节点 2 处（F-15），而渲染层有四份
+**各抄一份**的 ctx 桩（`render` / `render-body` / `render-fx` / `render-bubble`），
+四份里都写着同一句 `const GRADIENT_STUB = { addColorStop() {} };`。
+
+**先在真浏览器里量清"什么会抛"**（逐项试过，别照抄规范）：
+
+| 输入 | 真 Canvas2D | 之前的桩 |
+|---|---|---|
+| `createRadialGradient` 负半径 | **抛 DOMException** | 收 |
+| `createLinearGradient` 坐标 NaN | **抛 TypeError** | 收 |
+| `addColorStop` 位置 1.2 / NaN | **抛 DOMException / TypeError** | 收 |
+| `addColorStop` 颜色 `'hsla(NaN,…)'`、`'rgba(…,NaN)'` | **抛 DOMException** | 收 |
+| `ellipse` 半径为负 | **抛 DOMException** | 收 |
+| `globalAlpha = NaN / 1.5` | **静默忽略**（读回 1） | 收 |
+| `fillStyle` / `font` 非法串 | **静默忽略**（读回前值） | 收 |
+
+**做了什么**：新建 `tests/ctx-stub.js`，把上面**前五格**（会抛的那五格）做成域检查，
+四份桩一起接上（`makeGradient` / `assertGradient` / `assertEllipse`）。
+后两格**刻意不设检查** —— 平台静默忽略而栅栏抛错，那是把桩改得比平台更严，
+是同一族撒谎的镜像面。
+
+**量到的结果**：146 条渲染判据全绿 ⇒ **渲染层今天从没把出域的参数递给过真浏览器会抛的那几个位置**。
+这是一条"查过且安全"，下一轮不必再查；栅栏留着，是为了下一个人算出 NaN 时撞红而不是让玩家撞白屏。
+
+**栅栏自己也要有判据**（`tests/ctx-stub.test.js`，4 条）：没人测的栅栏会烂 ——
+与 F-9"注释承诺的返回值没有消费者"是同一种死法。每一条"该抛"对上表里一格实测，
+每一条"不该抛"对上渲染层今天真的喂进去的形状（少了后半截，这道栅栏会在下次改颜色表时拦死一缸正常绘制）。
+
+**顺着它摸到 F-17**：既然桩会照收 NaN 颜色，就问"NaN 有没有路走进来" —— 有，而且入口是存档：
+`genes.hue = [0.5]` 在 JSON 里合法、`migrate()` 只补缺键、`clamp01(NaN)` 不兜、
+`decode` 出 NaN 色相、渲染层拼出 `'hsla(NaN,…)'`。正文在 §6 F-17。
+
 
 
 

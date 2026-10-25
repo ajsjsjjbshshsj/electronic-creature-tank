@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { makeGradient, assertGradient, assertEllipse } from './ctx-stub.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { CONFIG } from '../src/config.js';
@@ -35,7 +36,8 @@ import {
 // 这种失败只能靠记值或记结果才抓得到。只破例记这三样，其余一律不记，避免每条断言
 // 都变成参数脆断（那是 B13/B14 立「只数次数」纪律时要避免的东西）。
 
-const GRADIENT_STUB = { addColorStop() {} };
+// 会抛的那一份，不是 `{ addColorStop() {} }`：见 tests/ctx-stub.js 的实测表
+const GRADIENT_STUB = makeGradient();
 
 function createBubbleCtx(opts) {
   const o = opts || {};
@@ -86,8 +88,12 @@ function createBubbleCtx(opts) {
   };
   stub.save = () => { depth += 1; bump('save'); ops.push({ op: 'save', depth }); };
   stub.restore = () => { bump('restore'); ops.push({ op: 'restore', depth }); depth -= 1; };
-  stub.createRadialGradient = () => { bump('createRadialGradient'); return GRADIENT_STUB; };
-  stub.createLinearGradient = () => { bump('createLinearGradient'); return GRADIENT_STUB; };
+  // ellipse 的半径是第 3、4 个参数：真浏览器给负半径抛 DOMException，而下面那个方法名循环
+  // 只认名字不认参数，所以单独包这一层（其余方法没有域，不包）。
+  const rawEllipse = stub.ellipse;
+  stub.ellipse = (...a) => { assertEllipse(a[2], a[3]); return rawEllipse(); };
+  stub.createRadialGradient = (...a) => { assertGradient('createRadial', ...a); bump('createRadialGradient'); return GRADIENT_STUB; };
+  stub.createLinearGradient = (...a) => { assertGradient('createLinear', ...a); bump('createLinearGradient'); return GRADIENT_STUB; };
   // ⚠️ 桩的度量**与字号无关**（每个字符恒宽）：这是刻意的。真实 canvas 的 measureText
   // 会随 ctx.font 变大，于是「字号写错」会被「框也跟着变大」自我掩盖。恒宽度量让
   // 「字号 ≥14px」只能从 font 的值上被读到，而换行行为完全由 maxWidthPx 决定、可在 Node 里断言。

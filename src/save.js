@@ -167,6 +167,22 @@ export function assertCreatureShape(c) {
       throw new TypeError(`assertCreatureShape: ${c.id} 的记忆条目 ${e.id} 的 role "${String(e.role)}" 不在 ROLES 里`);
     }
   }
+  // 基因是这张档里**唯一会走进颜色串的数**。记忆里的 NaN 只是"它好像不认识我了"，
+  // 基因里的 NaN 会穿过 decode 变成 hue=NaN，再拼成 'hsla(NaN, 70%, 73%, 0.95)' 喂给
+  // addColorStop —— 真浏览器在那里当场抛，于是读档之后每一帧都飞（F-17，2026-10-25 实测）。
+  // migrate() 只补**缺的键**：键在而值畸形（短数组、裸数、字符串）它照单收下，
+  // 所以这道检查必须跟在 migrate 后面，而不是并进它里面（与上面记忆那条同一个位置）。
+  const genes = (c && c.genes) || {};
+  for (const name of ALL_GENES) {
+    const pair = genes[name];
+    if (!Array.isArray(pair) || pair.length !== 2
+      || !Number.isFinite(pair[0]) || !Number.isFinite(pair[1])) {
+      throw new TypeError(
+        `assertCreatureShape: ${c.id} 的基因 ${name} 不是"两个有限数"（收到 ${JSON.stringify(pair)}）`
+        + ' —— 它经 decode 会变成 NaN 色相，而真浏览器在 addColorStop 上当场抛',
+      );
+    }
+  }
   return true;
 }
 

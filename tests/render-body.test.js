@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { makeGradient, assertGradient, assertEllipse } from './ctx-stub.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { CONFIG } from '../src/config.js';
@@ -30,7 +31,8 @@ import {
 // ⚠️ 仍然测不到的东西（渐变朝向、碎边亮度对比够不好看、受光侧真的在左上吗）
 // 一律进 tests/visual-checklist 手工清单，本文件**刻意不写假装能测的断言**。
 
-const GRADIENT_STUB = { addColorStop() {} };
+// 会抛的那一份，不是 `{ addColorStop() {} }`：见 tests/ctx-stub.js 的实测表
+const GRADIENT_STUB = makeGradient();
 
 function createLogCtx() {
   const counts = new Map();
@@ -59,11 +61,15 @@ function createLogCtx() {
   }
   stub.save = () => { depth += 1; ops.push({ op: bump('save'), depth }); };
   stub.restore = () => { ops.push({ op: bump('restore'), depth }); depth -= 1; };
-  stub.createRadialGradient = () => {
+  // ellipse 的半径是第 3、4 个参数：真浏览器给负半径抛 DOMException，而下面那个方法名循环
+  // 只认名字不认参数，所以单独包这一层（其余方法没有域，不包）。
+  const rawEllipse = stub.ellipse;
+  stub.ellipse = (...a) => { assertEllipse(a[2], a[3]); return rawEllipse(); };
+  stub.createRadialGradient = (...a) => { assertGradient('createRadial', ...a);
     counts.set('createRadialGradient', (counts.get('createRadialGradient') || 0) + 1);
     return GRADIENT_STUB;
   };
-  stub.createLinearGradient = () => {
+  stub.createLinearGradient = (...a) => { assertGradient('createLinear', ...a);
     counts.set('createLinearGradient', (counts.get('createLinearGradient') || 0) + 1);
     return GRADIENT_STUB;
   };
