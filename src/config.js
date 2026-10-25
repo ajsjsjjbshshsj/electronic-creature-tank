@@ -452,7 +452,11 @@ const CONFIG = {
     //      只有人手会抱怨"要拔老高才拎得起"。
     //   ② followStiffness 是**数学量**，由 Task 2 的脚本量出来回填（95% 收敛用时 + 过冲帧数）。
     pullOutRatio: 1.5,
-    followStiffness: 140,      // ← 实测回填，别照抄（量法写在 plans/2026-10-24-grab-and-carry.md Task 2）
+    followStiffness: 900,      // 实测回填：95% 收敛 183.3 ms、过冲 0 帧、ω·dt = 0.500。
+                               // 扫描到的边界：k=1600 已能到 150 ms 但 ω·dt=0.667；
+                               // k=2500 出现 88 帧过冲（ω·dt=0.83）⇒ 半隐式在粗步长下不是真临界阻尼。
+                               // 取"零过冲 + 离振铃点有 2.8× 裕度"这一档；嫌钝就往上调，
+                               // 但 ω·dt < 0.8 那条守卫会先拦住你（tests/grab.test.js）。
     shakeSpeedFloor: 0.06,     // 归一化单位/秒：手速低于它不算"摇"。刻意远低于 HAND_SPEED_POKE 0.25 ——
                                // 那两条量的不是同一件事：这条量"有没有在动"，那条分"温柔还是粗暴"。
     shakePerSecond: 0.16,      // 每秒不适累积系数（再乘 (1 − enjoy) 与超速量）
@@ -460,7 +464,10 @@ const CONFIG = {
                                // 拎着是被动承受，摸是主动讨好，不该等价
     familiarityRate: 0.04,     // "认识"照旧买，与被它替掉的那条手停附近通道**同值**：
                                // 玩家侧的认识速度不变，变的只是来源（叠加就是 0.08/s，见 Task 3 判据）
-    w: { clingy: 0.5, affection: 0.5, irritable: 0.35 },   // enjoyOf 的三项权重
+    w: { clingy: 0.5, affection: 0.5, irritable: 0.35 },   // enjoyOf：三条 [0,1] 信号的归一化加权平均
+                               // （irritable 取反参与，所以易怒 = 不享受）。归一化是为了让
+                               // 默认个体**恰好**落在 0.5 中位 —— 三项直接相加会算出 0.825，
+                               // 全缸一律"喜欢被拎"，R-2 就白立了（tests/grab.test.js 钉住）
   },
   fluff: {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型

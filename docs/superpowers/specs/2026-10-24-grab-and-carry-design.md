@@ -91,11 +91,18 @@ heldStep(c, hand, dt, cfg) → { x, y, vx, vy }
 ## 5. 反应：一条可测的规则，不是一堆系数
 
 ```
-enjoy = clamp01( clingy × wClingy + affection × wAffection − irritable × wIrritable )
+enjoy = clamp01( ( clingy × wClingy + affection × wAffection + (1 − irritable) × wIrritable )
+                  / (wClingy + wAffection + wIrritable) )
 ```
 
 三项全部读现成字段：`c.traits.personality.{clingy, irritable}`、`affectionFor(c.memory, PLAYER_ID)`
 （`src/sim.js:835` 已在用这个读法）。权重进 `CONFIG.grab`，不写死在代码里。
+
+> **执行时改过一次，原因记在这里**（原式是三项直接相加）：直接相加时默认个体（三项都 0.5）算出
+> **0.825** —— 等于全缸一被拎就偏"喜欢被拎"，R-2 想避免的正是这个；而三项全 0 又算出 **0**，
+> 等于"出厂个体一被拎就被吓"。归一化成加权平均之后默认恰好落在 0.5，两个极端要靠满配基因才推得动。
+> 连带 `carryEffects` 也从"joy 乘 e、anger 乘 (1−e)"的混合式改成**同一 tick 只走一个方向**
+> （以 0.5 为界切两段）：混合式的症状是抗拒的那只摇得越快 joy 也涨，一只又哭又笑的星绒绒。
 
 - **抓住的上升沿发一次**（与 `petted` / `poked` 完全同形，靠 §7 那个寄存器而不是计时器）：
   情绪表里加**两行**，各自按互补比例缩放后叠加 —— `applyEvent(emotions, kind, scale = 1)` **本来就接第三个
@@ -216,10 +223,10 @@ enjoy = clamp01( clingy × wClingy + affection × wAffection − irritable × wI
 
 ## 12. 两个必须由实测决定的旋钮（本轮不许拍脑袋填数）
 
-| 旋钮 | 含义 | 定它的方法 |
-|---|---|---|
-| `CONFIG.grab.pullOutRatio` | 手移出多远算"带离身体"（摸与拎的分界） | 与 `petContactRatio 1.15` 成对试：拖两下，看"轻抚"会不会被误判成拎、"拎"会不会要拔老高 |
-| `CONFIG.grab.followStiffness`（k） | 追随的紧不紧，直接决定甩出去的爽感 | 固定一段手样本跑 `heldStep`，量"手停后身体收敛用时"与"最大过冲"；临界阻尼应零过冲，量出来不是就说明积分写法错 |
+| 旋钮 | 含义 | 定它的方法 | 现状 |
+|---|---|---|---|
+| `CONFIG.grab.pullOutRatio` | 手移出多远算"带离身体"（摸与拎的分界） | 与 `petContactRatio 1.15` 成对试：拖两下，看"轻抚"会不会被误判成拎、"拎"会不会要拔老高 | **待玩家的手**。初值 1.5 是几何推定（臂尖外再 0.35 倍半径） |
+| `CONFIG.grab.followStiffness`（k） | 追随的紧不紧，直接决定甩出去的爽感 | 固定一段手样本跑 `heldStep`，量"95% 收敛用时"与"过冲帧数" | ✅ **已实测 = 900**（183.3 ms、零过冲、ω·dt = 0.500）。扫到 k=2500 出现 88 帧过冲 ⇒ 半隐式在粗步长下不是真临界阻尼；`ω·dt < 0.8` 已钉成测试 |
 
 这两个的**初值由实现轮实测后回填**，回填时把量到的数字写进本文件（与 D-1 那条
 "量 assets → 定常数 → 写判据"的链条同形）。`enjoy` 的三个权重同理，但那是观感量，
