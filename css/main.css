@@ -106,6 +106,38 @@ body {
 .hud-card h2 + .hud-portrait { margin-top: 0; }
 .hud-rows, .hud-relations { margin: 8px 0; }
 
+/* ---- 家谱（spec §6.3）：桌面右侧栏 / 手机全屏 ---- */
+.hud-family { display: none; position: absolute; top: 64px; right: 12px; bottom: 16px;
+  width: min(430px, 44vw); z-index: 5; flex-direction: column; box-sizing: border-box;
+  padding: 12px; background: rgba(20, 10, 40, .96);
+  border: 1px solid rgba(255, 217, 232, .24); border-radius: 16px; }
+.hud-family.is-open { display: flex; }
+.hud-family-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.hud-family-title { margin: 0; font-size: 17px; font-weight: 600; }
+.hud-family-legend { margin-top: 6px; font-size: 11px; line-height: 1.5; opacity: .62; }
+.hud-family-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; margin-top: 8px;
+  -webkit-overflow-scrolling: touch; }
+.hud-family-tree { display: block; min-width: 100%; }
+.hud-family-tree.is-hidden { display: none; }
+.hud-family-empty { margin: 12px 4px; opacity: .66; }
+.hud-family-empty.is-hidden { display: none; }
+.hud-family-edge { fill: none; stroke: rgba(255, 217, 232, .34); stroke-width: 1.2; }
+.hud-family-edge.is-companion { stroke: rgba(255, 179, 209, .48); stroke-dasharray: 4 4; }
+.hud-family-node { cursor: pointer; pointer-events: all; }
+.hud-fam-hit { fill: transparent; }
+.hud-family-dot { stroke: rgba(255, 242, 248, .65); stroke-width: 1.4; }
+.hud-family-node.is-root .hud-family-dot { fill: rgba(20, 10, 40, .85); stroke: #ffd9e8; stroke-width: 2; }
+.hud-family-node.is-focus .hud-family-dot { stroke: #fff; stroke-width: 2.4; }
+.hud-family-node:focus .hud-fam-hit { stroke: rgba(255, 255, 255, .7); stroke-width: 1.5; }
+.hud-family-label { fill: rgba(255, 234, 246, .9); font-size: 12px; }
+
+@media (max-width: 480px) {
+  .hud-family { inset: 0; width: auto; border-radius: 0; z-index: 6;
+    padding: calc(var(--safe-top) + 12px) calc(var(--safe-right) + 12px)
+      calc(var(--safe-bottom) + 12px) calc(var(--safe-left) + 12px); }
+  .hud-family-label { font-size: 13px; }
+}
+
 /* spec §6.3 触控目标下限。与 CONFIG.hud.minTouchPx 是同一个数 ——
    写两处是有意的：CSS 里必须是字面量（媒体查询与 min() 读不到 JS），
    而 JS 侧要拿它算点选下限。谁改了谁就要在另一处看到红。 */

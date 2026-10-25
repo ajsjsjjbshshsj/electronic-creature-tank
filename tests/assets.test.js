@@ -50,6 +50,21 @@ test('hud.js 写的可见类与 css/main.css 读的可见类必须是同一批',
 // 心形的填充度是同一个道理的第二个实例：JS 写一个 CSS 自定义属性，名字对不上就静默无效。
 // F-14 抓的是"写的方式"不对（style['--x']=v 进不了层叠），这条抓"名字"漂移 ——
 // 两边各改一半的症状是心形永远空着，而没有任何一处报错。
+test('家谱的 DOM 类与 CSS 可见性双向锁住（桩里没有 CSS）', () => {
+  const css = read('../css/main.css');
+  const js = read('../src/hud.js');
+  assert.match(css, /\.hud-family\.is-open\s*\{[^}]*display:\s*flex/,
+    'CSS 不显示 is-open 的家谱 ⇒ 点了没反应');
+  assert.match(css, /\.hud-family-empty\.is-hidden\s*\{[^}]*display:\s*none/);
+  for (const cls of ['is-focus', 'is-root', 'is-companion', 'hud-family-dot',
+    'hud-family-label', 'hud-fam-hit']) {
+    assert.ok(css.includes(cls), `css/main.css 没有 ${cls} 的样式`);
+    assert.ok(js.includes(cls), `hud.js 没有写 ${cls}`);
+  }
+  assert.match(css, /@media\s*\(max-width:\s*480px\)[\s\S]*?\.hud-family\s*\{[^}]*inset:\s*0/,
+    '手机断点必须把家谱铺满全屏');
+});
+
 test('--heart-fill 这个名字在 hud.js 与 css/main.css 之间不许漂移', () => {
   const css = read('../css/main.css');
   const js = read('../src/hud.js');

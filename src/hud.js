@@ -13,6 +13,7 @@ import { affectionFor, PLAYER_ID } from './memory.js';
 import { expressionFor, avatarSrc, preloadList } from './avatar.js';
 // 端点判据只有一份：configIssue 与设置页共用，否则会出现"设置页说能存、档位却拒发请求"。
 import { endpointIssue } from './api.js';
+import { familyModelFor, layoutFamily } from './family.js';
 
 const H = CONFIG.hud;
 const DASH = '—';
@@ -302,6 +303,10 @@ export function mountHud(doc, deps) {
     muteBtn = button(doc, controls, '静音', 'hud-mute');
     muteBtn.addEventListener('click', () => api.pressMute());
   }
+  const familyBtn = button(doc, controls, '家谱', 'hud-family-btn');
+  familyBtn.setAttribute('aria-expanded', 'false');
+  familyBtn.addEventListener('click', () => api.setFamilyOpen(!state.familyOpen,
+    state.card ? state.card.id : undefined));
   const gearBtn = button(doc, controls, '设置', 'hud-gear');
   gearBtn.addEventListener('click', () => api.setSettingsOpen(!state.settingsOpen));
 
@@ -348,8 +353,28 @@ export function mountHud(doc, deps) {
   const tellInput = textInput(doc, card, 'hud-tell', '讲给它听', H.tellMaxChars);
   const tellBtn = button(doc, card, '说', 'hud-tell-go');
 
+  // ---- 家谱（spec §6.3）----
+  // 与信息卡分开的一层：桌面是右侧栏、手机是全屏（CSS 断点负责）。
+  // 它只读最近一帧的 world；节点/边/坐标全部由 family.js 的纯函数给出。
+  const family = el(doc, 'div', 'hud-family', root);
+  family.setAttribute('role', 'dialog');
+  family.setAttribute('aria-modal', 'true');
+  family.setAttribute('aria-label', '家谱');
+  const familyHead = el(doc, 'div', 'hud-family-head', family);
+  el(doc, 'h2', 'hud-family-title', familyHead).textContent = '家谱';
+  const familyClose = button(doc, familyHead, '关闭', 'hud-family-close');
+  const familyLegend = el(doc, 'div', 'hud-family-legend', family);
+  familyLegend.textContent = '同母 = 同胞 · 实线 = 母亲 → 孩子 · 虚线 = 伙伴 · 虚线圈 = 起点无母亲记录 · 只画当前活着的个体';
+  const familyScroll = el(doc, 'div', 'hud-family-scroll', family);
+  const familyEmpty = el(doc, 'p', 'hud-family-empty', familyScroll);
+  familyEmpty.textContent = '没有活着的个体';
+  const familySvg = svgEl(doc, 'svg', 'hud-family-tree', familyScroll);
+
   const state = {
-    card: null, settingsOpen: false, lastInputAt: 0, now: 0, _lastCardAt: -Infinity,
+    card: null, settingsOpen: false, familyOpen: false,
+    familyFocusId: null, familyNodes: 0, familyOpens: 0, familyFocusY: 0,
+    familySig: '', _lastFamilyAt: -Infinity,
+    lastInputAt: 0, now: 0, _lastCardAt: -Infinity,
     frames: 0, cardRenders: 0, cardOpens: 0, saveLineWrites: 0,
     feeds: 0, tells: 0, tellTruncated: 0, tellDropped: 0, renames: 0, rejectedNames: 0,
     endpointRejected: 0, settingsOpens: 0, settingsSaved: 0, clearArmed: false, _armedAt: 0,
@@ -358,6 +383,7 @@ export function mountHud(doc, deps) {
   };
   let lastRows = '';
   let lastRel = '';
+  let latestWorld = controller.world || null;
 
   function pulse(nowMs) {
     state.lastInputAt = Number.isFinite(nowMs) ? nowMs : state.now;
@@ -369,7 +395,9 @@ export function mountHud(doc, deps) {
   // state.settingsOpen=true、六个输入框都在 DOM 里、而 display:none 的面板
   // —— 桩里没有 CSS，这条 1093 个判据一条都看不见（清单 §12 的 F-12）。
   function syncCard() {
-    card.classList.toggle('is-open', !!state.card || state.settingsOpen);
+    // 家谱是覆盖层：它开着时把卡暂时收起，两层叠着会让读的人以为那是同一张面板。
+    // 关掉家谱后卡原样回来（state.card 没动）。
+    card.classList.toggle('is-open', !state.familyOpen && (!!state.card || state.settingsOpen));
     // 只有设置、没有生物时，卡里那些生物专属的行（肖像 / 雷达 / 心形 / 改名框）
     // 没有一份内容属于当前这"一张"，CSS 按这个类把它们整段藏掉。
     card.classList.toggle('is-settings', !state.card && state.settingsOpen);
@@ -380,6 +408,117 @@ export function mountHud(doc, deps) {
   // TypeError，而桩里它是个普通数组 ⇒ 1093 条判据全绿、真页面一点就炸（清单 §12 的 F-13）。
   function clear(node) {
     for (const old of [...node.children]) node.removeChild(old);
+  }
+
+  // ---- 家谱 ----
+  // 画的是"当前活着的个体"的母系森林。死人已经被内核移出 world，所以这里不装出
+  // 一条能追到更早祖先的线；没有母亲的节点就是悬空起点。
+  let familyKeyOn = false;
+  function onFamilyKey(ev) {
+    if (ev && ev.key === 'Escape') {
+      if (ev.preventDefault) ev.preventDefault();
+      api.setFamilyOpen(false);
+    }
+  }
+  function detachFamilyKey() {
+    if (!familyKeyOn) return;
+    doc.removeEventListener('keydown', onFamilyKey);
+    familyKeyOn = false;
+  }
+  function attachFamilyKey() {
+    if (familyKeyOn) return;
+    doc.addEventListener('keydown', onFamilyKey);
+    familyKeyOn = true;
+  }
+
+  function renderFamily(world, scrollToFocus) {
+    const model = familyModelFor(world, state.familyFocusId);
+    state.familyFocusId = model.focusId;
+    state.familyNodes = model.nodes.length;
+    let sig = model.focusId || '';
+    for (const n of model.nodes) sig += `|n:${n.id}:${n.name}:${n.hue}:${n.depth}`;
+    for (const e of model.edges) sig += `|e:${e.kind}:${e.from}:${e.to}`;
+    const same = sig === state.familySig;
+    state.familySig = sig;
+    familyEmpty.classList.toggle('is-hidden', model.nodes.length > 0);
+    familySvg.classList.toggle('is-hidden', model.nodes.length === 0);
+    if (model.nodes.length === 0) {
+      if (!same) clear(familySvg);
+      familySvg.removeAttribute('viewBox');
+      state._lastFamilyAt = state.now;
+      return;
+    }
+    if (same) {
+      // 数据没变就一个节点都不重建：否则每 250ms 一次会把滚动位置拉回焦点、
+      // 把正在用键盘浏览的人踢回 body（真页面抓到的 24 节点主场景缺陷）。
+      if (scrollToFocus) {
+        familyScroll.scrollTop = Math.max(0, state.familyFocusY - 120);
+      }
+      state._lastFamilyAt = state.now;
+      return;
+    }
+    const prevTop = familyScroll.scrollTop || 0;
+    const active = doc.activeElement;
+    const restoreId = scrollToFocus ? state.familyFocusId
+      : (active && active.dataset ? active.dataset.id : null);
+    clear(familySvg);
+    const layout = layoutFamily(model);
+    familySvg.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`);
+    familySvg.setAttribute('width', String(layout.width));
+    familySvg.setAttribute('height', String(layout.height));
+    // 边先画，节点后画：线不许压在名字上。
+    for (const e of layout.edges) {
+      const path = svgEl(doc, 'path',
+        `hud-family-edge ${e.kind === 'mother' ? 'is-mother' : 'is-companion'}`, familySvg);
+      path.setAttribute('d', e.d);
+      if (e.dashed) path.setAttribute('stroke-dasharray', '4 4');
+    }
+    const groups = new Map();
+    for (const n of layout.nodes) {
+      const cls = ['hud-family-node'];
+      if (n.isFocus) cls.push('is-focus');
+      if (n.isRoot) cls.push('is-root');
+      const g = svgEl(doc, 'g', cls.join(' '), familySvg);
+      g.dataset.id = n.id;
+      g.setAttribute('role', 'button');
+      g.setAttribute('tabindex', '0');
+      g.setAttribute('aria-label', n.name);
+      groups.set(n.id, g);
+      const full = svgEl(doc, 'title', null, g);
+      full.textContent = n.name;
+      // 44px 的可点区：圆点本身只有 10px，直接拿它当触控目标是骗人的。
+      const hit = svgEl(doc, 'rect', 'hud-fam-hit', g);
+      hit.setAttribute('x', String(n.x - 10));
+      hit.setAttribute('y', String(n.y - 22));
+      hit.setAttribute('width', String(Math.min(layout.width - n.x, 150)));
+      hit.setAttribute('height', '44');
+      hit.setAttribute('rx', '10');
+      const dot = svgEl(doc, 'circle', 'hud-family-dot', g);
+      dot.setAttribute('cx', String(n.x));
+      dot.setAttribute('cy', String(n.y));
+      dot.setAttribute('r', String(n.r));
+      dot.setAttribute('fill', `hsl(${n.hue} 70% 72%)`);
+      const label = svgEl(doc, 'text', 'hud-family-label', g);
+      label.setAttribute('x', String(n.x + 12));
+      label.setAttribute('y', String(n.y));
+      label.setAttribute('dominant-baseline', 'middle');
+      label.textContent = n.label;
+      const choose = () => api.setFamilyFocus(n.id);
+      g.addEventListener('click', choose);
+      g.addEventListener('keydown', (ev) => {
+        if (ev && (ev.key === 'Enter' || ev.key === ' ')) {
+          if (ev.preventDefault) ev.preventDefault();
+          choose();
+        }
+      });
+    }
+    state.familyFocusY = layout.focusY;
+    familyScroll.scrollTop = scrollToFocus ? Math.max(0, layout.focusY - 120) : prevTop;
+    if (restoreId) {
+      const again = groups.get(restoreId);
+      if (again && again.focus) again.focus();
+    }
+    state._lastFamilyAt = state.now;
   }
 
   // ---- 拖拽投食（spec §6.1 表第一行）----
@@ -644,10 +783,47 @@ export function mountHud(doc, deps) {
     setSettingsOpen(open) {
       const want = !!open;
       if (want === state.settingsOpen) return;
+      // 家谱是覆盖层。设置页开在它下面会得到"点了设置什么也看不见"的面板；
+      // 想进设置就先退出家谱，两者不叠。
+      if (want && state.familyOpen) api.setFamilyOpen(false);
       state.settingsOpen = want;
       if (want) { state.settingsOpens += 1; buildPanel(); }
       else if (panel) { panel.box.remove(); panel = null; }   // 关了就**拆掉**：key 框少活一会儿
       syncCard();
+      pulse();
+    },
+    setFamilyOpen(open, focusId) {
+      const want = !!open;
+      if (want === state.familyOpen) {
+        if (want && focusId !== undefined) {
+          state.familyFocusId = focusId;
+          renderFamily(latestWorld, true);
+        }
+        return;
+      }
+      state.familyOpen = want;
+      if (want) {
+        state.familyOpens += 1;
+        if (focusId !== undefined) state.familyFocusId = focusId;
+        else if (state.card) state.familyFocusId = state.card.id;
+        family.classList.add('is-open');
+        familyBtn.setAttribute('aria-expanded', 'true');
+        attachFamilyKey();
+        renderFamily(latestWorld, true);
+        familyClose.focus();
+      } else {
+        family.classList.remove('is-open');
+        familyBtn.setAttribute('aria-expanded', 'false');
+        detachFamilyKey();
+        familyBtn.focus();
+      }
+      syncCard();
+      pulse();
+    },
+    setFamilyFocus(id) {
+      if (!id) return;
+      state.familyFocusId = id;
+      if (state.familyOpen) renderFamily(latestWorld, true);
       pulse();
     },
     setEndpoint(v) { draft.endpoint = String(v == null ? '' : v); state.endpointRejected = 0; paintPanel(); },
@@ -722,6 +898,7 @@ export function mountHud(doc, deps) {
     frame(nowMs, world) {
       state.frames += 1;
       state.now = nowMs;
+      if (world) latestWorld = world;
       // 第一次真实手势可能就在这一帧之前把 AudioContext 拒了 —— 那时才轮到此键退休。
       if (muteBtn && audioBlocked()) { muteBtn.remove(); muteBtn = null; }
       if (world && typeof world.speechEnabled === 'boolean') draft.speech = world.speechEnabled;
@@ -744,21 +921,29 @@ export function mountHud(doc, deps) {
         state._lastCardAt = nowMs;
         renderCard(state.card, world);
       }
+      if (state.familyOpen && nowMs - state._lastFamilyAt >= H.cardRefreshMs) {
+        renderFamily(latestWorld, false);
+      }
       // 淡出淡的是" chrome "，不是玩家正在读的那张表：卡或设置页开着的时候不许淡。
       // 真页面实测（F-16）—— 卡片开着、98 秒没动手，`.hud` 挂上 is-dim ⇒ 整块 opacity .25，
       // 而它照样吃点击（elementFromPoint 命中的是卡里的肖像）：一屏"看不清但点得动"的表单。
       // spec §6.3 那句"不遮挡水体"仍然成立 —— 面板本来就挡着水，淡不淡都一样。
-      const panelOpen = !!state.card || state.settingsOpen;
+      const panelOpen = !!state.card || state.settingsOpen || state.familyOpen;
       root.classList.toggle('is-dim', !panelOpen && nowMs - state.lastInputAt >= H.fadeIdleMs);
     },
     pulse,
     // 换缸/停缸时正托着也要就地收手：那三个监听器挂在 doc 上，不在这棵子树里，
     // root.remove() 带不走它们 —— 漏一次就是"下一次开缸，随便哪儿一滑都投食"。
-    destroy() { attachCarry(false); root.remove(); },
+    destroy() {
+      attachCarry(false);
+      detachFamilyKey();
+      root.remove();
+    },
   };
 
-  // 这两个按钮要调 api，所以必须绑在 api 之后 —— 顺序是有意的，别顺手挪到上面去。
+  // 这几个按钮要调 api，所以必须绑在 api 之后 —— 顺序是有意的，别顺手挪到上面去。
   nameBtn.addEventListener('click', () => api.rename(state.card, nameInput.value));
   tellBtn.addEventListener('click', () => api.tell());
+  familyClose.addEventListener('click', () => api.setFamilyOpen(false));
   return api;
 }
