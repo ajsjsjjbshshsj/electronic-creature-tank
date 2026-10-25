@@ -310,7 +310,7 @@ export function mountHud(doc, deps) {
 
   const state = {
     card: null, settingsOpen: false, lastInputAt: 0, now: 0, _lastCardAt: -Infinity,
-    frames: 0, cardRenders: 0, cardOpens: 0,
+    frames: 0, cardRenders: 0, cardOpens: 0, saveLineWrites: 0,
     feeds: 0, tells: 0, tellTruncated: 0, tellDropped: 0, renames: 0, rejectedNames: 0,
     endpointRejected: 0, settingsOpens: 0, settingsSaved: 0, clearArmed: false, _armedAt: 0,
   };
@@ -434,16 +434,28 @@ export function mountHud(doc, deps) {
 
   function paintPanel() {
     if (!panel) return;
-    const st = controller.saveState || {};
-    const label = Object.hasOwn(SAVE_SOURCE_LABEL, st.source) ? SAVE_SOURCE_LABEL[st.source] : '未知来源';
-    panel.saveRow.children[1].textContent =
-      `${label} · ${st.bytes || 0}B · 已写 ${st.writes || 0} 次`;
+    paintSaveLine();
     // 标签只写"已保存 / 未填"这两个**词**，绝不把 key 的内容放进任何节点。
     panel.keyRow.children[1].textContent = (draft.keyEntered || hasSavedKey()) ? '已保存（只存本机）' : '未填';
     panel.epRow.classList.toggle('is-bad', !!state.endpointRejected);
     panel.speechBtn.textContent = draft.speech ? '关闭文字层' : '打开文字层';
     panel.clearBtn.textContent = state.clearArmed ? '再按一次确认清空' : '清空存档';
     panel.clearBtn.classList.toggle('is-armed', !!state.clearArmed);
+  }
+
+  // 落盘那一行**骑帧**（F-10）：面板开着的时候 `save.frame()` 每 30 模拟秒还会真的再落一次盘，
+  // 而 paintPanel 只在开面板与控件交互时调 —— 于是那一行停在开面板那一刻。
+  // 缓存挂在 `panel` 自己身上而不是 state 上：`buildPanel()` 每次换一具新 span，
+  // 跨面板复用一个旧串的症状是新面板永远显示"未知来源"。
+  function paintSaveLine() {
+    if (!panel) return;
+    const st = controller.saveState || {};
+    const label = Object.hasOwn(SAVE_SOURCE_LABEL, st.source) ? SAVE_SOURCE_LABEL[st.source] : '未知来源';
+    const line = `${label} · ${st.bytes || 0}B · 已写 ${st.writes || 0} 次`;
+    if (panel._saveLine === line) return;          // 值变了才写（与左上那四条读数同一套纪律）
+    panel._saveLine = line;
+    state.saveLineWrites += 1;
+    panel.saveRow.children[1].textContent = line;
   }
 
   const api = {
@@ -609,11 +621,19 @@ export function mountHud(doc, deps) {
       if (rFood.textContent !== String(r.foods)) rFood.textContent = String(r.foods);
       if (rEgg.textContent !== String(r.eggs)) rEgg.textContent = String(r.eggs);
       if (rTime.textContent !== r.timeLabel) rTime.textContent = r.timeLabel;
+      // 落盘那一行同样骑帧（F-10）。面板没开时 `paintSaveLine` 第一行就 return，
+      // 所以"不开设置页 ⇒ 零额外 DOM 写"这条与上面那四条读数的"值变了才写"是同一套。
+      paintSaveLine();
       if (state.card && nowMs - state._lastCardAt >= H.cardRefreshMs) {
         state._lastCardAt = nowMs;
         renderCard(state.card, world);
       }
-      root.classList.toggle('is-dim', nowMs - state.lastInputAt >= H.fadeIdleMs);
+      // 淡出淡的是" chrome "，不是玩家正在读的那张表：卡或设置页开着的时候不许淡。
+      // 真页面实测（F-16）—— 卡片开着、98 秒没动手，`.hud` 挂上 is-dim ⇒ 整块 opacity .25，
+      // 而它照样吃点击（elementFromPoint 命中的是卡里的肖像）：一屏"看不清但点得动"的表单。
+      // spec §6.3 那句"不遮挡水体"仍然成立 —— 面板本来就挡着水，淡不淡都一样。
+      const panelOpen = !!state.card || state.settingsOpen;
+      root.classList.toggle('is-dim', !panelOpen && nowMs - state.lastInputAt >= H.fadeIdleMs);
     },
     pulse,
     destroy() { root.remove(); },

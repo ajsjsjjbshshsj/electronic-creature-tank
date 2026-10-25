@@ -60,7 +60,7 @@ function mount(over = {}) {
     getPaused: () => false,
     setPaused: (v) => { calls.push(['pause', v]); return v; },
     stop: () => calls.push(['stop']),
-    saveState: { source: 'fresh', bytes: 0, writes: 0 },
+    saveState: 'saveState' in over ? over.saveState : { source: 'fresh', bytes: 0, writes: 0 },
     saveNow: () => calls.push(['saveNow']),
     clearSave: () => calls.push(['clearSave']),
     // getApiConfig / setApiConfig 必须成对地读写**同一份** cfg —— 真页面里它们背后是
@@ -388,6 +388,28 @@ test('淡出：闲过 fadeIdleMs 打 is-dim；任何交互立刻亮回来', () =
   assert.ok(!hudEl._class.has('is-dim'), '一有交互就必须立刻亮回来');
 });
 
+test('卡或设置页开着的时候不许淡出（F-16：淡成 0.25 = 看不清但点得动的输入框）', () => {
+  const { hud, root } = mount();
+  const hudEl = find(root, 'div', 'hud');
+  const c = mk({ id: 'z', name: '糯糯' });
+  const w = W([c]);
+  let clk = 0;
+  const idleFor = () => {
+    const until = clk + CONFIG.hud.fadeIdleMs + 20;
+    for (; clk <= until; clk += 100) hud.frame(clk, w);
+  };
+  hud.setCard(c, w);
+  idleFor();
+  assert.ok(!hudEl._class.has('is-dim'), '信息卡（含改名框与"讲给它听"框）开着还淡出');
+  hud.setCard(null, w);
+  hud.setSettingsOpen(true);
+  idleFor();
+  assert.ok(!hudEl._class.has('is-dim'), '只开着设置页同理：那里有三个输入框与两个按钮');
+  hud.setSettingsOpen(false);
+  idleFor();
+  assert.ok(hudEl._class.has('is-dim'), '都关了就该淡回去 —— 这条不许被修过头（spec §6.3 那句"不遮挡水体"还在）');
+});
+
 // ---------------------------------------------------------------- 不写世界、节流、收尾
 
 test('frame 不写世界：跑 200 帧之后 world 逐字节不变（全局约束第 6 条）', () => {
@@ -509,6 +531,48 @@ test('设置开着时点空白关卡：卡必须留着，否则设置页凭空�
   assert.ok(card._class.has('is-open'), '关卡把设置页一起带走了，而 state.settingsOpen 还是 true');
   assert.ok(card._class.has('is-settings'), '此时没有生物了 ⇒ 该换成设置页的样子');
   assert.equal(hud.state.settingsOpen, true);
+});
+
+// ---- F-10（§6 里挂了很久的"轻，且没有任何测试能发现它"）：落盘那一行必须骑帧 ----
+// 面板开着的时候 `save.frame()` 每 30 模拟秒真的会再落一次盘，而这一行此前只在
+// 开面板与每一次控件交互时刷 —— 于是玩家看到的是"停在开面板那一刻"的过期数。
+
+test('落盘那一行骑帧：面板开着、什么都不按，writes 涨了它就得跟着变', () => {
+  const saveState = { source: 'restored', bytes: 1000, writes: 3 };
+  const { hud, root } = mount({ saveState });
+  hud.setSettingsOpen(true);
+  const line = () => textOf(find(root, 'div', 'hud-set-save'));
+  assert.match(line(), /已写 3 次/, '开面板那一刻就不对，那后面那条判据是空的');
+  saveState.writes = 4; saveState.bytes = 2048;   // 模拟落盘层原地改了那份读数
+  hud.frame(5000, W([mk()]));
+  assert.match(line(), /已写 4 次/, '什么都不按它就停在开面板那一刻 = 一行会过期的读数');
+  assert.match(line(), /2048B/, '字节数同理');
+});
+
+test('落盘那一行"值变了才写"：连着两帧值没变，不许无条件改 DOM', () => {
+  const saveState = { source: 'fresh', bytes: 10, writes: 1 };
+  const { hud, root } = mount({ saveState });
+  hud.setSettingsOpen(true);
+  const before = hud.state.saveLineWrites;
+  assert.ok(before >= 1, '开面板那一刻没写过一次 ⇒ 那个计数器是摆设');
+  hud.frame(5000, W([mk()]));
+  hud.frame(5016, W([mk()]));
+  assert.equal(hud.state.saveLineWrites, before,
+    '每帧无条件写 DOM —— 左上那四条读数的老纪律在这里同样成立');
+  saveState.writes = 2;
+  hud.frame(5032, W([mk()]));
+  assert.equal(hud.state.saveLineWrites, before + 1, '值变了却没写');
+});
+
+test('重开面板必须立刻是当下的值：那份缓存不许跨面板', () => {
+  const saveState = { source: 'fresh', bytes: 7, writes: 9 };
+  const { hud, root } = mount({ saveState });
+  hud.setSettingsOpen(true);
+  hud.setSettingsOpen(false);
+  saveState.writes = 10;
+  hud.setSettingsOpen(true);
+  assert.match(textOf(find(root, 'div', 'hud-set-save')), /已写 10 次/,
+    'buildPanel 换了一具新 span，而缓存还是旧串 ⇒ 新面板永远显示"未知来源"');
 });
 
 test('key 是**只写**的：填进去保存之后，整棵树里搜不到那个串', () => {
