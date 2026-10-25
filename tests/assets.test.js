@@ -47,6 +47,17 @@ test('hud.js 写的可见类与 css/main.css 读的可见类必须是同一批',
   assert.match(css, /\.hud-card\.is-open\s*\{[^}]*display:\s*block/);
 });
 
+// 心形的填充度是同一个道理的第二个实例：JS 写一个 CSS 自定义属性，名字对不上就静默无效。
+// F-14 抓的是"写的方式"不对（style['--x']=v 进不了层叠），这条抓"名字"漂移 ——
+// 两边各改一半的症状是心形永远空着，而没有任何一处报错。
+test('--heart-fill 这个名字在 hud.js 与 css/main.css 之间不许漂移', () => {
+  const css = read('../css/main.css');
+  const js = read('../src/hud.js');
+  assert.match(js, /setProperty\(\s*['"]--heart-fill['"]/);
+  assert.ok(css.includes('--heart-fill:'), 'css 侧不再声明默认值 ⇒ setProperty 写进一个没人读的名字');
+  assert.ok(css.includes('var(--heart-fill'), 'css 侧不再消费它 ⇒ 写进去也没人画');
+});
+
 test('index.html 用 type="module" 引 /src/main.js，且声明了 viewport-fit=cover', () => {
   const html = read('../index.html');
   assert.match(html, /<script[^>]+type=["']module["'][^>]+src=["']\/src\/main\.js["']/);

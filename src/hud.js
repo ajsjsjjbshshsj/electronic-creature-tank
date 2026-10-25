@@ -195,9 +195,24 @@ const TOUCH = 'hud-touch';
 // 少一个的症状不是报错，而是投食条上凭空少一个按钮，所以 tests/hud-dom.test.js 逐键比对。
 const FOOD_LABEL = Object.freeze({ algae: '光藻', nectar: '蜜珠', crystal: '冰晶' });
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
 function el(doc, tag, cls, parent) {
   const n = doc.createElement(tag);
   if (cls) n.className = cls;
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+// SVG 元素**必须**走 createElementNS：`document.createElement('svg')` 造出来的是
+// HTMLUnknownElement（namespaceURI 还是 XHTML），里面那个 <polygon> 的
+// getBoundingClientRect 是 0×0 —— 雷达图一个像素都不画，而桩里 createElement
+// 不分家，所以它一直"成功"（清单 §12 的 F-15）。
+// 第二处坑：SVGElement.className 是**只读**的 SVGAnimatedString，所以这里只能
+// 挂 `class` 属性（真 DOM 与 classList 是同一份东西）。
+function svgEl(doc, tag, cls, parent) {
+  const n = doc.createElementNS(SVG_NS, tag);
+  if (cls) n.setAttribute('class', cls);
   if (parent) parent.appendChild(n);
   return n;
 }
@@ -282,9 +297,9 @@ export function mountHud(doc, deps) {
   const portrait = el(doc, 'img', 'hud-portrait', card);
   portrait.setAttribute('alt', '它的样子');
   const rowsBox = el(doc, 'div', 'hud-rows', card);
-  const svg = el(doc, 'svg', 'hud-radar', card);
+  const svg = svgEl(doc, 'svg', 'hud-radar', card);
   svg.setAttribute('viewBox', '0 0 100 100');
-  const poly = el(doc, 'polygon', 'hud-radar-shape', svg);
+  const poly = svgEl(doc, 'polygon', 'hud-radar-shape', svg);
   const heart = el(doc, 'div', 'hud-heart', card);
   heart.setAttribute('role', 'img');
   const relBox = el(doc, 'div', 'hud-relations', card);
@@ -329,7 +344,10 @@ export function mountHud(doc, deps) {
     const built = cardFor(c, world);
     cardTitle.textContent = built.title;
     portrait.setAttribute('src', built.portrait);
-    heart.style['--heart-fill'] = String(built.heart);
+    // 自定义属性只有 setProperty 进得了层叠：`style['--x'] = v` 在真浏览器里静默无效
+    // （cssText 是空的，getComputedStyle 读到 CSS 里那句 `--heart-fill: 0`），
+    // 于是心形永远空着而没有任何一处报错 —— 桩里 style 是个普通对象，所以它"成功"了（F-14）。
+    heart.style.setProperty('--heart-fill', String(built.heart));
     heart.setAttribute('aria-label', '它对玩家的好感');
     poly.setAttribute('points', radarPoints(built.radar));
     const rowsKey = JSON.stringify(built.rows);

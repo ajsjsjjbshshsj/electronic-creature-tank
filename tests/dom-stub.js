@@ -10,18 +10,39 @@
 // DOM 这边要的是**树**（要能在里面找节点、读文本）。它们测的不是同一种东西。
 // 现有那四份各抄一份的历史不在本文件的账上 —— 那是渲染层的，动它属于另一次改动。
 
-export function makeNode(tag, doc) {
+export const SVG_NS = 'http://www.w3.org/2000/svg';
+export const HTML_NS = 'http://www.w3.org/1999/xhtml';
+
+/**
+ * style 的桩。**故意**让"直接写一个 `--x` 键"与 `setProperty('--x', v)` 走两条路：
+ * 真 DOM 里只有后者进得了层叠，前者只是在 JS 对象上挂个幽灵属性（F-14 就是这么静默的）。
+ * 所以判据必须读 getPropertyValue —— 写错方式的话它拿到空串，红。
+ */
+function makeStyle() {
+  const vars = {};
+  return {
+    _vars: vars,
+    setProperty(k, v) { vars[k] = String(v); },
+    getPropertyValue(k) { return Object.hasOwn(vars, k) ? vars[k] : ''; },
+    removeProperty(k) { const old = vars[k]; delete vars[k]; return old === undefined ? '' : old; },
+  };
+}
+
+export function makeNode(tag, doc, ns) {
   // 子节点的真身。对外只经 `children` 这个**只读**视图暴露 ——
   // 真 DOM 的 `children` 是活的 HTMLCollection，`node.children.length = 0` 在严格模式里
   // 抛 TypeError；而本文件原先直接放一个普通数组出去，于是 hud.js 里那句话"成功"了，
   // 真页面一点开信息卡就炸（清单 §12 的 F-13）。桩不许替平台撒谎。
   const kids = [];
+  const namespaceURI = ns || HTML_NS;
+  const isSvg = namespaceURI === SVG_NS;
   const node = {
     tagName: String(tag).toUpperCase(),
+    namespaceURI,
     get children() { return Object.freeze(kids.slice()); },
     parent: null,
     attrs: {},
-    style: {},
+    style: makeStyle(),
     dataset: {},
     _text: '',
     _class: new Set(),
@@ -41,14 +62,30 @@ export function makeNode(tag, doc) {
       const i = a.indexOf(fn);
       if (i >= 0) a.splice(i, 1);
     },
-    setAttribute(k, v) { node.attrs[k] = String(v); },
-    getAttribute(k) { return Object.hasOwn(node.attrs, k) ? node.attrs[k] : null; },
+    setAttribute(k, v) {
+      // 真 DOM 里 `class` 属性与 className / classList 是同一份东西，桩必须同步，
+      // 否则 SVG 那条只能走 setAttribute('class', …) 的路就找不到节点了。
+      if (k === 'class') { node._class = new Set(String(v).split(/\s+/).filter(Boolean)); return; }
+      node.attrs[k] = String(v);
+    },
+    getAttribute(k) {
+      if (k === 'class') return node._class.size ? [...node._class].join(' ') : null;
+      return Object.hasOwn(node.attrs, k) ? node.attrs[k] : null;
+    },
     focus() { doc.__focused = node; },
     blur() { if (doc.__focused === node) doc.__focused = null; },
     get value() { return node._value; },
     set value(v) { node._value = v == null ? '' : String(v); },
     get className() { return [...node._class].join(' '); },
-    set className(v) { node._class = new Set(String(v).split(/\s+/).filter(Boolean)); },
+    set className(v) {
+      if (isSvg) {
+        // 真 DOM：SVGElement.className 是**只读**的 SVGAnimatedString，严格模式里赋值抛错。
+        // 走 setAttribute('class', …) 那条路 —— 而这条只在真浏览器里才通，正是 F-15 的后半。
+        throw new TypeError(
+          'SVGElement.className 是只读的（真 DOM 同）：SVG 元素请用 setAttribute("class", …)');
+      }
+      node._class = new Set(String(v).split(/\s+/).filter(Boolean));
+    },
     get textContent() { return node._text; },
     set textContent(v) { node._text = v == null ? '' : String(v); kids.length = 0; },
   };
@@ -67,8 +104,15 @@ export function makeNode(tag, doc) {
 
 export function makeDoc() {
   const doc = {
-    created: [], body: null, __focused: null,
+    created: [], createdNS: [], body: null, __focused: null,
     createElement(tag) { const n = makeNode(tag, doc); doc.created.push(n.tagName); return n; },
+    // 真 DOM 里 SVG 只能这么造：`createElement('svg')` 给的是 HTMLUnknownElement（F-15）。
+    createElementNS(ns, tag) {
+      const n = makeNode(tag, doc, ns);
+      doc.created.push(n.tagName);
+      doc.createdNS.push(tag);
+      return n;
+    },
     createTextNode(t) {
       return { tagName: '#text', children: [], attrs: {}, style: {}, dataset: {},
         _class: new Set(), listeners: {}, _text: String(t) };
@@ -115,9 +159,17 @@ export function textOf(node) {
  * `value` 属性或某个 `data-*`，那都不在 textContent 里。
  */
 export function dump(node) {
-  const bits = [node.tagName, node.className, node._text, node._value];
+  // style 那边只摊 `_vars`（setProperty 写进去的那些）与直接挂上去的自有键；
+  // 方法本身不许进字符串 —— 搜"有没有泄漏某个串"时函数源码是噪音。
+  const styleBits = [];
+  const st = node.style || {};
+  for (const k of Object.keys(st._vars || {})) styleBits.push(k, st._vars[k]);
+  for (const k of Object.keys(st)) {
+    if (k === '_vars' || typeof st[k] === 'function') continue;
+    styleBits.push(k, st[k]);
+  }
+  const bits = [node.tagName, node.className, node._text, node._value, styleBits.join(' ')];
   for (const k of Object.keys(node.attrs || {})) bits.push(k, node.attrs[k]);
-  for (const k of Object.keys(node.style || {})) bits.push(k, node.style[k]);
   for (const k of Object.keys(node.dataset || {})) bits.push(k, node.dataset[k]);
   for (const c of node.children || []) bits.push(dump(c));
   return bits.join(' ');

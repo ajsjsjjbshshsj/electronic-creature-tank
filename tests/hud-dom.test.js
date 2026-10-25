@@ -247,8 +247,31 @@ test('心形用 CSS 变量表示填充度，卡上不出现那个 0-1 的数（s
   hud.setCard(mk({ aff: 0.62 }), W([mk({ aff: 0.62 })]));
   const heart = find(root, 'div', 'hud-heart');
   assert.ok(heart, '没有心形节点');
-  assert.equal(heart.style['--heart-fill'], String(heartFillFor(0.62)));
+  // ⚠️ 必须读 getPropertyValue，不是 style['--heart-fill']：真 DOM 里自定义属性**只有**
+  // setProperty 进得了层叠，直接写那个键只是在 JS 对象上挂了个幽灵属性
+  // （真页面实测 cssText="" 而 getComputedStyle 读到 CSS 默认的 0 ⇒ 心形永远空着，F-14）。
+  assert.equal(heart.style.getPropertyValue('--heart-fill'), String(heartFillFor(0.62)));
+  hud.setCard(mk({ aff: 0.02 }), W([mk({ aff: 0.02 })]));
+  assert.notEqual(heart.style.getPropertyValue('--heart-fill'), String(heartFillFor(0.62)),
+    '换一只好感差很多的，填充度却一动不动 ⇒ 这条判据是空的（或写死成了常数）');
   assert.ok(!/0\.62/.test(textOf(find(root, 'div', 'hud-card'))), '好感度的数字漏到卡上了');
+});
+
+test('雷达图的 svg / polygon 必须在 SVG 命名空间里，class 挂在 class 属性上（F-15）', () => {
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const { hud, root, doc } = mount();
+  hud.setCard(mk({ id: 'z', aff: 0.4 }), W([mk({ id: 'z', aff: 0.4 })]));
+  const svg = find(root, 'svg', 'hud-radar');
+  assert.ok(svg, '卡上没有雷达图节点');
+  // 真页面实测：document.createElement('svg') 给的是 HTMLUnknownElement，
+  // namespaceURI 还是 XHTML，里面那个 <polygon> 的 getBoundingClientRect 是 0×0
+  // —— 雷达图一个像素都不画，而桩里 createElement 不分家，所以它一直"成功"。
+  assert.equal(svg.namespaceURI, SVG_NS, 'svg 不是 SVG 命名空间 ⇒ 真浏览器里它是个未知元素');
+  const poly = find(svg, 'polygon');
+  assert.ok(poly, 'svg 里没有 polygon');
+  assert.equal(poly.namespaceURI, SVG_NS);
+  assert.ok(poly.getAttribute('class'), 'class 没挂到 class 属性上（SVGElement.className 是只读的）');
+  assert.ok(doc.createdNS.includes('polygon'), 'polygon 没走 createElementNS');
 });
 
 test('肖像的 src 来自 avatarSrc：八种状态出八张不同的脸', () => {
