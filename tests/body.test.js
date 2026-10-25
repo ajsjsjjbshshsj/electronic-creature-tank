@@ -349,6 +349,86 @@ test('impactEps 的实际效果（已知降级，写清楚而不是假装）：�
     'base 速度的骤停在阈值之下 —— 这是 impactEps 的读数，不是实现漏洞，但必须被写下来');
 });
 
+const handAt = (c, dx, dy) => ({
+  pos: { x: c.pos.x + dx, y: c.pos.y + dy },
+  speed: 0, down: true, appeared: false, grab: null,
+});
+
+test('被摸时只压凹离手最近的角，正后方保持零凹陷', () => {
+  const body = createBody({ wobble: 0.5, fluff: 0.5 });
+  const c = makeCreature({ beingPetted: true });
+  updateBody(body, c, DT, handAt(c, 0.02, 0));
+  assert.ok(body.dip[0] > 0, '手在局部 +x，正前方的外角必须凹下去');
+  const expected = CONFIG.body.petDentMax * Math.exp(-CONFIG.body.dentDecay * DT);
+  assert.ok(Math.abs(body.dip[0] - expected) < 1e-12,
+    `最近角的凹陷应来自 petDentMax，实测 ${body.dip[0]}，期望 ${expected}`);
+  for (let i = 0; i < body.points.length; i++) {
+    if (body.points[i].rx < 0) assert.equal(body.dip[i], 0, `远侧点 ${i} 不该跟着凹`);
+  }
+});
+
+test('手方向先投影到 facing：世界方向变了，仍凹局部离手最近的那一角', () => {
+  const body = createBody({ wobble: 0.5, fluff: 0.5 });
+  const c = makeCreature({ facing: { x: 0, y: 1 }, beingPetted: true });
+  updateBody(body, c, DT, handAt(c, 0, 0.02));
+  assert.ok(body.dip[0] > 0, '世界 +y 与 facing 同向，应凹局部 +x 的角');
+  assert.equal(body.dip[12], 0, '局部正后方不该凹');
+
+  const sideBody = createBody({ wobble: 0.5, fluff: 0.5 });
+  const sideC = makeCreature({ facing: { x: 0, y: 1 }, beingPetted: true });
+  updateBody(sideBody, sideC, DT, handAt(sideC, 0.02, 0));
+  assert.ok(sideBody.dip[18] > 0, 'facing 为世界 +y 时，世界 +x 是局部 -y，应凹第 18 点一侧');
+  assert.equal(sideBody.dip[6], 0, '局部 +y 侧不该凹；若凹了就说明侧向投影符号反了');
+});
+
+test('连续摸不累加，松手后仍按 dentDecay 回弹干净', () => {
+  const body = createBody({ wobble: 0.5, fluff: 0.5 });
+  const c = makeCreature({ beingPetted: true });
+  const hand = handAt(c, 0.02, 0);
+  for (let i = 0; i < 120; i++) updateBody(body, c, DT, hand);
+  assert.ok(body.dip[0] > CONFIG.body.petDentMax * 0.9,
+    `持续接触要维持可见凹陷，实测 ${body.dip[0]}`);
+  assert.ok(body.dip[0] <= CONFIG.body.petDentMax,
+    `每子步取最大而不是累加，凹陷不得越过 ${CONFIG.body.petDentMax}`);
+  c.beingPetted = false;
+  for (let i = 0; i < Math.round(4 / DT); i++) updateBody(body, c, DT);
+  assert.ok(Math.max(...body.dip) < 1e-6, `松手 4 秒后应回弹干净，实测 ${Math.max(...body.dip)}`);
+});
+
+test('手凹陷与碰撞在不同侧各自成立', () => {
+  const body = createBody({ wobble: 0.5, fluff: 0.5 });
+  const c = makeCreature({});
+  run(body, c, 1);
+  body.dip[12] = CONFIG.body.dentMax;
+  c.beingPetted = true;
+  updateBody(body, c, DT, handAt(c, 0.02, 0));
+  assert.ok(body.dip[0] > 0, '碰撞在后侧时，手仍应在前侧压出自己的凹陷');
+  assert.ok(body.dip[12] >= CONFIG.body.dentMax * Math.exp(-CONFIG.body.dentDecay * DT) - 1e-12,
+    '手部凹陷不许把另一侧更深的碰撞凹陷抹掉');
+});
+
+test('同侧浅抚摸不覆盖更深的碰撞凹陷', () => {
+  const body = createBody({ wobble: 0.5, fluff: 0.5 });
+  const c = makeCreature({ beingPetted: true });
+  body.dip[0] = CONFIG.body.dentMax;
+  updateBody(body, c, DT, handAt(c, 0.02, 0));
+  const expected = CONFIG.body.dentMax * Math.exp(-CONFIG.body.dentDecay * DT);
+  assert.ok(Math.abs(body.dip[0] - expected) < 1e-12,
+    `同一点的深碰撞只能按原衰减保留，不能被浅抚摸写成 ${CONFIG.body.petDentMax}：${body.dip[0]}`);
+});
+
+test('updateBodies 把同一份手交给被摸的那只，被拎住的不产生抚摸凹陷', () => {
+  const petted = makeCreature({ beingPetted: true });
+  petted.id = 'petted';
+  const held = makeCreature({ beingPetted: false, held: true });
+  held.id = 'held';
+  const world = { creatures: [petted, held], playerHand: handAt(petted, 0.02, 0) };
+  const bodies = new Map();
+  updateBodies(bodies, world, DT);
+  assert.ok(bodies.get('petted').dip[0] > 0, 'world.playerHand 必须真正接到 body 的手部凹陷');
+  assert.equal(Math.max(...bodies.get('held').dip), 0, '拎着是追随，不是抚摸');
+});
+
 test('updateBody 不分配对象：points、dip、tail.nodes 与每个点对象都是同一批（spec §5.3）', () => {
   const body = createBody({ wobble: 0.5, fluff: 0.5 });
   const c = makeCreature({ vel: { x: 0.02, y: 0.01 }, moving: true });

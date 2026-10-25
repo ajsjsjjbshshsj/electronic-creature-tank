@@ -132,7 +132,7 @@ export function createBody(traits) {
 
   return {
     points,
-    // 每点的碰撞凹陷量。typed array ⇒ 运行时零分配，且渲染层可以直接按索引读。
+    // 每点的局部凹陷量。typed array ⇒ 运行时零分配，且渲染层可以直接按索引读。
     dip: new Float64Array(n),
     phase: 0,
     pulse: 0,
@@ -285,7 +285,7 @@ function updateTail(body, c, dt, damp, emo) {
 }
 
 // 每子步一次：把整个 Body 推进 dt。**原地修改，不分配任何对象**。
-export function updateBody(body, c, dt) {
+export function updateBody(body, c, dt, hand) {
   const e = c.emotions;
   const emo = {
     joy: clamp01(e.joy),
@@ -343,19 +343,38 @@ export function updateBody(body, c, dt) {
   const ux = vLen > 0 ? vFwd / vLen : 1;             // 静止时退回 facing 轴
   const uy = vLen > 0 ? vSide / vLen : 0;
 
-  // 冲击：先算强度，再把凹陷加到对应侧的点上（取最大值，不累加，避免连撞爆掉）
+  // 冲击与抚摸共用一条凹陷管线：每个点取各来源的最大值，不累加。
   const impact = detectImpact(body, c);
-  if (impact > 0) {
+  let petX = 0;
+  let petY = 0;
+  if (c.beingPetted && hand) {
+    const dx = hand.pos.x - c.pos.x;
+    const dy = hand.pos.y - c.pos.y;
+    const len = Math.hypot(dx, dy);
+    if (len > 0) {
+      petX = (dx * fx + dy * fy) / len;
+      petY = (dx * -fy + dy * fx) / len;
+    }
+  }
+  const petting = petX !== 0 || petY !== 0;
+  if (impact > 0 || petting) {
     const ix = body.impactX;
     const iy = body.impactY;
     for (let i = 0; i < body.points.length; i++) {
       const p = body.points[i];
-      // 点积 > 0 的点才在受冲击侧；平方一下让凹陷集中在正对冲击的那一小块
-      const toward = p.rx * ix + p.ry * iy;
-      if (toward > 0) {
-        const add = B.dentMax * impact * toward * toward;
-        if (add > body.dip[i]) body.dip[i] = add;
+      let add = 0;
+      if (impact > 0) {
+        const toward = p.rx * ix + p.ry * iy;
+        if (toward > 0) add = B.dentMax * impact * toward * toward;
       }
+      if (petting) {
+        const toward = p.rx * petX + p.ry * petY;
+        if (toward > 0) {
+          const petDip = B.petDentMax * toward * toward;
+          if (petDip > add) add = petDip;
+        }
+      }
+      if (add > body.dip[i]) body.dip[i] = add;
     }
   }
   const dipKeep = Math.exp(-B.dentDecay * dt);
@@ -397,7 +416,7 @@ export function updateBody(body, c, dt) {
     tx *= breathe;
     ty *= breathe;
 
-    // 6) 碰撞凹陷：沿径向朝内推
+    // 6) 局部凹陷：沿径向朝内推
     const dip = body.dip[i];
     if (dip > 0) { tx -= ca * dip; ty -= sa * dip; }
 
@@ -447,7 +466,7 @@ export function updateBodies(bodies, world, dt) {
       body = createBody(c.traits);
       bodies.set(c.id, body);
     }
-    updateBody(body, c, dt);
+    updateBody(body, c, dt, world.playerHand);
   }
 }
 

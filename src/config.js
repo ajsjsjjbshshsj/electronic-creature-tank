@@ -392,7 +392,8 @@ const CONFIG = {
     // moveToward 撞墙时只 clamp 位置、不改 vel，所以 vel 在墙上没有任何信号。
     impactEps: 0.0012,         // 约 1.3 倍单步位移（baseSpeed×dt = 0.000917），低于它算平滑游动
     impactFullDent: 0.0040,    // 二阶差分达到这个量级时凹陷打满
-    dentMax: 0.34,             // 最大凹陷深度（局部单位圆空间）
+    dentMax: 0.34,             // 最大碰撞凹陷深度（局部单位圆空间）
+    petDentMax: 0.16,          // 抚摸凹陷比碰撞浅；连续接触取最大值，不逐子步累加
     dentDecay: 6.0,            // 每秒衰减系数（指数）
   },
 

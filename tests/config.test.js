@@ -674,12 +674,12 @@ test('尾巴与眨眼都不许新增基因位点，且 activity 地板两处必�
     'spec §4.6：眨眼频率与 §4.7.2 蹦跳同源，都由 activity 驱动 —— 地板分家就是假设分家');
 });
 
-test('软体弹簧的二十八个常量齐备，且两端都欠阻尼（spec §4.7 过冲要求的数值前提）', () => {
+test('软体弹簧的二十九个常量齐备，且两端都欠阻尼（spec §4.7 过冲要求的数值前提）', () => {
   const B = CONFIG.body;
   assert.deepEqual(Object.keys(B).sort(), [
     'angerFlatten', 'angerSharpen', 'arousalExpand', 'curiosityElongate', 'dentDecay', 'dentMax',
     'dyingCalm', 'dyingCollapse', 'fearShrink', 'impactEps', 'impactFullDent', 'joyExpand',
-    'maxStretchSpeed', 'pulseAmpArousal', 'pulseAmpBase', 'pulseAmpJoy', 'pulseAmpSleepy',
+    'maxStretchSpeed', 'petDentMax', 'pulseAmpArousal', 'pulseAmpBase', 'pulseAmpJoy', 'pulseAmpSleepy',
     'pulseRateArousal', 'pulseRateBase', 'pulseRateFloor', 'pulseRateSleepy',
     'sickCalm', 'sleepyCalm', 'stiffnessAtFullWobble', 'stiffnessAtZeroWobble',
     'stretchK', 'zetaAtFullWobble', 'zetaAtZeroWobble',
@@ -729,6 +729,8 @@ test('软体弹簧的二十八个常量齐备，且两端都欠阻尼（spec §4
   assert.equal(B.impactEps, 0.0012);
   assert.equal(B.impactFullDent, 0.0040);
   assert.equal(B.dentMax, 0.34);
+  assert.equal(B.petDentMax, 0.16);
+  assert.ok(B.petDentMax < B.dentMax, '抚摸应当比碰撞浅');
   assert.equal(B.dentDecay, 6.0);
   // 阈值必须高于单步平滑位移（baseSpeed × fixedDt = 0.000917），否则"匀速游动"会被当成一直在撞
   assert.ok(B.impactEps > CONFIG.motion.baseSpeed * CONFIG.fixedDt,
