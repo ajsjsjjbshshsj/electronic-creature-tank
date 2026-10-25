@@ -624,6 +624,45 @@ const ctrl2 = mod.boot({ canvas: cv2, seed: 20261022, populationCap: 24, rendere
 - **顺带**：这条抛错也解释了 §9.2 那一行"信息卡能不能打开"为什么一直没人打勾 —— 它打不开。
 
 
+### F-14（2026-10-25，同一次实跑，顺着 F-13 查完）：好感心形永远空着
+
+> ✅ **已修**。与 F-13 同族（桩替平台撒谎），但**不抛错**，所以更安静。
+
+- **现象**：真页面里 `setCard` 之后，`.hud-heart` 的填充度读数与 CSS 默认值一模一样 —— 心形
+  看着永远是空的，跟好感无关。
+- **机理**：`heart.style['--heart-fill'] = String(built.heart)`。真 DOM 的自定义属性**只有**
+  `setProperty` 进得了层叠；直接写那个键是在 `CSSStyleDeclaration` 对象上挂一个幽灵属性。
+  真页面实测（修之前）：`style['--heart-fill']` 读回来是 `"0.5"`（幽灵属性在），
+  而 `style.cssText = ""`、`style.length = 0`、`getPropertyValue('--heart-fill') = ""`、
+  `getComputedStyle(heart).getPropertyValue('--heart-fill') = "0"`（CSS 第 94 行那句默认值）。
+- **为什么桩让它混过去**：`style: {}` 是个普通对象，写哪个键都一样，而既有判据读的正是
+  `heart.style['--heart-fill']` —— **它测的是那个幽灵属性本身**，所以一直是绿的。
+  `hud.js:376` 那条注释早就写过同一类事（"往 `<input>` 上写 textContent 在真浏览器里
+  什么都不发生，而桩里却会'成功'"），这一次是它自己的邻居。
+- **修法**：`setProperty`；桩的 `style` 换成 `setProperty` / `getPropertyValue` 走一张私有表，
+  于是"写错方式"读回来是空串 —— 判据自己会红。
+
+### F-15（2026-10-25，同上）：雷达图一个像素都没画过
+
+> ✅ **已修**。这一条是 F-14 的同一趟查出来的，**后果比 F-14 大**。
+
+- **现象**：`.hud-radar` 有 132×132 的盒子（CSS 给的宽高），里面的 `polygon`
+  `getBoundingClientRect()` 是 **0×0** —— 九个点算得对、`points` 属性写得对，但什么都不画。
+- **机理**：`el(doc, 'svg', …)` 走 `document.createElement`。真 DOM 里 SVG **必须**
+  `createElementNS('http://www.w3.org/2000/svg', …)`；`createElement('svg')` 造出来的是
+  `HTMLUnknownElement`（`namespaceURI` 还是 XHTML），里面的 `<polygon>` 同理，浏览器不认识
+  就不渲染。真页面实测：`svgCtor = "HTMLUnknownElement"`、`polyCtor = "HTMLUnknownElement"`。
+- **第二处坑（改完命名空间才会撞上）**：`SVGElement.className` 是**只读**的
+  `SVGAnimatedString`，严格模式里 `n.className = cls` 当场抛 —— 所以 `svgEl()` 只能挂
+  `setAttribute('class', cls)`。桩现在对 SVG 节点的 `className` 赋值**主动抛同类错**，
+  免得下一次有人"顺手改回去"。
+- **修后真页面复验**：`svgCtor = SVGSVGElement`、`svgNs` 是 SVG 命名空间、
+  `polyCtor = SVGPolygonElement`、`polygon` 的框 **89.1 × 57**（原来 0×0）。
+- **判据**：一条 DOM 侧（两个 `namespaceURI` + class 挂在属性上 + `createdNS` 里有 polygon）、
+  一条跨文件（`--heart-fill` 这个名字在 hud.js 与 css/main.css 之间不许漂移，与 F-12 那两个
+  类名同一条纪律）。反空对照在 scratch 里核过：旧写法 `getPropertyValue` 读回 `""`、
+  `createElement('svg').namespaceURI` 是 XHTML、SVG 节点写 `className` 抛 TypeError。
+
 ### 6.5 §6 的逐条状态（2026-10-25 刷新，**这张表是 §6 的唯一去处**）
 
 | 编号 | 一句话 | 状态 | 谁能关 |
@@ -641,6 +680,8 @@ const ctrl2 = mod.boot({ canvas: cv2, seed: 20261022, populationCap: 24, rendere
 | F-11 | "表现层不许改世界"被引用到错误节号（§9.2 第 7 条其实是文字层护栏） | ✅ 已修（2026-10-24 回写时），纪律本体落 §5 开头 | — |
 | F-12 | 点「设置」什么都不出现（`is-open` 只归 `setCard` 写） | ✅ 已修（2026-10-25，真页面复验 `offsetHeight` 0 → 389） | — |
 | F-13 | 真页面点一只生物就抛 TypeError（`children.length = 0`） | ✅ 已修（2026-10-25）**并顺手把桩修对**：`dom-stub.children` 改只读视图 | — |
+| F-14 | 好感心形永远空着（`style['--x']=v` 进不了层叠） | ✅ 已修（2026-10-25，真页面复验 `getComputedStyle` 读到 0.50002） | — |
+| F-15 | 雷达图一个像素都没画（`createElement('svg')`） | ✅ 已修（2026-10-25，真页面复验 `SVGPolygonElement` 89.1×57，原 0×0） | — |
 | O-1 | 大个体中心亮区读成死白 | 🔍 仍是观察，未量化 | 要 r ≥ 15px 的射线复量 |
 | O-2 | 淡出末段"有框没字" | 🔍 仍是观察 | 要量两个 alpha 阈值 |
 | O-3 | 光藻份数压过生物 | 🔍 仍是观察 | 要先给目标比值 |
@@ -1032,7 +1073,8 @@ spec：`docs/superpowers/specs/2026-10-24-grab-and-carry-design.md`；计划与�
 ## 12. 追加（2026-10-25，浏览器实跑）：手喂在真页面里成立，而 §10.1 那句"永远拿不到"被推翻了
 
 控制方要的是"去浏览器里拖一只饿的星绒绒试吃"。这一节先记**通道**，因为通道决定下面每一条
-读数算不算数；再记读数；最后记这一轮**顺手挖出来的两个真缺陷**（F-12 / F-13，正文在 §6）。
+读数算不算数；再记读数；最后记这一轮**顺手挖出来的四个真缺陷**
+（F-12 / F-13 见 §6，同族的 F-14 / F-15 见 §12.7，正文都在 §6）。
 
 ### 12.1 通道：`browser-use` 连上的是 Qoder 内嵌的 Electron 页面，不是他的 Chrome
 
@@ -1145,4 +1187,31 @@ affection 0 → 0.0675（一份手喂 `feedAffection=0.03` 加拎着那一路）
    ⇒ 配对必须同时要求"它自己够不着"（`d > 0.10`）**和**"别的兽更够不着"（`dOther > 0.15`）。
    ⚠️ 而试验 B 里那句 `dOther` 我又算错了一次：`ds[1]` 没排除自己，读到的是它本人（0.158 = 0.158）。
    结论没受影响（`held=true` 那一刻食物消失才是判据），但这条读数额外不算数。
+
+### 12.7 "桩替平台撒谎"不是一条 bug，是一个**族**：顺着 F-13 把 src 里的 DOM 用法全查了一遍
+
+F-13 修完之后没有就此收手 —— 它的价值在于给出了一条**可迁移的问法**：
+"这一行在桩里成立，靠的是桩的哪一条偷懒？" 拿它把 `src/` 里所有 DOM 写点扫了一遍
+（`grep '\.style'` 全仓库只有一处、`createElement` 的调用点、`setAttribute`、`textContent`、`value`），
+当场又抓到两条，都已修（§6 的 F-14 / F-15）：
+
+| 嫌疑 | 真页面读数（修之前） | 桩为什么放过它 |
+|---|---|---|
+| `heart.style['--heart-fill'] = v` | `cssText=""`、`getPropertyValue=""`、`getComputedStyle` 读到 CSS 默认的 **0** ⇒ 心形永远空着 | `style` 是普通对象，而既有判据读的**正是那个幽灵属性** —— 判据在测桩，不是在测浏览器 |
+| `el(doc,'svg')` / `el(doc,'polygon')` | `HTMLUnknownElement`、`polygon` 的框 **0×0** ⇒ 雷达图从不渲染 | `createElement` 不分命名空间 |
+
+**查过且安全**（不必再查）：`setAttribute('viewBox'|'points'|'src'|'alt'|'role'|'aria-label')` 全部
+是真 DOM 支持的写法；`input.textContent` 那一处早已按 `hud.js:376` 的注释改成独立 `<span>`，
+实测 `inp.textContent === ""`（真 `<input>` 也确实忽略它）；`classList` / `focus()` / `value` 无异常。
+
+**这一族的下一次防线**（比多写几条判据更根本）：桩现在有三处"故意比真浏览器严"——
+`children` 只读、SVG 节点写 `className` 抛、`setProperty` 与直接写键走两条路。
+再加同类嫌疑时，**优先修桩，不要优先修判据**：判据只能盯住已经想到的那一处，
+而桩修对之后，下一个用错 API 的人会在**任何**一条既有用例上撞红。
+
+⚠️ 仍然没做完的：截图通道要页面可见（本轮 `hidden`，`take_screenshot` 直接报
+`NATIVE_BROWSER_VIEWPORT_UNAVAILABLE`，而 `getBoundingClientRect` 与 `getComputedStyle` 照用 ——
+所以"量得到几何、拍不到像素"是这一轮的准确措辞）。信息卡修好之后**长什么样**仍要你把
+Qoder 的浏览器面板打开再看一眼。
+
 
