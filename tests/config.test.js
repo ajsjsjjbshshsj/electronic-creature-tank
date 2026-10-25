@@ -105,18 +105,22 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   //    事件表的两行（grabbedHappy / grabbedRough）**留到 Task 3** 与生产者同时加 ——
   //    constraints.test.js 那条"每种事件种类都要有生产者"会在只有行没有生产者时红，
   //    这是计划原文的一处顺序错。数字用 node -e 跑出来：Task 1 后 63 / 54，Task 3 加两行后 **65 / 54**。
-  assert.equal(visited.length, 65, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 65 → 66、54 → 55（2026-10-25 手部视觉）：新增 **CONFIG.hand 一段**（一个节点、20 个标量）。
+  //    形状与行为分工同 avatar/hud：几何换算由 tests/hand.test.js 钉，绘制账单由
+  //    tests/render-hand.test.js 钉；这里只钉"这一段确实存在且没有被悄悄拓宽"。
+  assert.equal(visited.length, 66, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'api', 'audio', 'avatar', 'behavior', 'blink', 'body', 'bodyPoints',
     'broody', 'colors', 'dissolveDuration', 'drift', 'dtAccumCap', 'eggFailChanceAtCap', 'eggSize',
     'eggTint', 'eggsPerClutch', 'emotions', 'eye', 'eyeWidthRatio', 'familiarityDecay', 'fixedDt',
-    'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'grab', 'gridCell', 'heard', 'hop', 'hud',
-    'hueRange', 'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize', 'mood', 'motion',
-    'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles', 'perceiveRadius',
-    'populationCap', 'render', 'save', 'speech', 'stage', 'star', 'tail', 'timeScales',
-  ], 'CONFIG 顶层键名（54 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 54);
+    'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'grab', 'gridCell', 'hand',
+    'heard', 'hop', 'hud', 'hueRange', 'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize',
+    'mood', 'motion', 'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles',
+    'perceiveRadius', 'populationCap', 'render', 'save', 'speech', 'stage', 'star', 'tail',
+    'timeScales',
+  ], 'CONFIG 顶层键名（55 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 55);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -134,6 +138,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.avatar', 'CONFIG.avatar.file',                                        // 计划 3 Task 2 新增（HUD 肖像层：目录 + 那张八行表）
     'CONFIG.hud',                                                                 // 计划 3 Task 3 新增（HUD 的九个常数，其中三个是 gestures.js 的真相源）
     'CONFIG.grab', 'CONFIG.grab.w', 'CONFIG.emotions.eventMagnitude.grabbedRough',  // 拎着玩（Task 1 常数 + Task 3 两张事件行）
+    'CONFIG.hand',                                                                // 手部视觉（几何换算与绘制账单分别在 hand/render-hand 测试里）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -1044,6 +1049,38 @@ test('CONFIG.grab 一段的形状（八个键：七个标量 + 一个三项权�
     if (k === 'w') continue;
     assert.ok(Number.isFinite(v) && v > 0, `${k} 必须是正数，实为 ${v}`);
   }
+});
+
+// ---------------------------------------------------------------- 玩家的手（2026-10-25）
+// 形状由 hand.js 的 handPoseInto 消费；这里钉键集与几条互相打架会立刻出症状的关系。
+test('CONFIG.hand 的二十个视觉旋钮齐备，尺寸、透明度与手指分离两端自洽', () => {
+  const H = CONFIG.hand;
+  assert.deepEqual(Object.keys(H).sort(), [
+    'alpha', 'contactAlpha', 'contactLineWidth', 'contactRadius', 'fingerDrop', 'fingerRadius',
+    'fingerSpread', 'maxPx', 'minPx', 'offsetX', 'offsetY', 'padAlpha', 'padRadius',
+    'palmHeight', 'palmRadius', 'palmWidth', 'rockAngle', 'rockRate', 'strokeWidth',
+    'viewportRatio',
+  ], `CONFIG.hand 键集变了：${Object.keys(H).sort()}`);
+  assert.equal(Object.keys(H).length, 20);
+  for (const [k, v] of Object.entries(H)) {
+    assert.ok(Number.isFinite(v) && v > 0, `${k} 必须是正数，实为 ${v}`);
+  }
+  assert.ok(H.minPx < H.maxPx, `最小手掌 ${H.minPx} 必须小于上限 ${H.maxPx}`);
+  assert.ok(H.alpha <= 1 && H.padAlpha <= 1 && H.contactAlpha <= 1, '透明度不许越过 1');
+  assert.ok(H.padAlpha < H.alpha && H.contactAlpha < H.alpha,
+    '掌垫与接触光都必须比手本体更淡，否则细节会喧宾夺主');
+  assert.ok(H.rockAngle > 0 && H.rockAngle < 0.5, '抚摸摆动必须看得见又不至于把手甩飞');
+  assert.ok(H.palmWidth > H.fingerRadius && H.palmHeight > H.fingerRadius,
+    '掌心必须比手指粗，否则读出来是一把折扇');
+  assert.ok(H.palmRadius >= H.palmWidth && H.palmRadius >= H.palmHeight,
+    '镜像边界用的掌缘必须覆盖掌心椭圆的半宽半高，否则掌会先出屏再翻');
+  // 第一版"胡萝卜"的数值根源：相邻指端中心距 0.147×size，小于胶囊外径 0.19×size。
+  // 最小尺寸下相邻指端中心距 = fingerSpread/3 × minPx；外径 = 2×r + 2×strokeWidth。
+  const tipGap = (H.fingerSpread / 3) * H.minPx;
+  const capsuleOuter = 2 * (H.fingerRadius * H.minPx + H.strokeWidth);
+  assert.ok(tipGap > capsuleOuter,
+    `最小手掌上四指仍会粘连：指端间距 ${tipGap} ≤ 胶囊外径 ${capsuleOuter}`);
+  assert.ok(H.contactLineWidth < H.minPx * 0.1, '接触光描边要细，不能用手指的线宽');
 });
 
 // 越界阈值必须严格大于抚摸接触阈值，否则"拎"与"摸"同时为真，Task 3 的让路规则白写。

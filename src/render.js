@@ -41,6 +41,7 @@
 
 import { CONFIG } from './config.js';
 import { renderSizeOf, starRadius } from './body.js';
+import { handPoseInto } from './hand.js';
 import { dominant } from './emotions.js';
 // 卵要显示它**将来**的色相（spec §4.11"壳内透出轮廓"），所以这里要解码一次基因组；
 // 孵化时长则**必须**问内核要（breeding.eggDuration），因为"快孵化时脉动加快"这件事
@@ -1626,6 +1627,107 @@ function drawBubbleLayer(ctx, renderer, world, bodies, viewport) {
   }
 }
 
+// ---------------------------------------------------------------- 玩家的手
+
+// 一根带描边的毛绒胶囊（先粗后细两笔，不建 Path2D、不分配对象）。
+function plushCapsule(ctx, ax, ay, bx, by, radius, strokeWidth) {
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(bx, by);
+  ctx.lineWidth = radius * 2 + strokeWidth * 2;
+  ctx.strokeStyle = CONFIG.colors.rose;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(bx, by);
+  ctx.lineWidth = radius * 2;
+  ctx.strokeStyle = CONFIG.colors.sakura;
+  ctx.stroke();
+}
+
+// 画在生物与溶散粒子之上、语言气泡之下：手是玩家伸进缸里的实体，
+// 但它不该盖住「它说了什么」。几何全在 hand.js 的 handPoseInto 里（Node 里单测），
+// 本函数只负责路径。整层零贴图、零渐变、零随机数、零每帧新对象。
+export function drawHandLayer(ctx, renderer, viewport) {
+  const H = CONFIG.hand;
+  const pose = handPoseInto(renderer.handPose, renderer.hand, viewport,
+    renderer.petTime, renderer.petting);
+  if (!pose.active) return pose;
+
+  ctx.save();
+  // 接触光先画：它属于指尖下方的水面，不该压在手掌上。
+  if (pose.petting) {
+    ga(ctx, H.contactAlpha, 1);
+    ctx.strokeStyle = CONFIG.colors.sakura;
+    ctx.lineWidth = H.contactLineWidth;
+    ctx.beginPath();
+    ctx.arc(pose.tipX, pose.tipY, pose.contactRadius, 0, TAU);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(pose.tipX, pose.tipY, pose.contactRadius * 1.55, 0, TAU);
+    ctx.stroke();
+  }
+
+  ctx.translate(pose.tipX, pose.tipY);
+  ctx.scale(pose.dirX, pose.dirY);
+  ctx.rotate(pose.rock);
+  ga(ctx, H.alpha, 1);
+  ctx.fillStyle = CONFIG.colors.sakura;
+  ctx.strokeStyle = CONFIG.colors.rose;
+  ctx.lineWidth = H.strokeWidth;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // 四根短指：指端间距必须大于 2×fingerRadius，否则四根会粘成一只胡萝卜。
+  // 第一根的终点精确落在局部 (0,0)，也就是屏幕上的指针。
+  const fingerR = H.fingerRadius * pose.size;
+  for (let i = 0; i < 4; i++) {
+    const t = i / 3;
+    const bx = (H.offsetX - 0.24 + t * 0.52) * pose.size;
+    const by = (H.offsetY - 0.25 + t * 0.06) * pose.size;
+    const tx = (H.offsetX - 0.56 + t * H.fingerSpread) * pose.size;
+    const ty = (H.offsetY - 0.84 + t * H.fingerDrop) * pose.size;
+    plushCapsule(ctx, bx, by, tx, ty, fingerR, H.strokeWidth);
+  }
+  // 拇指从掌的左下侧伸出去，和四指方向明显不同；它是"这是一只手"最便宜的那条线索。
+  plushCapsule(ctx,
+    (H.offsetX - 0.15) * pose.size, (H.offsetY + 0.12) * pose.size,
+    (H.offsetX - 0.47) * pose.size, (H.offsetY + 0.02) * pose.size,
+    fingerR * 1.12, H.strokeWidth);
+
+  // 圆掌：掌缘落在 pose.palm 推出来的方位；镜像与 rocking 都由上面的变换承担。
+  ctx.beginPath();
+  ctx.ellipse(H.offsetX * pose.size, H.offsetY * pose.size,
+    H.palmWidth * pose.size, H.palmHeight * pose.size, 0, 0, TAU);
+  ctx.fillStyle = CONFIG.colors.sakura;
+  ctx.fill();
+  ctx.lineWidth = H.strokeWidth;
+  ctx.strokeStyle = CONFIG.colors.rose;
+  ctx.stroke();
+
+  // 掌垫：一枚中心垫 + 三枚小趾垫。只用来把「这是肉垫」说清楚，不参与接触判定。
+  ga(ctx, H.padAlpha, 1);
+  ctx.fillStyle = CONFIG.colors.blush;
+  ctx.beginPath();
+  ctx.ellipse(H.offsetX * pose.size, H.offsetY * pose.size,
+    H.padRadius * pose.size, H.padRadius * pose.size * 0.82, 0, 0, TAU);
+  ctx.fill();
+  const padX = H.offsetX;
+  const padY = H.offsetY;
+  const pr = H.padRadius * pose.size * 0.62;
+  ctx.beginPath();
+  ctx.ellipse((padX - 0.11) * pose.size, (padY - 0.13) * pose.size, pr, pr, 0, 0, TAU);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse((padX + 0.06) * pose.size, (padY - 0.15) * pose.size, pr, pr, 0, 0, TAU);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse((padX + 0.15) * pose.size, (padY + 0.03) * pose.size, pr, pr, 0, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+  return pose;
+}
+
 // ---------------------------------------------------------------- 微粒对象池
 
 // 并列的 Float64Array，不是对象数组（架构决定 6）。
@@ -1714,6 +1816,12 @@ export function createRenderer(opts) {
     handLocalVec: { x: 0, y: 0 },
     eyeGeom: new Float64Array(8),   // 两只眼的 [ex, ey] 与 [半宽, 半高]，一条数组装完
     hand: null,           // 每帧从 world.playerHand 读过来（**只读**，见 eyes.js 文件头那条 ⚠️）
+    petting: false,       // 本帧是否有任何一只 c.beingPetted（只读汇总，手部层用它决定接触光）
+    petTime: 0,           // 从本次抚摸开始累计的模拟秒；rocking 从 0 渐入，不从全局相位跳进来
+    handPose: {           // 手部几何的复用容器（零分配；字段由 handPoseInto 写满）
+      active: false, petting: false, tipX: 0, tipY: 0, palmX: 0, palmY: 0,
+      size: 0, dirX: 1, dirY: 1, rock: 0, contactRadius: 0,
+    },
     // ---- B16 的每帧复用容器：drawCreature 逐只写它，各层从这里读（**零分配**，spec §5.3）----
     // ⚠️ 它是**绘制参数**，不是状态：里面没有任何计时器，所有读数都是 drawCreature 开头
     // 那一组纯函数（dissolveT / dimFactorFor / hopProgress …）对**当前这一只**的输出。
@@ -1799,16 +1907,21 @@ export function createRenderer(opts) {
       drawEggMask(ctx, world, viewport);
       // 生物层（spec §5.1 的六层：B14 的第 1/2/3/4/5/7 + B15 的第 6）。
       // 层序有意义：生物在水体**之上**；B15 的眼睛接在 drawCreature 内部（clip 之外），
-      // B19 的气泡接在最后。
+      // B19 的气泡接在最后。手部层只汇总本帧的 beingPetted，不另判速度或接触。
       const creatures = world.creatures;
+      renderer.petting = false;
       for (let i = 0; i < creatures.length; i++) {
         const c = creatures[i];
+        if (c.beingPetted) renderer.petting = true;
         const b = bodies && bodies.get ? bodies.get(c.id) : undefined;
         if (b !== undefined) drawCreature(ctx, renderer, c, b, viewport);
       }
+      renderer.petTime = renderer.petting && renderer.hand ? renderer.petTime + dt : 0;
       // 溶散/孵化的微粒在生物**之上**：它们是叠加光效，不是水里的实物
       // （微粒在身体下面画会被毛绒不透明的本体整个盖掉，等于没有那场散开）。
       drawBursts(ctx, renderer, viewport);
+      // 玩家的手：在生物与粒子之上，但在语言气泡之下。
+      drawHandLayer(ctx, renderer, viewport);
       // 第 8 层（spec §5.1）：语言气泡在**所有东西之上**，而它是本帧最后一段调用。
       // 这个位置是有判据的：tests/render-bubble.test.js 拿「关掉文字层之后的调用序列
       // 必须是开启那份序列的前缀」来断言其余七层逐笔不变 —— 气泡插在中间那条就废了。
