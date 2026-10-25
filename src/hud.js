@@ -195,9 +195,24 @@ const TOUCH = 'hud-touch';
 // 少一个的症状不是报错，而是投食条上凭空少一个按钮，所以 tests/hud-dom.test.js 逐键比对。
 const FOOD_LABEL = Object.freeze({ algae: '光藻', nectar: '蜜珠', crystal: '冰晶' });
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
 function el(doc, tag, cls, parent) {
   const n = doc.createElement(tag);
   if (cls) n.className = cls;
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+// SVG 元素**必须**走 createElementNS：`document.createElement('svg')` 造出来的是
+// HTMLUnknownElement（namespaceURI 还是 XHTML），里面那个 <polygon> 的
+// getBoundingClientRect 是 0×0 —— 雷达图一个像素都不画，而桩里 createElement
+// 不分家，所以它一直"成功"（清单 §12 的 F-15）。
+// 第二处坑：SVGElement.className 是**只读**的 SVGAnimatedString，所以这里只能
+// 挂 `class` 属性（真 DOM 与 classList 是同一份东西）。
+function svgEl(doc, tag, cls, parent) {
+  const n = doc.createElementNS(SVG_NS, tag);
+  if (cls) n.setAttribute('class', cls);
   if (parent) parent.appendChild(n);
   return n;
 }
@@ -282,9 +297,9 @@ export function mountHud(doc, deps) {
   const portrait = el(doc, 'img', 'hud-portrait', card);
   portrait.setAttribute('alt', '它的样子');
   const rowsBox = el(doc, 'div', 'hud-rows', card);
-  const svg = el(doc, 'svg', 'hud-radar', card);
+  const svg = svgEl(doc, 'svg', 'hud-radar', card);
   svg.setAttribute('viewBox', '0 0 100 100');
-  const poly = el(doc, 'polygon', 'hud-radar-shape', svg);
+  const poly = svgEl(doc, 'polygon', 'hud-radar-shape', svg);
   const heart = el(doc, 'div', 'hud-heart', card);
   heart.setAttribute('role', 'img');
   const relBox = el(doc, 'div', 'hud-relations', card);
@@ -295,7 +310,7 @@ export function mountHud(doc, deps) {
 
   const state = {
     card: null, settingsOpen: false, lastInputAt: 0, now: 0, _lastCardAt: -Infinity,
-    frames: 0, cardRenders: 0, cardOpens: 0,
+    frames: 0, cardRenders: 0, cardOpens: 0, saveLineWrites: 0,
     feeds: 0, tells: 0, tellTruncated: 0, tellDropped: 0, renames: 0, rejectedNames: 0,
     endpointRejected: 0, settingsOpens: 0, settingsSaved: 0, clearArmed: false, _armedAt: 0,
   };
@@ -329,7 +344,10 @@ export function mountHud(doc, deps) {
     const built = cardFor(c, world);
     cardTitle.textContent = built.title;
     portrait.setAttribute('src', built.portrait);
-    heart.style['--heart-fill'] = String(built.heart);
+    // 自定义属性只有 setProperty 进得了层叠：`style['--x'] = v` 在真浏览器里静默无效
+    // （cssText 是空的，getComputedStyle 读到 CSS 里那句 `--heart-fill: 0`），
+    // 于是心形永远空着而没有任何一处报错 —— 桩里 style 是个普通对象，所以它"成功"了（F-14）。
+    heart.style.setProperty('--heart-fill', String(built.heart));
     heart.setAttribute('aria-label', '它对玩家的好感');
     poly.setAttribute('points', radarPoints(built.radar));
     const rowsKey = JSON.stringify(built.rows);
@@ -416,16 +434,28 @@ export function mountHud(doc, deps) {
 
   function paintPanel() {
     if (!panel) return;
-    const st = controller.saveState || {};
-    const label = Object.hasOwn(SAVE_SOURCE_LABEL, st.source) ? SAVE_SOURCE_LABEL[st.source] : '未知来源';
-    panel.saveRow.children[1].textContent =
-      `${label} · ${st.bytes || 0}B · 已写 ${st.writes || 0} 次`;
+    paintSaveLine();
     // 标签只写"已保存 / 未填"这两个**词**，绝不把 key 的内容放进任何节点。
     panel.keyRow.children[1].textContent = (draft.keyEntered || hasSavedKey()) ? '已保存（只存本机）' : '未填';
     panel.epRow.classList.toggle('is-bad', !!state.endpointRejected);
     panel.speechBtn.textContent = draft.speech ? '关闭文字层' : '打开文字层';
     panel.clearBtn.textContent = state.clearArmed ? '再按一次确认清空' : '清空存档';
     panel.clearBtn.classList.toggle('is-armed', !!state.clearArmed);
+  }
+
+  // 落盘那一行**骑帧**（F-10）：面板开着的时候 `save.frame()` 每 30 模拟秒还会真的再落一次盘，
+  // 而 paintPanel 只在开面板与控件交互时调 —— 于是那一行停在开面板那一刻。
+  // 缓存挂在 `panel` 自己身上而不是 state 上：`buildPanel()` 每次换一具新 span，
+  // 跨面板复用一个旧串的症状是新面板永远显示"未知来源"。
+  function paintSaveLine() {
+    if (!panel) return;
+    const st = controller.saveState || {};
+    const label = Object.hasOwn(SAVE_SOURCE_LABEL, st.source) ? SAVE_SOURCE_LABEL[st.source] : '未知来源';
+    const line = `${label} · ${st.bytes || 0}B · 已写 ${st.writes || 0} 次`;
+    if (panel._saveLine === line) return;          // 值变了才写（与左上那四条读数同一套纪律）
+    panel._saveLine = line;
+    state.saveLineWrites += 1;
+    panel.saveRow.children[1].textContent = line;
   }
 
   const api = {
@@ -591,11 +621,19 @@ export function mountHud(doc, deps) {
       if (rFood.textContent !== String(r.foods)) rFood.textContent = String(r.foods);
       if (rEgg.textContent !== String(r.eggs)) rEgg.textContent = String(r.eggs);
       if (rTime.textContent !== r.timeLabel) rTime.textContent = r.timeLabel;
+      // 落盘那一行同样骑帧（F-10）。面板没开时 `paintSaveLine` 第一行就 return，
+      // 所以"不开设置页 ⇒ 零额外 DOM 写"这条与上面那四条读数的"值变了才写"是同一套。
+      paintSaveLine();
       if (state.card && nowMs - state._lastCardAt >= H.cardRefreshMs) {
         state._lastCardAt = nowMs;
         renderCard(state.card, world);
       }
-      root.classList.toggle('is-dim', nowMs - state.lastInputAt >= H.fadeIdleMs);
+      // 淡出淡的是" chrome "，不是玩家正在读的那张表：卡或设置页开着的时候不许淡。
+      // 真页面实测（F-16）—— 卡片开着、98 秒没动手，`.hud` 挂上 is-dim ⇒ 整块 opacity .25，
+      // 而它照样吃点击（elementFromPoint 命中的是卡里的肖像）：一屏"看不清但点得动"的表单。
+      // spec §6.3 那句"不遮挡水体"仍然成立 —— 面板本来就挡着水，淡不淡都一样。
+      const panelOpen = !!state.card || state.settingsOpen;
+      root.classList.toggle('is-dim', !panelOpen && nowMs - state.lastInputAt >= H.fadeIdleMs);
     },
     pulse,
     destroy() { root.remove(); },
