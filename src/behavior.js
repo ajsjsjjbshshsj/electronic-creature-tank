@@ -58,6 +58,14 @@ export const INTENTS = Object.freeze([
 // 否则会从"两份字面量"变成"CONFIG 一份 + 本地一份"，反而更难查。
 export const EAT_DIST = 0.035;
 
+//   EAT_HUNGER      —— "饿到肯吃"的门槛。原本只是 scoreAll 里一个字面量，2026-10-25
+//                      手喂（把饿的那只拎到食物上就算喂）需要**同一个闸门**，
+//                      于是按本文件头的既定纪律导出：sim.js 的手喂分支与这里的 eat 评分
+//                      若各写各的 0.05，就会出现"它自己不去吃、却能被喂进去"
+//                      （或反过来）这种两边不对称 —— 手喂的意义是帮它够到本该吃的那口，
+//                      不是新开一条供给通道。
+export const EAT_HUNGER = 0.05;
+
 // ---------------------------------------------------------------- HAND_SPEED_POKE 的实测状态
 //
 // 2026-10-21（B17）：计划 1 交接义务第 3 条要求"用真实指针输入重调这个值"，
@@ -228,7 +236,8 @@ export function scoreAll(c, senses) {
 
     // 进食：已经贴着食物了才有意义。由 forage 抵达后自然触发。
     // 距离阈值与 Task 10 的 `case 'eat'` 是同一个数（EAT_DIST），见文件头的说明。
-    eat: nearestFood && nearestFood.dist < EAT_DIST && n.hunger > 0.05
+    // 饥饿闸门与 sim.js 的手喂分支是同一个数（EAT_HUNGER），同一条理由。
+    eat: nearestFood && nearestFood.dist < EAT_DIST && n.hunger > EAT_HUNGER
       ? n.hunger * 2.5
       : 0,
 

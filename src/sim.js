@@ -43,7 +43,7 @@ import { mostUrgent } from './needs.js';
 import {
   kinshipOf, crowdingFactor, layEggs, tickEgg, hatch, registerKinship, reserveEggSeq,
 } from './breeding.js';
-import { decide, EAT_DIST, HAND_SPEED_POKE } from './behavior.js';
+import { decide, EAT_DIST, EAT_HUNGER, HAND_SPEED_POKE } from './behavior.js';
 import { heldStep, enjoyOf, carryEffects } from './grab.js';
 
 // 与 needs / emotions / memory / behavior 里的同名函数同型：两个比较对 NaN 都是 false，
@@ -659,6 +659,25 @@ function emotionCtx(c, senses) {
 
 // ---------------------------------------------------------------- 行动执行
 
+// 吃下去的**唯一**结算：自吃（下面 case 'eat'）与手喂（held 分支）都调它。
+// 为什么必须只有一份：这段里有四个副作用（需求、fed 事件、冰晶的 calms 那一支、
+// 摘食物 + eat 事件），两处各写一遍的话，第五个副作用一定会只进一边 ——
+// 而"手喂不安抚 / 自吃不记事件"这种不对称，玩家只能靠对着两个食物分别试一次才发现。
+// tests/sim.test.js 的"同一份食物：自吃与手喂的结算逐字段相同"钉的就是这件事。
+function eatFood(world, c, f) {
+  feedNeeds(c.needs, CONFIG.food[f.kind].energy);
+  applyEvent(c.emotions, 'fed');
+  // 冰晶的安抚：需求侧走 comfort，情绪侧直接压 anger/fear
+  if (CONFIG.food[f.kind].calms) {
+    comfort(c.needs, CONFIG.food[f.kind].calms);
+    c.emotions.anger = clamp01(c.emotions.anger - CONFIG.food[f.kind].calms);
+    c.emotions.fear = clamp01(c.emotions.fear - CONFIG.food[f.kind].calms);
+  }
+  world.events.push({ kind: 'eat', id: c.id, foodId: f.id, foodKind: f.kind });
+  const idx = world.foods.indexOf(f);
+  if (idx >= 0) world.foods.splice(idx, 1);
+}
+
 function executeIntent(world, c, senses, dt) {
   // 被拎住 ⇒ 本 tick 的运动由"追随手"接管，正常意图一帧都不执行（spec 2026-10-24 §4 / R-6）。
   // 刻意**不**复用下面的 moveToward：那条把速率钳在 CONFIG.motion.baseSpeed，
@@ -676,6 +695,30 @@ function executeIntent(world, c, senses, dt) {
     c.vel.y = c.pos.y === s.y ? s.vy : 0;
     c.moving = true;
     c.resting = false;
+    // ---- 手喂（2026-10-25）----
+    // 把饿的那只拖到食物上就算喂。闸门沿用**内核觅食那两个数**（EAT_DIST / EAT_HUNGER）：
+    // 手只是帮它够到本来就该吃的那一口，不是新开一条供给通道 —— 所以吃饱的拖过去不咬。
+    // 位置用**移动之后**的 c.pos 量（不是 perceive 那份快照）：玩家眼里"放到食物上"
+    // 说的是它最后停在哪儿，拿旧位置量会让快拖漏吃得更明显。
+    // 扫描 world.foods 而不是 senses.foods：这里要的是"贴着"（EAT_DIST 0.035），
+    // 而 senses 的半径是 0.28 且是移动前的；一次 O(40) 的点距比较，最多一只在手里的代价。
+    if (c.needs.hunger > EAT_HUNGER) {
+      let bite = null;
+      let biteD = EAT_DIST;
+      for (const f of world.foods) {
+        const fd = Math.hypot(f.pos.x - c.pos.x, f.pos.y - c.pos.y);
+        if (fd < biteD) { bite = f; biteD = fd; }
+      }
+      if (bite) {
+        eatFood(world, c, bite);
+        // 你喂的，它记账：这一口**只买好感**，熟悉度不在这里重复买 ——
+        // 拎着期间 familiarity 已由 carryEffects 那条连续通道供给（速率恰好是一条通道），
+        // 这里再买一次就成了"吃一口认识度跳一下"，两条通道的账就混了。
+        // 额度是**离散的每口一次**，不是速率：写成速率等于承认"拖在食物上不动也能一直喂"，
+        // 而那份食物早被第一口吃掉了 —— 数字的形状会误导下一个人。
+        adjustMemory(c.memory, PLAYER_ID, CONFIG.grab.feedAffection, 0);
+      }
+    }
     return;
   }
 
@@ -712,17 +755,7 @@ function executeIntent(world, c, senses, dt) {
       // 与 behavior.scoreAll 的 eat 门槛是**同一个常量**（EAT_DIST）：
       // 两处若漂移，就会出现"选了 eat 却吃不到"的死循环 —— 生物贴着一份光藻饿死。
       if (d < EAT_DIST) {
-        feedNeeds(c.needs, CONFIG.food[f.kind].energy);
-        applyEvent(c.emotions, 'fed');
-        // 冰晶的安抚：需求侧走 comfort，情绪侧直接压 anger/fear
-        if (CONFIG.food[f.kind].calms) {
-          comfort(c.needs, CONFIG.food[f.kind].calms);
-          c.emotions.anger = clamp01(c.emotions.anger - CONFIG.food[f.kind].calms);
-          c.emotions.fear = clamp01(c.emotions.fear - CONFIG.food[f.kind].calms);
-        }
-        world.events.push({ kind: 'eat', id: c.id, foodId: f.id, foodKind: f.kind });
-        const idx = world.foods.indexOf(f);
-        if (idx >= 0) world.foods.splice(idx, 1);
+        eatFood(world, c, f);
         c.intent = null;      // 吃完了，下一步重新决策
       } else {
         moveToward(c, f.pos, dt, speedFactor);

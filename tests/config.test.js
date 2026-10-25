@@ -1032,9 +1032,9 @@ test('存档落地的四项常数：节奏用模拟秒、下限严格低于最�
 // tests/constraints.test.js 有一条"每种情绪事件种类都必须有生产者"，
 // 所以加行必须与 Task 3 的生产者同一个提交落地，否则那一轮收尾不绿。
 // 这是计划本身的一处顺序错，见 plans/2026-10-24-grab-and-carry.md 的执行日志。
-test('CONFIG.grab 一段的形状（七个键：六个标量 + 一个三项权重子表）', () => {
+test('CONFIG.grab 一段的形状（八个键：七个标量 + 一个三项权重子表）', () => {
   assert.deepEqual(Object.keys(CONFIG.grab).sort(),
-    ['affectionRate', 'familiarityRate', 'followStiffness', 'pullOutRatio',
+    ['affectionRate', 'familiarityRate', 'feedAffection', 'followStiffness', 'pullOutRatio',
      'shakePerSecond', 'shakeSpeedFloor', 'w'],
     `CONFIG.grab 键集变了：${Object.keys(CONFIG.grab).sort()}`);
   assert.deepEqual(Object.keys(CONFIG.grab.w).sort(), ['affection', 'clingy', 'irritable']);
