@@ -72,6 +72,10 @@ export function makeNode(tag, doc, ns) {
       if (k === 'class') return node._class.size ? [...node._class].join(' ') : null;
       return Object.hasOwn(node.attrs, k) ? node.attrs[k] : null;
     },
+    removeAttribute(k) {
+      if (k === 'class') { node._class.clear(); return; }
+      delete node.attrs[k];
+    },
     focus() { doc.__focused = node; },
     blur() { if (doc.__focused === node) doc.__focused = null; },
     get value() { return node._value; },
