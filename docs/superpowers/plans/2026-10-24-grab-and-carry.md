@@ -1192,3 +1192,33 @@ git ls-remote --heads origin <分支>    # 只信这条，不信 push 的措辞
 ## 做完之后（执行方式二选一）
 
 计划落到 `docs/superpowers/plans/2026-10-24-grab-and-carry.md`。五个任务各自带探针，边界是：Task 1 常数、Task 2 数学、Task 3 内核、Task 4 接线、Task 5 回写与验收 —— 每个都能被独立批准或驳回。
+
+---
+
+## 执行日志
+
+### Task 1（2026-10-24）：一处**计划自身的顺序错**，被仓库既有守卫当场拦下
+
+计划把"`eventMagnitude` 加 `grabbedHappy` / `grabbedRough` 两行"排在 Task 1（纯常数），把生产者排在 Task 3。
+落地 Task 1 之后 `node --test tests/` 红三条：
+
+- `tests/constraints.test.js:210` —— **每一种情绪事件种类都真的有生产者（不许留无人发出的事件种类）**
+- `tests/emotions.test.js:299` / `:425` —— EVENT_KINDS 与八行幅度表的键集清单
+
+这不是实现写坏了，是这条老守卫在正确地拦"加了事件种类却没人发它"的状态 —— 它存在的理由与
+本仓反复清账的"有生产者没消费者"是同一条。**修正**：两行事件表与它们的不等式守卫、成对守卫
+一并移到 Task 3（生产者那个提交），Task 1 只留 `CONFIG.grab` 一段。于是"每个任务收尾全绿"
+这条纪律从头保住。
+
+顺带两处实测校正：
+- 节点数：计划写"Expected `nodes 64`"是算术错（61+2=63，不是 64；两行事件表若同批加才是 65）。
+  实测 **63 / 54**，守卫按实测回填。计划里那句"必须以命令输出为准，不许照抄我写的数"这次真的救了场。
+- Task 1 的探针由三道变两道（`grabbedRough` 那道跟着事件表移到 Task 3）；
+  新加的一道是 `followStiffness: 0` ⇒ 形状守卫里那条正数循环抓到。
+
+Task 3 落地时要一并处理的清单（本日志的交付物，别丢）：
+1. `eventMagnitude` 加两行 + 注释说明"为什么是两行不是一行带符号"。
+2. `tests/config.test.js`：键集清单 8→10、新增 `grabbedRough` 不超 `poked` 的不等式守卫、
+   路径抽查加 `'CONFIG.emotions.eventMagnitude.grabbedHappy'`，节点数重跑（预计 65）。
+3. `tests/emotions.test.js:299` / `:425` 两处 EVENT_KINDS 清单跟着加。
+4. `tests/constraints.test.js:210` 那条会自动转绿 —— **它的绿必须是 Task 3 的验收项之一**。
