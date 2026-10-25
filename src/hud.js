@@ -307,6 +307,24 @@ export function mountHud(doc, deps) {
     root.classList.remove('is-dim');
   }
 
+  // 整张卡的可见性是**两个来源的或**：选中了某只生物，或者设置页开着。
+  // 以前只有 setCard 写 is-open，于是"没点过任何生物就按设置"会拿到一个
+  // state.settingsOpen=true、六个输入框都在 DOM 里、而 display:none 的面板
+  // —— 桩里没有 CSS，这条 1093 个判据一条都看不见（清单 §12 的 F-12）。
+  function syncCard() {
+    card.classList.toggle('is-open', !!state.card || state.settingsOpen);
+    // 只有设置、没有生物时，卡里那些生物专属的行（肖像 / 雷达 / 心形 / 改名框）
+    // 没有一份内容属于当前这"一张"，CSS 按这个类把它们整段藏掉。
+    card.classList.toggle('is-settings', !state.card && state.settingsOpen);
+  }
+
+  // 清空一个节点的子节点。**不能**写成 `node.children.length = 0`：真 DOM 的
+  // `children` 是只读的活 HTMLCollection，那句话在严格模式（ES 模块默认）里当场抛
+  // TypeError，而桩里它是个普通数组 ⇒ 1093 条判据全绿、真页面一点就炸（清单 §12 的 F-13）。
+  function clear(node) {
+    for (const old of [...node.children]) node.removeChild(old);
+  }
+
   function renderCard(c, world) {
     const built = cardFor(c, world);
     cardTitle.textContent = built.title;
@@ -317,7 +335,7 @@ export function mountHud(doc, deps) {
     const rowsKey = JSON.stringify(built.rows);
     if (rowsKey !== lastRows) {
       lastRows = rowsKey;
-      rowsBox.children.length = 0;
+      clear(rowsBox);
       for (const r of built.rows) {
         const line = el(doc, 'div', 'hud-row', rowsBox);
         el(doc, 'span', 'hud-row-label', line).textContent = r.label;
@@ -328,7 +346,7 @@ export function mountHud(doc, deps) {
     const relKey = JSON.stringify(rel);
     if (relKey !== lastRel) {
       lastRel = relKey;
-      relBox.children.length = 0;
+      clear(relBox);
       for (const r of rel) {
         const line = el(doc, 'div', 'hud-rel', relBox);
         el(doc, 'span', 'hud-rel-label', line).textContent = r.label;
@@ -470,7 +488,7 @@ export function mountHud(doc, deps) {
     setCard(creature, world, opts) {
       state.card = creature || null;
       if (creature) { state.cardOpens += 1; renderCard(creature, world); }
-      card.classList.toggle('is-open', !!creature);
+      syncCard();
       if (creature && opts && opts.focusName) {
         nameInput.value = String(creature.name || '');
         nameInput.focus();                     // 长按那一路一步到位，省掉"先点开卡再点名字"
@@ -483,6 +501,7 @@ export function mountHud(doc, deps) {
       state.settingsOpen = want;
       if (want) { state.settingsOpens += 1; buildPanel(); }
       else if (panel) { panel.box.remove(); panel = null; }   // 关了就**拆掉**：key 框少活一会儿
+      syncCard();
       pulse();
     },
     setEndpoint(v) { draft.endpoint = String(v == null ? '' : v); state.endpointRejected = 0; paintPanel(); },

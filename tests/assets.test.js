@@ -30,6 +30,23 @@ test('css/main.css 的三个背景色与 CONFIG.colors 逐字相同', () => {
   }
 });
 
+// ---- HUD 的"可见性"是跨文件的两个定义点（F-12，2026-10-25 浏览器实跑抓到）----
+// hud.js 往 .hud-card 上写 is-open / is-settings，css/main.css 才是决定 display 的那一半。
+// 桩里没有 CSS：类名写错了、或者 CSS 那条规则被删了，DOM 侧的判据全部照绿，
+// 而玩家看到的是"点了没反应"。所以这里双向钉：两边都必须提到同一个类名。
+test('hud.js 写的可见类与 css/main.css 读的可见类必须是同一批', () => {
+  const css = read('../css/main.css');
+  const js = read('../src/hud.js');
+  for (const cls of ['is-open', 'is-settings']) {
+    assert.ok(css.includes(`.hud-card.${cls}`),
+      `hud.js 在写 ${cls}，但 css/main.css 里没有 .hud-card.${cls} 这条规则 ⇒ 写了等于没写`);
+    assert.ok(js.includes(`'${cls}'`),
+      `css/main.css 还按 .hud-card.${cls} 决定可见性，而 hud.js 已经不写它了 ⇒ 设置页再也打不开`);
+  }
+  // is-open 必须真的开 display，否则上面两条钉住的是一句空规则。
+  assert.match(css, /\.hud-card\.is-open\s*\{[^}]*display:\s*block/);
+});
+
 test('index.html 用 type="module" 引 /src/main.js，且声明了 viewport-fit=cover', () => {
   const html = read('../index.html');
   assert.match(html, /<script[^>]+type=["']module["'][^>]+src=["']\/src\/main\.js["']/);

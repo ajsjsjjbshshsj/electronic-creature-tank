@@ -11,9 +11,14 @@
 // 现有那四份各抄一份的历史不在本文件的账上 —— 那是渲染层的，动它属于另一次改动。
 
 export function makeNode(tag, doc) {
+  // 子节点的真身。对外只经 `children` 这个**只读**视图暴露 ——
+  // 真 DOM 的 `children` 是活的 HTMLCollection，`node.children.length = 0` 在严格模式里
+  // 抛 TypeError；而本文件原先直接放一个普通数组出去，于是 hud.js 里那句话"成功"了，
+  // 真页面一点开信息卡就炸（清单 §12 的 F-13）。桩不许替平台撒谎。
+  const kids = [];
   const node = {
     tagName: String(tag).toUpperCase(),
-    children: [],
+    get children() { return Object.freeze(kids.slice()); },
     parent: null,
     attrs: {},
     style: {},
@@ -22,10 +27,10 @@ export function makeNode(tag, doc) {
     _class: new Set(),
     listeners: {},
     _value: '',
-    appendChild(child) { child.parent = node; node.children.push(child); return child; },
+    appendChild(child) { child.parent = node; kids.push(child); return child; },
     removeChild(child) {
-      const i = node.children.indexOf(child);
-      if (i >= 0) node.children.splice(i, 1);
+      const i = kids.indexOf(child);
+      if (i >= 0) kids.splice(i, 1);
       child.parent = null;
       return child;
     },
@@ -45,7 +50,7 @@ export function makeNode(tag, doc) {
     get className() { return [...node._class].join(' '); },
     set className(v) { node._class = new Set(String(v).split(/\s+/).filter(Boolean)); },
     get textContent() { return node._text; },
-    set textContent(v) { node._text = v == null ? '' : String(v); node.children.length = 0; },
+    set textContent(v) { node._text = v == null ? '' : String(v); kids.length = 0; },
   };
   node.classList = {
     add: (...c) => c.forEach((x) => node._class.add(x)),

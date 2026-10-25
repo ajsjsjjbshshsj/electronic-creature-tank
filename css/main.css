@@ -75,6 +75,11 @@ body {
   background: rgba(20, 10, 40, .93); border: 1px solid rgba(255, 217, 232, .22);
   border-radius: 16px; padding: 16px; }
 .hud-card.is-open { display: block; }
+/* 只有设置、没有选中生物时，卡里那些生物专属的行没有一份内容属于这一张卡
+   （肖像没 src、雷达是上一只的点、改名框是上一只的名字）。整段藏掉，让设置页
+   自己成为这张卡。类名由 hud.js 的 syncCard() 写 —— 两边必须同名，
+   tests/assets.test.js 有一条双向钉。 */
+.hud-card.is-settings > :not(.hud-settings) { display: none; }
 .hud-card-title { margin: 0 0 8px; font-size: 17px; font-weight: 600; }
 .hud-row, .hud-rel { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
 .hud-row-label, .hud-rel-label { opacity: .62; }

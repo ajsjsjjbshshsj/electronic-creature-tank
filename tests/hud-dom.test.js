@@ -210,6 +210,28 @@ test('setCard(null) 关卡：摘掉 is-open，state.card 归 null', () => {
   assert.ok(!find(root, 'div', 'hud-card')._class.has('is-open'));
 });
 
+// ---- F-13（2026-10-25 浏览器实跑抓到）：换一只重画时，旧行必须被摘干净 ----
+// renderCard 原来写的是 `rowsBox.children.length = 0`。真 DOM 的 children 是**只读**的
+// 活 HTMLCollection，那句话在严格模式里抛 TypeError ⇒ 真页面点一下生物就炸；
+// 而 dom-stub 里 children 曾是普通数组，所以它"成功"了。桩已改成只读视图，
+// 这一格再把语义钉住：不许留重复行（有人删掉 clear() 时，这里红，而不是只靠抛错）。
+test('换一只有不同行的：重画之后行里不许出现重复（clear 真把旧的摘了）', () => {
+  const { hud, root } = mount();
+  const rowsBox = find(root, 'div', 'hud-rows');
+  const a = mk({ id: 'a', name: '糯糯' });
+  const b = mk({ id: 'b', name: '阿橘', emotions: { anger: 1, fear: 1, joy: 0 } });
+  hud.setCard(a, W([a]));
+  const first = rowsBox.children.map(textOf);
+  assert.ok(first.length > 0, '一行都没画出来，那这条判据是空的');
+  hud.setCard(b, W([a, b]));
+  const second = rowsBox.children.map(textOf);
+  assert.ok(second.join('|') !== first.join('|'),
+    '两只不同的生物画出完全相同的行 ⇒ 这一格测不到重画，换夹具');
+  assert.equal(new Set(second).size, second.length,
+    `重画留下了重复行：${JSON.stringify(second)}`);
+  assert.ok(!textOf(rowsBox).includes('糯糯'), '上一只的名字还挂在行里');
+});
+
 test('雷达图画成 SVG 折线：九个点', () => {
   const { hud, root } = mount();
   hud.setCard(mk(), W([mk()]));
@@ -424,6 +446,46 @@ test('设置页关着的时候这些输入框不许在树里（key 少一处能�
   assert.ok(find(root, 'input', 'hud-set-key'));
   hud.setSettingsOpen(false);
   assert.equal(find(root, 'input', 'hud-set-key'), null, '关掉设置页还留着 key 框 = 关与没关一样');
+});
+
+// ---- F-12（2026-10-25 浏览器实跑抓到）：面板建出来了 ≠ 玩家看得见 ----
+// 设置那一节长在 .hud-card 里面，而 CSS 只有 `.hud-card.is-open { display: block }`。
+// is-open 此前**只由 setCard(生物) 写**，所以"没选中任何生物时点设置"是
+// state.settingsOpen=true、buildPanel() 跑完、DOM 里六个输入框都在，而屏幕上什么都没有。
+// 桩里没有 CSS，这条在 1093 个判据里一条都藏不住 —— 只能把"可见"本身写成断言。
+
+test('点「设置」必须自己就能让卡片可见，并挂上"这是设置页"的样子', () => {
+  const { hud, root } = mount();
+  const card = find(root, 'div', 'hud-card');
+  hud.setSettingsOpen(true);
+  assert.ok(card._class.has('is-open'), '设置页建出来了但卡片还 display:none = 点了没反应');
+  assert.ok(card._class.has('is-settings'), '没选中生物时的设置页得有自己的样子（不许露出空卡与上一只的名字）');
+  hud.setSettingsOpen(false);
+  assert.ok(!card._class.has('is-open'), '关掉设置页还把卡留着 = 一具空卡浮在缸上');
+  assert.ok(!card._class.has('is-settings'), 'is-settings 不跟着摘，下次开生物卡会带着它');
+});
+
+test('先点生物再点设置：那张卡照旧是它的卡（不许挂 is-settings 把生物那几行藏掉）', () => {
+  const { hud, root } = mount();
+  const c = mk({ id: 'z', name: '糯糯' });
+  hud.setCard(c, W([c]));
+  hud.setSettingsOpen(true);
+  const card = find(root, 'div', 'hud-card');
+  assert.ok(card._class.has('is-open'));
+  assert.ok(!card._class.has('is-settings'), '有卡的时候设置只是多一节，藏掉生物行等于把卡砸了');
+  assert.ok(textOf(card).includes('糯糯'), '生物的名字被设置页挤掉了');
+});
+
+test('设置开着时点空白关卡：卡必须留着，否则设置页凭空消失', () => {
+  const { hud, root } = mount();
+  const c = mk({ id: 'z', name: '糯糯' });
+  hud.setCard(c, W([c]));
+  hud.setSettingsOpen(true);
+  hud.setCard(null, W([c]));
+  const card = find(root, 'div', 'hud-card');
+  assert.ok(card._class.has('is-open'), '关卡把设置页一起带走了，而 state.settingsOpen 还是 true');
+  assert.ok(card._class.has('is-settings'), '此时没有生物了 ⇒ 该换成设置页的样子');
+  assert.equal(hud.state.settingsOpen, true);
 });
 
 test('key 是**只写**的：填进去保存之后，整棵树里搜不到那个串', () => {
