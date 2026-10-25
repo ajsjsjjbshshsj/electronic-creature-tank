@@ -231,16 +231,36 @@ function textInput(doc, parent, cls, ariaLabel, maxChars) {
   return i;
 }
 
-/** 雷达图：九个顶点落在单位圆上，按轴序连成闭合折线。坐标在 0..100 的方框里算。 */
+/**
+ * 雷达图：九个顶点落在同一个角度表上，按轴序连成闭合折线，坐标在 0..100 的方框里算。
+ * 折线上界与轴名半径只有**这一个定义点** —— 各自写一遍的话，改一处就会出现
+ * "折线长到把字盖住"（那条判据在 tests/hud-dom.test.js）。
+ */
+const RADAR_R_MIN = 8;      // v=0 时也不缩成一个点
+const RADAR_R_POLY = 38;    // v=1 时的顶点半径
+const RADAR_R_LABEL = 46;   // 轴名所在半径
+function radarAngle(i, n) { return (i / n) * Math.PI * 2 - Math.PI / 2; }   // 第一个轴朝上
+
 function radarPoints(radar) {
   const n = radar.length || 1;
   const out = [];
   for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2 - Math.PI / 2;      // 第一个轴朝上
-    const v = 8 + 42 * num(radar[i].v);
+    const a = radarAngle(i, n);
+    const v = RADAR_R_MIN + (RADAR_R_POLY - RADAR_R_MIN) * num(radar[i].v);
     out.push(`${(50 + Math.cos(a) * v).toFixed(1)},${(50 + Math.sin(a) * v).toFixed(1)}`);
   }
   return out.join(' ');
+}
+
+/** 轴名的落点与对齐方式。字压在几何半径上，基线居中交给 CSS 的 dominant-baseline。 */
+function radarLabelSpot(i, n) {
+  const a = radarAngle(i, n);
+  const cx = Math.cos(a);
+  return {
+    x: +(50 + cx * RADAR_R_LABEL).toFixed(1),
+    y: +(50 + Math.sin(a) * RADAR_R_LABEL).toFixed(1),
+    anchor: cx > 0.3 ? 'start' : cx < -0.3 ? 'end' : 'middle',
+  };
 }
 
 export function mountHud(doc, deps) {
@@ -298,8 +318,23 @@ export function mountHud(doc, deps) {
   portrait.setAttribute('alt', '它的样子');
   const rowsBox = el(doc, 'div', 'hud-rows', card);
   const svg = svgEl(doc, 'svg', 'hud-radar', card);
-  svg.setAttribute('viewBox', '0 0 100 100');
+  // 方框比几何(0..100)左右各宽 25 / 上下各宽 12 —— 轴名要落在 r=46 的圈上，
+  // 右侧那两个横着往外长 16 个单位，而 .hud-card 是 overflow-y:auto（那会把 visible
+  // 的 overflow-x 算成 auto ⇒ 一根横向滚动条），所以只能靠 viewBox 让位置，不能靠溢出。
+  svg.setAttribute('viewBox', '-25 -12 150 124');
   const poly = svgEl(doc, 'polygon', 'hud-radar-shape', svg);
+  // 轴名。`radarFor` 一直带着九个中文名，是 DOM 层只取了 `v` 把它们丢了 ⇒
+  // 玩家看到的是一坨读不出"哪一维高"的折线（清单 §6.5 的 O-4）。
+  // 名字是**类别名不是数值**，所以这既不碰 §6.3 那句"好感度不写数字"，
+  // 也不碰 §13.2 第 4 条"不许替它陈述心情"（九轴是性格基因，与 moodOf 那五档无关）。
+  PERSONALITY_AXES.forEach(([, axis], i) => {
+    const spot = radarLabelSpot(i, PERSONALITY_AXES.length);
+    const label = svgEl(doc, 'text', null, svg);
+    label.setAttribute('x', spot.x);
+    label.setAttribute('y', spot.y);
+    label.setAttribute('text-anchor', spot.anchor);
+    label.textContent = axis;
+  });
   const heart = el(doc, 'div', 'hud-heart', card);
   heart.setAttribute('role', 'img');
   const relBox = el(doc, 'div', 'hud-relations', card);

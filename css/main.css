@@ -86,7 +86,12 @@ body {
 .hud-row-value, .hud-rel-value { text-align: right; word-break: break-word; }
 .hud-portrait { display: block; width: 88px; height: 88px; margin: 0 auto 8px;
   object-fit: contain; background: rgba(255, 242, 248, .07); border-radius: 14px; }
-.hud-radar { display: block; width: 132px; height: 132px; margin: 6px auto; }
+/* viewBox 是 -25 -12 150 124（比 0..100 的几何左右各留 25 个单位给轴名横着长），
+   所以这里比几何宽一点，字号才有 10 px 上下的实际读数。 */
+.hud-radar { display: block; width: 176px; height: 146px; margin: 6px auto; }
+/* SVG 文字的默认 fill 是黑的，压在 rgba(20,10,40) 的卡上等于隐形 —— 桩里没有样式，
+   所以"画了九个轴名"在判据里可以是"九个看不见的字"。tests/assets.test.js 钉这一对。 */
+.hud-radar text { font-size: 8.5px; fill: rgba(255, 217, 232, .66); dominant-baseline: middle; }
 .hud-radar-shape { fill: rgba(255, 179, 209, .3); stroke: #ffb3d1; stroke-width: 1.4; }
 
 /* 心形：填充度走 CSS 变量，卡上**不写数字**（spec §6.3）。
