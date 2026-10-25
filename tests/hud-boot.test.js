@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { boot } from '../src/main.js';
 import { CONFIG } from '../src/config.js';
-import { makeDoc, find, findAll, textOf } from './dom-stub.js';
+import { makeDoc, find, findAll, textOf, fire } from './dom-stub.js';
 import { bodyRadius } from '../src/grab.js';
 
 // ================================================================ HUD 的 boot 级接线（Task 5）
@@ -523,3 +523,49 @@ test('grabState 是活引用：取住它之后再一次拎起，手里那个对�
       `第二次拎起没反映在**先前取到的那个对象**上（${g0} → ${live.grabbed}）⇒ 访问器在给快照`);
     assert.equal(controller.grabState, live, '每次访问返回的不是同一个对象');
   }));
+
+// ================================================================ 拖拽投食（spec §6.1 表第一行）
+//
+// hud-dom 那十条测的是状态机；这一条测的是**接上 main.js 之后世界里真多了一颗食物**，
+// 而且落在松手处 —— 那才是玩家要的东西，也是"HUD 只报像素、main 判缸内"这条接缝唯一的证据。
+test('拖拽投食端到端：拖到缸里松手 ⇒ 世界多一颗且落在松手处；压在 HUD 上松手 ⇒ 不多', () =>
+  withHudTank({}, ({ doc, controller, canvas }) => {
+    const V = controller.viewport;
+    // 假文档的命中测试：底部那一带算食物条（不是缸），其余算缸。
+    doc.__hitAt = (x, y) => (y < V.height - 80 ? canvas : doc.body);
+    const btn = find(doc.body, 'button', 'hud-feed');
+    const n0 = controller.world.foods.length;
+    fire(btn, 'pointerdown', { clientX: 100, clientY: V.height - 20 });
+    doc.emit('pointermove', { clientX: 123, clientY: 240 });
+    doc.emit('pointerup', { clientX: 123, clientY: 240 });
+    const foods = controller.world.foods;
+    assert.equal(foods.length, n0 + 1, '拖进缸里松手却没投出去');
+    const f = foods[foods.length - 1];
+    assert.ok(Math.abs(f.pos.x - 123 / V.width) < 1e-9 && Math.abs(f.pos.y - 240 / V.height) < 1e-9,
+      `落点不是松手处而是别的地方（${f.pos.x.toFixed(4)}, ${f.pos.y.toFixed(4)}）：像素→归一化这一步错了`);
+    assert.equal(controller.hud.state.carryCancelled, 0);
+    // 压在 HUD 上松手 ⇒ 撤回，世界不动
+    const n1 = controller.world.foods.length;
+    fire(btn, 'pointerdown', { clientX: 100, clientY: V.height - 20 });
+    doc.emit('pointerup', { clientX: 100, clientY: V.height - 10 });
+    assert.equal(controller.world.foods.length, n1, '手指还在按钮上就投了');
+    assert.equal(controller.hud.state.carryCancelled, 1, '撤回没被记下来');
+  }));
+
+test('拖拽投食走的是同一道 foodMax 闸门 ⇒ 它不是第二条供给通道', () =>
+  withHudTank({}, ({ doc, controller, canvas }) => {
+    const V = controller.viewport;
+    const world = controller.world;
+    doc.__hitAt = (x, y) => (y < V.height - 80 ? canvas : doc.body);
+    while (world.foods.length < CONFIG.foodMax) {
+      world.foods.push({ id: `x${world.foods.length}`, kind: 'algae', pos: { x: 0.5, y: 0.5 }, amount: 1 });
+    }
+    const btn = find(doc.body, 'button', 'hud-feed');
+    fire(btn, 'pointerdown', { clientX: 20, clientY: V.height - 20 });
+    doc.emit('pointerup', { clientX: 20, clientY: 200 });     // 缸内，但闸门已满
+    assert.equal(world.foods.length, CONFIG.foodMax, '撞上限还塞 = 破 §9.2 第 1 条的不爆缸');
+    assert.equal(controller.hudStats.foodRejected, 1,
+      '被闸门挡了却不计数 ⇒ 玩家看到"拖了没反应"而查不到原因（与 grabState.suppressed 同一条纪律）');
+    assert.equal(controller.hud.state.carries, 1, 'HUD 侧的"投出去了"不许因为闸门而少记 —— 它记的是手势');
+  }));
+

@@ -1311,6 +1311,16 @@ export function boot(opts) {
         hudStats.renames += 1;
       },
       onScatter: (xPx, yPx) => scatterAt(xPx / viewport.width, yPx / viewport.height),
+      // ---- 拖拽投食（spec §6.1 表第一行）----
+      // "手指底下是不是缸"这个判断在 main 手里，不在 HUD 里：视口尺寸与绘制元素都只有它知道，
+      // 而 HUD 只上报像素（那条边界由 tests/hud-dom.test.js 的源码判据钉住）。
+      // 用 elementFromPoint 而不是"y 小于食物条顶边"那种几何凑数：玩家对"缸内"的直觉就是
+      // "底下是缸"。顺带得到一个对的行为 —— 信息卡开着时压在卡上松手 ⇒ 不投，
+      // 不然会隔着一张卡往缸里丢食物。
+      carryInside: (xPx, yPx) => document.elementFromPoint(xPx, yPx) === canvasEl,
+      // 一颗，不是一把：与点按同份量，且走的还是 feedAt 那一道 foodMax 闸门
+      // ⇒ 拖拽不是第二条供给通道（手喂那轮的同一条纪律）。
+      onCarryDrop: (kind, xPx, yPx) => feedAt(kind, xPx / viewport.width, yPx / viewport.height),
       // 文字层开关写的是 **world**，不是 CONFIG（CONFIG 深冻结，而且它是默认值不是运行时状态）。
       // 读回来也是 world.speechEnabled（sim.js 的 restoreWorld 认这个字段），所以设置页
       // 不需要自己存一份 —— 少一处状态就少一处会不一致的地方。

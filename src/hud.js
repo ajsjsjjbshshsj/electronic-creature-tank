@@ -310,7 +310,12 @@ export function mountHud(doc, deps) {
     const b = button(doc, foodbar, FOOD_LABEL[kind] || kind, 'hud-feed');
     b.dataset.kind = kind;
     b.addEventListener('click', () => api.pressFeed(kind));
+    // 拖拽投食（spec §6.1 表第一行）。按下与点按**共存**：原地按下抬起之后真浏览器还会
+    // 补一个 click，那一发照旧走 pressFeed 落中央；拖进缸里松手才是精确放置。
+    b.addEventListener('pointerdown', (ev) => api.beginCarry(kind, ev));
   }
+  // 托着的那一颗。用 DOM 不用 canvas：它是 HUD 的东西，而且不该占渲染帧。
+  const carryEl = el(doc, 'div', 'hud-carry', root);
 
   // ---- 信息卡：结构一次建好 ----
   const cardTitle = el(doc, 'h2', 'hud-card-title', card);
@@ -348,6 +353,8 @@ export function mountHud(doc, deps) {
     frames: 0, cardRenders: 0, cardOpens: 0, saveLineWrites: 0,
     feeds: 0, tells: 0, tellTruncated: 0, tellDropped: 0, renames: 0, rejectedNames: 0,
     endpointRejected: 0, settingsOpens: 0, settingsSaved: 0, clearArmed: false, _armedAt: 0,
+    // 拖拽投食那三笔账：成了几次、撤回几次、当前托着哪一颗（null = 没托）。
+    carry: { kind: null, x: 0, y: 0, inside: false }, carries: 0, carryCancelled: 0,
   };
   let lastRows = '';
   let lastRel = '';
@@ -374,6 +381,72 @@ export function mountHud(doc, deps) {
   function clear(node) {
     for (const old of [...node.children]) node.removeChild(old);
   }
+
+  // ---- 拖拽投食（spec §6.1 表第一行）----
+  // 三条边界写死在这里：
+  // ① hud 只上报**像素**，"在不在缸内"问调用方（注入的 carryInside 谓词）—— HUD 不许知道
+  //    canvas 语义，那条由 tests/hud-dom.test.js 的源码判据钉住；
+  // ② 按下不等于投出去：只有拖到缸里松手才调 onCarryDrop，撤回也计数读得到
+  //    （与 main.js 的 grabState.suppressed 同一条纪律）；
+  // ③ 临时监听器挂几套摘几套。挂在 doc 上而不是按钮上 —— 手指一移出按钮，
+  //    绑在按钮上的 pointerup 就永远等不到，那颗食物会悬在玩家指尖上。
+  // 刻意**不跟 pointerId**：多指属 spec §10 范围外，跟了就是第二套输入模型。
+  const px = (v, keep) => (Number.isFinite(v) ? v : keep);
+
+  function carryPaint() {
+    carryEl.classList.toggle('is-carrying', !!state.carry.kind);
+    carryEl.classList.toggle('is-outside', !!state.carry.kind && !state.carry.inside);
+    carryEl.style.setProperty('left', `${state.carry.x}px`);
+    carryEl.style.setProperty('top', `${state.carry.y}px`);
+    carryEl.textContent = state.carry.kind ? (FOOD_LABEL[state.carry.kind] || state.carry.kind) : '';
+  }
+
+  function attachCarry(on) {
+    // 刻意把六个调用写全，不写成 `const f = on ? doc.addEventListener : doc.removeEventListener`
+    // 再 `f(...)`：那样方法脱离了 doc，真 DOM 当场抛 "Illegal invocation"（桩里 this 没用上，
+    // 所以它照收 —— 这一族的第三次，见清单 §12.11）。
+    if (on) {
+      doc.addEventListener('pointermove', carryMove);
+      doc.addEventListener('pointerup', carryUp);
+      doc.addEventListener('pointercancel', carryCancel);
+    } else {
+      doc.removeEventListener('pointermove', carryMove);
+      doc.removeEventListener('pointerup', carryUp);
+      doc.removeEventListener('pointercancel', carryCancel);
+    }
+  }
+
+  function carryMove(ev) {
+    if (!state.carry.kind) return;
+    state.carry.x = px(ev && ev.clientX, state.carry.x);
+    state.carry.y = px(ev && ev.clientY, state.carry.y);
+    state.carry.inside = !!(d.carryInside && d.carryInside(state.carry.x, state.carry.y));
+    carryPaint();
+  }
+
+  function carryEnd(ev, cancelled) {
+    const kind = state.carry.kind;
+    attachCarry(false);
+    state.carry.kind = null;
+    if (kind) {
+      if (cancelled) state.carryCancelled += 1;
+      else {
+        state.carry.x = px(ev && ev.clientX, state.carry.x);
+        state.carry.y = px(ev && ev.clientY, state.carry.y);
+        // 松手点要**重新问一次**，不能信最后一次 move：手指可以在两次采样之间滑出缸外。
+        state.carry.inside = !!(d.carryInside && d.carryInside(state.carry.x, state.carry.y));
+        if (state.carry.inside) {
+          state.carries += 1;
+          if (d.onCarryDrop) d.onCarryDrop(kind, state.carry.x, state.carry.y);
+        } else state.carryCancelled += 1;
+      }
+    }
+    carryPaint();
+    pulse();
+  }
+
+  const carryUp = (ev) => carryEnd(ev, false);
+  const carryCancel = () => carryEnd(null, true);
 
   function renderCard(c, world) {
     const built = cardFor(c, world);
@@ -524,6 +597,14 @@ export function mountHud(doc, deps) {
       if (d.onFeed) d.onFeed(kind);
       pulse();
     },
+    beginCarry(kind, ev) {
+      if (!Object.hasOwn(CONFIG.food, kind)) throw new Error(`beginCarry: 没有这种食物 "${kind}"`);
+      if (state.carry.kind) return;        // 第二根手指不算第二次携带（多指属 §10 范围外）
+      state.carry.kind = kind;
+      attachCarry(true);
+      carryMove(ev);                       // 按下处就在食物条上 ⇒ inside 当场算成 false
+      carryPaint();
+    },
     tell(text) {
       // `text == null` 而不是 `=== undefined`：传 null 时 String(null) 会得到字面量
       // "null" 那句话，症状是玩家什么都没讲，它记住了一个词："null"。
@@ -671,7 +752,9 @@ export function mountHud(doc, deps) {
       root.classList.toggle('is-dim', !panelOpen && nowMs - state.lastInputAt >= H.fadeIdleMs);
     },
     pulse,
-    destroy() { root.remove(); },
+    // 换缸/停缸时正托着也要就地收手：那三个监听器挂在 doc 上，不在这棵子树里，
+    // root.remove() 带不走它们 —— 漏一次就是"下一次开缸，随便哪儿一滑都投食"。
+    destroy() { attachCarry(false); root.remove(); },
   };
 
   // 这两个按钮要调 api，所以必须绑在 api 之后 —— 顺序是有意的，别顺手挪到上面去。

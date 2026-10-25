@@ -124,3 +124,20 @@ body {
 .hud-settings input { flex: 1 1 auto; min-width: 0; }
 .hud-set-endpoint.is-bad input { border-color: #ff6b9d; box-shadow: 0 0 0 1px #ff6b9d inset; }
 .hud-clear-save.is-armed { background: #ff6b9d; color: #2d1240; font-weight: 600; }
+
+/* ---- 拖拽投食（spec §6.1 表第一行）---- */
+/* 托着的那一颗跟着手指走。left/top 由 hud.js 的 style.setProperty 写（不是 style['--x']，
+   那条教训是 F-14）。缸外时灰掉：让玩家在**松手之前**就知道这一发不会投出去。 */
+.hud-carry { position: fixed; display: none; z-index: 3; padding: 6px 10px; border-radius: 999px;
+  font-size: 13px; pointer-events: none; transform: translate(-50%, -140%);
+  background: rgba(255, 179, 209, .82); color: #2a1030; }
+.hud-carry.is-carrying { display: block; }
+.hud-carry.is-outside { background: rgba(150, 140, 165, .45); color: rgba(255, 255, 255, .7); }
+/* ⚠️ pointer-events: none **不是可选的**：ghost 悬在指尖正下方，若它吃命中，
+   main.js 的 elementFromPoint 永远只会回它自己 ⇒ "永远算缸外、拖什么都投不出去"。
+   桩里没有命中测试，所以这条由 tests/assets.test.js 钉住。 */
+/* 从按钮上横向拖走时，触摸手势会被浏览器解释成滚动/下拉刷新 ⇒ pointermove 半路被
+   pointercancel 掐断，症状是"拖到一半那颗食物自己消失了"。canvas 那边早就有这一条
+   （input.js 文件头写明它是抚摸能工作的前提），食物条是这次才出现的新拖拽源。
+   ⚠️ 真机上的行为仍未验（清单 §13 手工行）：这条是照 canvas 那条既有结论补的。 */
+.hud-feed { touch-action: none; }
