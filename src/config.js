@@ -490,12 +490,12 @@ const CONFIG = {
                                // （按"每根毛有自己的颜色"做要 256 张 sprite，或每帧 2880 段贝塞尔）
     // 局部倒伏（2026-10-26）：只在 c.beingPetted 时画近手侧的一小段压毛带 + 短伏毛。
     // 不新增 sprite、不改内核判定；方向来自 body.petX/petY（body.js 已经把世界手投影过）。
-    petSpread: 0.9,            // 近手侧扇区的半角（rad）
-    petPressWidth: 1.2,        // 压毛带线宽 = fluff 伸出量 × 此值（只盖毛尖，不压黑轮廓）
-    petPressAlpha: 0.20,       // 压毛带的暗度
-    petTuftLen: 0.16,          // 单根伏毛长度 × 身体半径
-    petTuftWidth: 1.4,         // 伏毛线宽（CSS px）
-    petTuftAlpha: 0.38,        // 伏毛亮度
+    petSpread: 1.35,           // 近手侧扇区的半角（rad）：要绕过手掌边缘，否则全被手盖住
+    petPressWidth: 1.3,        // 压毛带线宽 = fluff 伸出量 × 此值（只盖毛尖，不压黑轮廓）
+    petPressAlpha: 0.22,       // 压毛带的暗度
+    petTuftLen: 0.32,          // 单根伏毛长度 × 身体半径；要长到从手边露出来
+    petTuftWidth: 1.8,         // 伏毛线宽（CSS px）
+    petTuftAlpha: 0.50,        // 伏毛亮度
   },
   tail: {
     segs: 3,                   // TAIL_SEGS
