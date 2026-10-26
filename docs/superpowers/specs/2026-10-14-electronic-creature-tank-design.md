@@ -1843,12 +1843,12 @@ STAR_PROFILE      = smoothstep  // 不是数值常量，是**函数形式**：t�
 FLUFF_LEN_RATIO  = 0.18         // 毛长 = 该值 × 身体半径 × fluff 表现型
 FLUFF_SPRITES    = 2            // 常态 / 炸开。§4.7 那条"只画毛尖碎边"换来的便宜
 // 局部毛倒伏（§4.7，2026-10-26）：只在 beingPetted 时消费，单位见 CONFIG.fluff 注释
-PET_FUR_SPREAD       = 0.9      // 近手侧扇区半角（rad）
-PET_FUR_PRESS_WIDTH  = 1.2      // 压毛带线宽 / fluff 伸出量
-PET_FUR_PRESS_ALPHA  = 0.20
-PET_FUR_TUFT_LEN     = 0.16     // 单根伏毛长度 / 身体半径
-PET_FUR_TUFT_WIDTH   = 1.4      // CSS px
-PET_FUR_TUFT_ALPHA   = 0.38
+PET_FUR_SPREAD       = 1.35     // 近手侧扇区半角（rad）：要绕过手掌边缘
+PET_FUR_PRESS_WIDTH  = 1.3      // 压毛带线宽 / fluff 伸出量
+PET_FUR_PRESS_ALPHA  = 0.22
+PET_FUR_TUFT_LEN     = 0.32     // 单根伏毛长度 / 身体半径
+PET_FUR_TUFT_WIDTH   = 1.8      // CSS px
+PET_FUR_TUFT_ALPHA   = 0.50
 EYE_WIDTH_RATIO  = 0.28
 GLOW_HUE_BUCKETS = 32
 MIN_SIZE         = 14           // 世界单位，size 基因表现型 0 时
