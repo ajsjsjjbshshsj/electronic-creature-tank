@@ -64,7 +64,8 @@ import {
 // ⚠️ B14 交付**分层身体的第 1/2/3/4/5/7 层**，B15（2026-10-21）补上第 6 层（spec §5.1 由内到外）：
 //   1 光晕 → 2 不透明本体 → 3 花纹（绣在毛里）→ 4 体内亮区（透过毛看到的一片）
 //   → 5 尾巴（3 段贴图）→ **6 眼睛 + 腮红（B15，走路径不贴图）** → 7 毛尖碎边
-//   （1 次 setTransform + 1 次 drawImage）→ [8 语言气泡 = B19]。
+//   （1 次 setTransform + 1 次 drawImage）→ **7b 抚摸时的局部毛倒伏（只有路径，无贴图）**
+//   → [8 语言气泡 = B19]。
 //   蹦跳压扁、死亡溶散、卵与食物的绘制仍不在本次（B16），所以 CONFIG.render 里也没有它们的常量。
 //
 // ⚠️ 相对旧计划 Task 5 的四处改动，全部按 spec §5.1 的 2026-10-20 重排落地：
@@ -515,8 +516,9 @@ const squashRatio = (now, rest) => {
 };
 
 // Catmull-Rom 平滑闭合曲线 → 三次贝塞尔。每点一段 ⇒ 每只每帧恰好 CONFIG.bodyPoints 段。
-// ⚠️ 这是主 ctx 上**唯一**一处贝塞尔来源。毛不走路径（spec §4.7），
-// 所以"每帧贝塞尔段数 = 只数 × bodyPoints"是一条能被断言的上界。
+// ⚠️ 这是主 ctx 上**唯一**一处**三次**贝塞尔来源；抚摸态的短伏毛另用一条二次贝塞尔
+// （drawPetFurLayer，最多每点一段，且只在 beingPetted 时存在）。毛本身不走路径（spec §4.7），
+// 所以非抚摸态的"每帧贝塞尔段数 = 只数 × bodyPoints"仍是一条能被断言的上界。
 // 换算公式（p0→p3 四个控制点，画 p1→p2 那一段）：c1 = p1 + (p2−p0)/6、c2 = p2 − (p3−p1)/6，
 // 除以 6 是 Catmull-Rom（张力 0）到贝塞尔的标准换算，不是调出来的经验值。
 // 直接用 lineTo 连 24 个点会得到一个明显的二十四边形（50px 半径上每条边约 13px，棱角肉眼可见）。
@@ -767,6 +769,100 @@ function drawFluffLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, dpr) {
   ctx.restore();
 }
 
+// 局部毛倒伏（spec §4.7 那句"被摸时那一段的毛要倒伏"）。
+// 只画近手侧一个扇区：一条压毛暗带盖住原来的毛尖，再添几根短伏毛。
+// 不新增 sprite、不改 fluff 那两张贴图的账单；方向由 body.js 投影好的 petX/petY 提供。
+function inPetSector(petAngle, p, spread) {
+  let d = Math.abs(Math.atan2(p.ry, p.rx) - petAngle) % TAU;
+  if (d > Math.PI) d = TAU - d;
+  return d <= spread;
+}
+
+export function drawPetFurLayer(ctx, renderer, c, body, cx, cy, r, ca, sa) {
+  if (!c || !c.beingPetted || !body || !(body.fluffLen > 0)) return;
+  if (c.alive === false || c.sick) return;
+  if (!(r > 0) || !Number.isFinite(cx) || !Number.isFinite(cy)) return;
+  const petX = Number.isFinite(body.petX) ? body.petX : 0;
+  const petY = Number.isFinite(body.petY) ? body.petY : 0;
+  if (petX === 0 && petY === 0) return;
+  const fluffPx = r * body.fluffLen;
+  if (!(fluffPx > 0.05)) return;
+  writeBodyScreen(renderer, body, cx, cy, r, c.facing, renderer.fx.squashV);
+  const F = CONFIG.fluff;
+  const petAngle = Math.atan2(petY, petX);
+  const sx = renderer.sx;
+  const sy = renderer.sy;
+  const pts = body.points;
+
+  // 压毛带：只画**相邻**轮廓点之间的小段。扇区跨 0 角时会分成两段，绝不能把
+  // 首尾两个选中点直接连成一条穿过身体的弦（真页面/审查都验证过那是黑色横带）。
+  const pressW = Math.max(1.5, fluffPx * F.petPressWidth);
+  const lift = fluffPx * 0.35 + pressW * 0.5;
+  ctx.save();
+  ga(ctx, F.petPressAlpha, renderer.fx.alpha);
+  ctx.strokeStyle = CONFIG.colors.bgTop;
+  ctx.lineWidth = pressW;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  let segments = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    if (!inPetSector(petAngle, pts[i], F.petSpread)
+      || !inPetSector(petAngle, pts[j], F.petSpread)) continue;
+    const dix = sx[i] - cx;
+    const diy = sy[i] - cy;
+    const djx = sx[j] - cx;
+    const djy = sy[j] - cy;
+    const li = Math.hypot(dix, diy);
+    const lj = Math.hypot(djx, djy);
+    if (!(li > 0) || !(lj > 0)) continue;
+    ctx.moveTo(sx[i] + (dix / li) * lift, sy[i] + (diy / li) * lift);
+    ctx.lineTo(sx[j] + (djx / lj) * lift, sy[j] + (djy / lj) * lift);
+    segments += 1;
+  }
+  if (segments > 0) ctx.stroke();
+
+  // 短伏毛：从近手侧的轮廓出发，沿切线方向倒下一点点，而不是继续向外长。
+  if (segments > 0) {
+    ga(ctx, F.petTuftAlpha, renderer.fx.alpha);
+    ctx.strokeStyle = CONFIG.colors.mote;
+    ctx.lineWidth = F.petTuftWidth;
+    ctx.beginPath();
+    let tufts = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (!inPetSector(petAngle, p, F.petSpread)) continue;
+      const dx = sx[i] - cx;
+      const dy = sy[i] - cy;
+      const len = Math.hypot(dx, dy);
+      if (!(len > 0)) continue;
+      const nx = dx / len;
+      const ny = dy / len;
+      // 从接触点向两侧分开倒：用**局部空间**的叉积决定倒向，再取反让它离开手心。
+      const llen = Math.hypot(p.rx, p.ry) || 1;
+      const lrx = p.rx / llen;
+      const lry = p.ry / llen;
+      const side = petX * (-lry) + petY * lrx >= 0 ? -1 : 1;
+      const tx = -ny * side;
+      const ty = nx * side;
+      const L = r * F.petTuftLen;
+      const startX = sx[i] + nx * fluffPx * 0.15;
+      const startY = sy[i] + ny * fluffPx * 0.15;
+      const endX = sx[i] + tx * L + nx * fluffPx * 0.40;
+      const endY = sy[i] + ty * L + ny * fluffPx * 0.40;
+      ctx.moveTo(startX, startY);
+      ctx.quadraticCurveTo(
+        sx[i] + tx * L * 0.55 + nx * fluffPx * 0.70,
+        sy[i] + ty * L * 0.55 + ny * fluffPx * 0.70,
+        endX, endY);
+      tufts += 1;
+    }
+    if (tufts > 0) ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // ---------------------------------------------------------------- 第 6 层：眼睛 → 腮红
 //
 // spec §5.1 的层序是 5 尾巴 → **6 眼睛/腮红** → 7 毛尖碎边，所以这一层接在尾巴之后、
@@ -1005,6 +1101,7 @@ export function drawCreature(ctx, renderer, c, body, viewport) {
   drawTailLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, viewport);
   drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa);       // 第 6 层（B15）
   drawFluffLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, dpr);
+  drawPetFurLayer(ctx, renderer, c, body, cx, cy, r, ca, sa);
   ctx.restore();
 }
 

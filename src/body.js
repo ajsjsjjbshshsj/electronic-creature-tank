@@ -142,6 +142,8 @@ export function createBody(traits) {
     prevDy: 0,
     impactX: 0,                   // 预声明：detectImpact 第一次就要写它，不能在那时才新增属性
     impactY: 0,
+    petX: 0,                      // 近手侧的单位方向（facing 局部空间）；毛层只读它做局部倒伏
+    petY: 0,
     wobble: clamp01(t.wobble),
     fluff: clamp01(t.fluff),      // spec §4.1 的性状位点，透传到表现层（§4.7 毛长）
     radius: 0,                    // 世界单位（sizeOf 的缓存）；updateBody 每步刷新
@@ -357,6 +359,8 @@ export function updateBody(body, c, dt, hand) {
     }
   }
   const petting = petX !== 0 || petY !== 0;
+  body.petX = petting ? petX : 0;
+  body.petY = petting ? petY : 0;
   if (impact > 0 || petting) {
     const ix = body.impactX;
     const iy = body.impactY;
