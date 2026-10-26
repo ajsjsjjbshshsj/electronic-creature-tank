@@ -488,6 +488,14 @@ const CONFIG = {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型
     sprites: 2,                // FLUFF_SPRITES：常态 / 炸开。§4.7"只画毛尖碎边"换来的便宜
                                // （按"每根毛有自己的颜色"做要 256 张 sprite，或每帧 2880 段贝塞尔）
+    // 局部倒伏（2026-10-26）：只在 c.beingPetted 时画近手侧的一小段压毛带 + 短伏毛。
+    // 不新增 sprite、不改内核判定；方向来自 body.petX/petY（body.js 已经把世界手投影过）。
+    petSpread: 0.9,            // 近手侧扇区的半角（rad）
+    petPressWidth: 2.0,        // 压毛带线宽 = fluff 伸出量 × 此值
+    petPressAlpha: 0.24,       // 压毛带的暗度
+    petTuftLen: 0.16,          // 单根伏毛长度 × 身体半径
+    petTuftWidth: 1.4,         // 伏毛线宽（CSS px）
+    petTuftAlpha: 0.38,        // 伏毛亮度
   },
   tail: {
     segs: 3,                   // TAIL_SEGS

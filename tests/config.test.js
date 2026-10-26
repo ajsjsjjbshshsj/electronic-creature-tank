@@ -397,11 +397,20 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
   assert.ok(CONFIG.star.innerRatio > 0 && CONFIG.star.innerRatio < CONFIG.star.outerRatio,
     '内凹必须严格小于外角，否则"不是星形就是圆"');
 
-  assert.deepEqual(Object.keys(CONFIG.fluff).sort(), ['lenRatio', 'sprites']);
+  assert.deepEqual(Object.keys(CONFIG.fluff).sort(), [
+    'lenRatio', 'petPressAlpha', 'petPressWidth', 'petSpread', 'petTuftAlpha',
+    'petTuftLen', 'petTuftWidth', 'sprites',
+  ]);
   assert.equal(CONFIG.fluff.lenRatio, 0.18);
   // sprites = 2 是 spec §4.7 那条性能生死线的读数：
   // 只画"毛尖浅色碎边"才只需要 2 张；按"每根毛有自己的颜色"要 32 色相桶 × 8 蓬松档 = 256 张。
   assert.equal(CONFIG.fluff.sprites, 2);
+  assert.ok(CONFIG.fluff.petSpread > 0 && CONFIG.fluff.petSpread < Math.PI / 2,
+    '局部倒伏扇区必须小于半圈，否则会绕整只一圈');
+  assert.ok(CONFIG.fluff.petPressAlpha > 0 && CONFIG.fluff.petPressAlpha <= 1);
+  assert.ok(CONFIG.fluff.petTuftAlpha > 0 && CONFIG.fluff.petTuftAlpha <= 1);
+  assert.ok(CONFIG.fluff.petTuftLen > 0 && CONFIG.fluff.petTuftWidth > 0);
+  assert.ok(CONFIG.fluff.petPressWidth >= 1, '压毛带至少要盖过原来的毛尖宽度');
 
   assert.equal(CONFIG.tail.segs, 3);
   assert.equal(CONFIG.tail.lenRatio, 0.5, '链长 = 0.5 × 身体半径，**由体型派生、不新增基因**');

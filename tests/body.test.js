@@ -417,6 +417,19 @@ test('同侧浅抚摸不覆盖更深的碰撞凹陷', () => {
     `同一点的深碰撞只能按原衰减保留，不能被浅抚摸写成 ${CONFIG.body.petDentMax}：${body.dip[0]}`);
 });
 
+test('抚摸方向留给毛层：近手侧单位向量只在 beingPetted 时写入，松手归零', () => {
+  const body = createBody({ wobble: 0.5, fluff: 0.6 });
+  const c = makeCreature({ beingPetted: true });
+  updateBody(body, c, DT, handAt(c, 0.02, 0));
+  assert.ok(body.petX > 0.99, `手在局部 +x，petX 应接近 1，实测 ${body.petX}`);
+  assert.ok(Math.abs(body.petY) < 1e-12, `手在 +x 轴上，petY 应接近 0，实测 ${body.petY}`);
+
+  c.beingPetted = false;
+  updateBody(body, c, DT, handAt(c, 0.02, 0));
+  assert.equal(body.petX, 0, '松手后毛层不许继续倒伏');
+  assert.equal(body.petY, 0);
+});
+
 test('updateBodies 把同一份手交给被摸的那只，被拎住的不产生抚摸凹陷', () => {
   const petted = makeCreature({ beingPetted: true });
   petted.id = 'petted';
