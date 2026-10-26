@@ -491,8 +491,8 @@ const CONFIG = {
     // 局部倒伏（2026-10-26）：只在 c.beingPetted 时画近手侧的一小段压毛带 + 短伏毛。
     // 不新增 sprite、不改内核判定；方向来自 body.petX/petY（body.js 已经把世界手投影过）。
     petSpread: 0.9,            // 近手侧扇区的半角（rad）
-    petPressWidth: 2.0,        // 压毛带线宽 = fluff 伸出量 × 此值
-    petPressAlpha: 0.24,       // 压毛带的暗度
+    petPressWidth: 1.2,        // 压毛带线宽 = fluff 伸出量 × 此值（只盖毛尖，不压黑轮廓）
+    petPressAlpha: 0.20,       // 压毛带的暗度
     petTuftLen: 0.16,          // 单根伏毛长度 × 身体半径
     petTuftWidth: 1.4,         // 伏毛线宽（CSS px）
     petTuftAlpha: 0.38,        // 伏毛亮度
