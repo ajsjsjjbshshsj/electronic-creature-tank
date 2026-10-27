@@ -114,6 +114,8 @@ body {
 .hud-family.is-open { display: flex; }
 .hud-family-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .hud-family-title { margin: 0; font-size: 17px; font-weight: 600; }
+.hud-family-actions { display: flex; gap: 8px; }
+.hud-family-card.is-hidden { display: none; }
 .hud-family-legend { margin-top: 6px; font-size: 11px; line-height: 1.5; opacity: .62; }
 .hud-family-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; margin-top: 8px;
   -webkit-overflow-scrolling: touch; }

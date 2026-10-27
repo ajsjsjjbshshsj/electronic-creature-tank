@@ -282,6 +282,7 @@ export function mountHud(doc, deps) {
   const controls = el(doc, 'div', 'hud-controls', root);
   const foodbar = el(doc, 'div', 'hud-foodbar', root);
   const card = el(doc, 'div', 'hud-card', root);
+  card.tabIndex = -1;   // 可编程聚焦：从家谱进来时把键盘焦点带进卡里
 
   // ---- 右上：倍速 / 暂停 / 静音 / 设置 ----
   // 音频被浏览器**明确拒绝**时才不挂静音键（spec §5.4.1 第 8 条）：一个按了永远没反应的
@@ -362,7 +363,9 @@ export function mountHud(doc, deps) {
   family.setAttribute('aria-label', '家谱');
   const familyHead = el(doc, 'div', 'hud-family-head', family);
   el(doc, 'h2', 'hud-family-title', familyHead).textContent = '家谱';
-  const familyClose = button(doc, familyHead, '关闭', 'hud-family-close');
+  const familyActions = el(doc, 'div', 'hud-family-actions', familyHead);
+  const familyCardBtn = button(doc, familyActions, '信息卡', 'hud-family-card');
+  const familyClose = button(doc, familyActions, '关闭', 'hud-family-close');
   const familyLegend = el(doc, 'div', 'hud-family-legend', family);
   familyLegend.textContent = '同母 = 同胞 · 实线 = 母亲 → 孩子 · 虚线 = 伙伴 · 虚线圈 = 起点无母亲记录 · 只画当前活着的个体';
   const familyScroll = el(doc, 'div', 'hud-family-scroll', family);
@@ -435,6 +438,8 @@ export function mountHud(doc, deps) {
     const model = familyModelFor(world, state.familyFocusId);
     state.familyFocusId = model.focusId;
     state.familyNodes = model.nodes.length;
+    // 空缸里没有"当前焦点"，留着这个按钮就是一个按了没反应的骗人按钮。
+    familyCardBtn.classList.toggle('is-hidden', model.nodes.length === 0);
     let sig = model.focusId || '';
     for (const n of model.nodes) sig += `|n:${n.id}:${n.name}:${n.hue}:${n.depth}`;
     for (const e of model.edges) sig += `|e:${e.kind}:${e.from}:${e.to}`;
@@ -826,6 +831,16 @@ export function mountHud(doc, deps) {
       if (state.familyOpen) renderFamily(latestWorld, true);
       pulse();
     },
+    openFamilyFocusCard() {
+      if (!state.familyOpen || !state.familyFocusId) return;
+      const c = ((latestWorld && latestWorld.creatures) || []).find(
+        (x) => x.id === state.familyFocusId && x.alive !== false && x.stage !== 'dead',
+      ) || null;
+      if (!c) return;
+      api.setFamilyOpen(false);
+      api.setCard(c, latestWorld);
+      card.focus();
+    },
     setEndpoint(v) { draft.endpoint = String(v == null ? '' : v); state.endpointRejected = 0; paintPanel(); },
     setModel(v) { draft.model = String(v == null ? '' : v); paintPanel(); },
     // 只写：值进 draft 之后**从不回填**到任何节点，保存完立刻清空输入框。
@@ -945,5 +960,6 @@ export function mountHud(doc, deps) {
   nameBtn.addEventListener('click', () => api.rename(state.card, nameInput.value));
   tellBtn.addEventListener('click', () => api.tell());
   familyClose.addEventListener('click', () => api.setFamilyOpen(false));
+  familyCardBtn.addEventListener('click', () => api.openFamilyFocusCard());
   return api;
 }
