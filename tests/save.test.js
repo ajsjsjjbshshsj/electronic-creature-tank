@@ -9,8 +9,8 @@ import { CONFIG } from '../src/config.js';
 import { ALL_GENES, randomGenome, decode } from '../src/genes.js';
 import { createRng } from '../src/rng.js';
 import { assertColorStop } from './ctx-stub.js';
-import { SAVE_VERSION, migrate, assertCreatureShape } from '../src/save.js';
-import { ROLES } from '../src/memory.js';
+import { SAVE_VERSION, migrate, serialize, assertCreatureShape } from '../src/save.js';
+import { ROLES, promoteCompanion } from '../src/memory.js';
 import { createWorld, tickWorld, addCreature } from '../src/sim.js';
 
 // 一份**v1 形状**的旧档：14 个位点（缺 fluff / eggTint / activity / talk / intellect / broody / ...）、
@@ -235,4 +235,30 @@ test('迁移出来的旧个体读回世界后仍能跑（形状兼容，不是�
       assert.ok(Number.isFinite(v) && v >= 0 && v <= 1, `emotions.${k} = ${v}`);
     }
   }
+});
+
+test('bondId/bondSync/bondTotal 不入档；读回来是干净的 0/null，而 companion 这条记忆照常入档', () => {
+  // 两半各自盯一个静默故障：
+  // · 存了进度 ⇒ 读档后第一 tick 就"接着上次的 4 秒"继续，再同步两秒就响铃，
+  //   而那一记铃本该是它们**这一次**聊得来的结果。
+  // · 忘了给 migrate 补默认值 ⇒ 三个键是 undefined，body.js 的相位插值算出 NaN，
+  //   表现是"读档之后这只星星不跳了"，没有任何一处抛错。
+  const w = createWorld({ seed: 7 });
+  const c = w.creatures[0];
+  const other = w.creatures[1];
+  c.bondId = other.id; c.bondSync = 4; c.bondTotal = 80;
+  assert.equal(promoteCompanion(c.memory, other.id), true, '前置条件：升级必须真的发生');
+
+  const raw = JSON.parse(JSON.stringify(serialize(w)));
+  for (const k of ['bondId', 'bondSync', 'bondTotal']) {
+    assert.equal(Object.prototype.hasOwnProperty.call(raw.creatures[0], k), false,
+      `${k} 是"此刻在跟谁同步"的进度，不是关系事实，不该进档`);
+  }
+
+  const back = migrate(raw).creatures[0];
+  const entry = back.memory.entries.find((e) => e.id === other.id);
+  assert.equal(entry.role, 'companion', '关系事实入档：读回来它们仍然是伙伴');
+  assert.equal(back.bondId, null, 'migrate 必须把 null 补回来，undefined 会在插值里变 NaN');
+  assert.equal(back.bondSync, 0, '进度从 0 起：要重新同步才会再响铃');
+  assert.equal(back.bondTotal, 0);
 });

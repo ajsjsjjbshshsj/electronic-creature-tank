@@ -97,6 +97,13 @@ export function createCreature(opts) {
 
     // （原 courtship 状态机字段随孤雌制删除 —— 没有对象就没有"正在和谁仪式"。）
     broodT: 0,       // 憋卵计时（秒），broodScore 读它，产卵结算时归零
+
+    // ---- 社交同步（spec §4.12 第 6 条；设计见 2026-10-27-social-bond-sync-design.md）----
+    // 三个都是**此刻的进度**，不入档（save.js 的 CREATURE_SKIP_FIELDS）。
+    // 关系事实住在 memory 里（role:'companion' + 好感/熟悉度），那一份照常存。
+    bondId: null,      // 此刻在跟谁同步；bondSync 退到 0 时清掉
+    bondSync: 0,       // 本次连续同步的秒数，封顶 CONFIG.social.syncSeconds
+    bondTotal: 0,      // 与 bondId **累计**同步的秒数 —— "长期凑在一起"的那个长期
     // 求关注升级计时（秒）。spec §4.10 原写"挂在 memory[PLAYER] 上"，实现改挂在个体上，
     // 理由见 spec §4.10 的 2026-10-20 补注：记忆条目是被 remember() 校验的**五键磁盘契约**，
     // 为一个每帧累加的计时器加第六个键，会让所有关系条目和所有存档都长出一个用不上的字段。

@@ -399,3 +399,16 @@ test('emotion 与 needs 字段齐全（供下游模块直接消费）', () => {
   assert.deepEqual(Object.keys(c.emotions).sort(), [...EMOTION_KEYS].sort());
   assert.deepEqual(Object.keys(c.needs).sort(), ['energy', 'hunger', 'safety', 'social']);
 });
+
+test('新个体带社交同步三件套，初值是"没有伙伴、零进度"而不是 undefined', () => {
+  // undefined 在这里是**静默**故障：bondSync 要参与 body.js 的相位插值算术，
+  // `undefined + dt` = NaN，NaN 的脉动表现为"这只星星不跳了"，全程不抛错。
+  // bondId 必须是 null 而不是 undefined —— social.js 的 `c.bondId !== partnerId`
+  // 与 sim.js 的"占位者还活着就不换人"都按 null 读它。
+  const c = mk();
+  assert.equal(c.bondId, null);
+  assert.equal(c.bondSync, 0);
+  assert.equal(c.bondTotal, 0);
+  assert.equal(Object.prototype.hasOwnProperty.call(c, 'bondSync'), true,
+    '三个字段必须是自己的属性，不是从某个共享默认对象上读来的');
+});

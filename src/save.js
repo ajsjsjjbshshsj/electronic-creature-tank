@@ -83,6 +83,12 @@ function migrateCreature(c, worldSeed) {
   if (!Number.isFinite(out.eggBoost)) out.eggBoost = 0;   // v1 没这个字段，undefined 会让 sizeOf 变 NaN
   if (!Number.isFinite(out.broodT)) out.broodT = 0;
   if (!Number.isFinite(out.begIgnored)) out.begIgnored = 0;
+  // 社交同步的进度**不跨读档延续**（CREATURE_SKIP_FIELDS 那一条），所以这里无条件重置，
+  // 而不是"缺了才补"：读回来必须是干净的 null/0，否则 bondSync 带着旧进度进 body.js 的
+  // 相位插值，症状是"读档第一帧就接着上次响铃"（若是 undefined 则是 NaN，星星不跳了）。
+  out.bondId = null;
+  out.bondSync = 0;
+  out.bondTotal = 0;
   if (!out.speech) out.speech = { nextAt: 0, lastTokens: null };
   return out;
 }
@@ -202,10 +208,16 @@ export function assertCreatureShape(c) {
 //   读回来第一个 tick 就重新决策，代价只有一帧。
 // · beingPetted / beingPoked —— 抚摸与戳的**上升沿**寄存器（creature.js 里那两条注释）。
 //   存它们会让读档的第一帧把一次早已结束的手指当成"正在被摸"，joy 平白加一笔。
+// · bondId / bondSync / bondTotal —— 社交同步的**此刻进度**（与谁、同步了几秒）。
+//   关系本身在 memory 里（role:'companion'），那一份照常入档。存进度的症状是
+//   "读档第一帧就接着上次的进度响铃"，而那一记铃应当是它们这一次聊得来的结果。
+//   ⚠️ 与 broodT 一样，跳过之后**必须在 migrateCreature 里补默认值**：
+//   bondSync 要参与 body.js 的相位插值算术，undefined 会变 NaN（星星不跳了，不抛错）。
 export const CREATURE_SKIP_FIELDS = Object.freeze([
   'traits', 'thresholds', 'speech',
   'intent', 'intentTime', 'moving', 'resting',
   'beingPetted', 'beingPoked', 'held',
+  'bondId', 'bondSync', 'bondTotal',
 ]);
 
 // 世界的**运行时容器**：这些不是"状态"，而是状态赖以计算的机器，存下来必然失真。
