@@ -108,7 +108,10 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   // ⚠️ 65 → 66、54 → 55（2026-10-25 手部视觉）：新增 **CONFIG.hand 一段**（一个节点、19 个标量）。
   //    形状与行为分工同 avatar/hud：几何换算由 tests/hand.test.js 钉，绘制账单由
   //    tests/render-hand.test.js 钉；这里只钉"这一段确实存在且没有被悄悄拓宽"。
-  assert.equal(visited.length, 66, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 66 → 67、55 → 56（2026-10-27 伙伴同步）：新增 **CONFIG.social 一段**（一个节点、11 个标量）。
+  //    与 grab 同型：旋钮之间没有"逐键比对"的结构关系，所以不需要子表。
+  //    行为由 tests/social.test.js（纯层门控）与 tests/sim.test.js（tickSocial 接线）钉。
+  assert.equal(visited.length, 67, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'api', 'audio', 'avatar', 'behavior', 'blink', 'body', 'bodyPoints',
@@ -117,10 +120,10 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'grab', 'gridCell', 'hand',
     'heard', 'hop', 'hud', 'hueRange', 'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize',
     'mood', 'motion', 'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles',
-    'perceiveRadius', 'populationCap', 'render', 'save', 'speech', 'stage', 'star', 'tail',
+    'perceiveRadius', 'populationCap', 'render', 'save', 'social', 'speech', 'stage', 'star', 'tail',
     'timeScales',
-  ], 'CONFIG 顶层键名（55 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 55);
+  ], 'CONFIG 顶层键名（56 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 56);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -139,6 +142,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.hud',                                                                 // 计划 3 Task 3 新增（HUD 的九个常数，其中三个是 gestures.js 的真相源）
     'CONFIG.grab', 'CONFIG.grab.w', 'CONFIG.emotions.eventMagnitude.grabbedRough',  // 拎着玩（Task 1 常数 + Task 3 两张事件行）
     'CONFIG.hand',                                                                // 手部视觉（几何换算与绘制账单分别在 hand/render-hand 测试里）
+    'CONFIG.social',                                                              // 伙伴同步（2026-10-27：门控与同步度读数的 11 个旋钮）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }

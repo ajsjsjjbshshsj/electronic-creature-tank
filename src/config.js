@@ -484,6 +484,25 @@ const CONFIG = {
                                // 默认个体**恰好**落在 0.5 中位 —— 三项直接相加会算出 0.825，
                                // 全缸一律"喜欢被拎"，R-2 就白立了（tests/grab.test.js 钉住）
   },
+  // ---- 社交同步（spec §4.12 第 6 条：socialize 的"高级表现"）----
+  // 两只吃饱、互相有好感、都开心的个体会自发同步脉动；同步满一程响一记两音小铃，
+  // 长期凑在一起的互相成为 companion（家谱虚线与信息卡"同伴"行的第一个生产者）。
+  // 设计与六条裁定见 docs/superpowers/specs/2026-10-27-social-bond-sync-design.md。
+  // ⚠️ 这一段里**没有** joyMin：高 joy 那道门读 CONFIG.mood.happyJoyMin ——
+  //    "它开心"在整份代码里只许有一个定义点（与 body.js 读 begEscalate 同一条纪律）。
+  social: {
+    pairDist: 0.09,        // 互相 socialize 且距离在此之内才算"凑在一起"（停距 0.06 + 余量）
+    fedMin: 0.6,           // 双方的 (1 − hunger) 下限：§4.12 第 6 条原文"两只吃饱"
+    affMin: 0.15,          // 双方**互相**的好感下限（memory.affection ∈ [−1,1]）："互相好感"
+    syncSeconds: 6,        // 连续同步这么久 → degree 到 1（响铃、算"同步上了"）
+    breakDecay: 2,         // 中断后 episode 进度每秒退几秒；**必须 > 1**，否则断续也能攒满
+    totalSeconds: 90,      // 与同一只**累计**同步这么久 → 互相升级 companion（"长期凑在一起"）
+    totalDecay: 0.01,      // 分开时长期计数的指数衰减系数（半衰 ≈ 69 秒）
+    affectionRate: 0.05,   // 同步期间每秒给双方的好感 × degree（§4.8：同步脉动 → affection+）
+    familiarityRate: 0.06, // 同期熟悉度（与 CONFIG.grab.familiarityRate 同量级）
+    arousalRate: 0.12,     // 社交高峰：arousal 已经接进脉率/亮度/膨胀，这条是"看得见"的出口
+    joyRate: 0.05,
+  },
   fluff: {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型
     sprites: 2,                // FLUFF_SPRITES：常态 / 炸开。§4.7"只画毛尖碎边"换来的便宜
