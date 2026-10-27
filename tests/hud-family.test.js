@@ -112,6 +112,54 @@ test('点一个节点只改焦点并重画，不关掉家谱', () => {
   assert.ok(family._class.has('is-open'));
 });
 
+test('家谱头部有“信息卡”按钮：空缸隐藏，有节点时可用', () => {
+  const { hud, root } = mount();
+  hud.frame(0, { creatures: [], foods: [], eggs: [], time: 0 });
+  hud.setFamilyOpen(true);
+  const family = find(root, 'div', 'hud-family');
+  const btn = find(family, 'button', 'hud-family-card');
+  assert.ok(btn, '家谱头部必须有信息卡入口');
+  assert.equal(textOf(btn), '信息卡');
+  assert.ok(btn._class.has('is-hidden'), '空缸时按钮必须藏起来，不能是个按了没反应的按钮');
+
+  hud.setFamilyOpen(false);
+  hud.frame(1, WORLD);
+  hud.setFamilyOpen(true, 'c-b');
+  assert.ok(!btn._class.has('is-hidden'), '有节点时必须能按');
+});
+
+test('点信息卡把当前焦点个体交给卡并收起家谱，且不写世界', () => {
+  const { doc, hud, root, family } = openWithFocus('c-b');
+  const before = JSON.stringify(WORLD);
+  const card = find(root, 'div', 'hud-card');
+  assert.ok(!card._class.has('is-open'), '前置：家谱开着时卡要让位');
+  click(find(family, 'button', 'hud-family-card'));
+  assert.equal(hud.state.familyOpen, false, '打开信息卡后家谱必须收起');
+  assert.ok(!family._class.has('is-open'));
+  assert.equal(find(root, 'button', 'hud-family-btn').attrs['aria-expanded'], 'false');
+  assert.equal(hud.state.card, WORLD.creatures[1], '卡必须指向当前焦点个体');
+  assert.ok(card._class.has('is-open'), '卡必须真的打开');
+  assert.ok(textOf(find(card, 'h2', 'hud-card-title')).includes('B'));
+  assert.equal(doc.activeElement, card, '键盘焦点必须跟到卡里，不能留在已收起的家谱上');
+  assert.equal(JSON.stringify(WORLD), before, '打开卡不许写世界');
+});
+
+test('先换焦点再点信息卡，打开的是新焦点；空缸点它什么都不发生', () => {
+  const { hud, family } = openWithFocus('c-c');
+  const nodeB = findAll(family, 'g', 'hud-family-node').find((n) => n.dataset.id === 'c-b');
+  click(nodeB);
+  click(find(family, 'button', 'hud-family-card'));
+  assert.equal(hud.state.card, WORLD.creatures[1], '换过焦点之后打开的必须是新焦点');
+
+  const empty = mount();
+  empty.hud.frame(0, { creatures: [], foods: [], eggs: [], time: 0 });
+  empty.hud.setFamilyOpen(true);
+  const emptyFamily = find(empty.root, 'div', 'hud-family');
+  click(find(emptyFamily, 'button', 'hud-family-card'));
+  assert.equal(empty.hud.state.card, null, '空缸不许凭空造一张卡');
+  assert.equal(empty.hud.state.familyOpen, true, '空缸点它必须保持原样');
+});
+
 test('关闭按钮与 Escape 都能关家谱，且 Escape 监听只在打开期间存在', () => {
   const { doc, hud, family, root } = openWithFocus('c-c');
   assert.equal(doc.docListenerCount('keydown'), 1);

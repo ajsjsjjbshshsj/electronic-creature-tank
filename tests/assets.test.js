@@ -56,8 +56,10 @@ test('家谱的 DOM 类与 CSS 可见性双向锁住（桩里没有 CSS）', () 
   assert.match(css, /\.hud-family\.is-open\s*\{[^}]*display:\s*flex/,
     'CSS 不显示 is-open 的家谱 ⇒ 点了没反应');
   assert.match(css, /\.hud-family-empty\.is-hidden\s*\{[^}]*display:\s*none/);
+  assert.match(css, /\.hud-family-card\.is-hidden\s*\{[^}]*display:\s*none/,
+    '空缸那张“信息卡”按钮必须真的藏起来');
   for (const cls of ['is-focus', 'is-root', 'is-companion', 'hud-family-dot',
-    'hud-family-label', 'hud-fam-hit']) {
+    'hud-family-label', 'hud-fam-hit', 'hud-family-card', 'hud-family-actions']) {
     assert.ok(css.includes(cls), `css/main.css 没有 ${cls} 的样式`);
     assert.ok(js.includes(cls), `hud.js 没有写 ${cls}`);
   }
