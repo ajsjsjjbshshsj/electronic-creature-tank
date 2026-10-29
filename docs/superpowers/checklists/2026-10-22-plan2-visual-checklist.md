@@ -1793,3 +1793,48 @@ rocking 相位用 `renderer.petTime`（本次抚摸累计）从 0 渐入，第�
 是否在正确的时候出现。`start.bat` 后：把两只喂饱、让它们凑在一起待两分钟，听有没有铃声、
 看呼吸是否同步；再从家谱里找虚线、点开卡看「同伴」。**无人喂的缸不会出现伙伴** ——
 验收时要先喂。
+
+---
+
+## 20. 追加（2026-10-29，共享存档：局域网 + 409）
+
+控制方拍定：托管方式 = **扩展 `server.ps1`**（零月费、零账号），冲突策略 = **409 + 让玩家选**。
+协议照主 spec §7.5/§7.6 原样实现：`GET/PUT /api/save`、`revision` 只由服务器递增、
+版本对不上返 409 且不写一个字节；客户端冲突时冻结远端、继续写本机（绝不静默丢），
+服务器不可达就退回本机档并挂「本地存档」角标。
+
+### 20.1 判据与实现
+
+- 纯层 `src/remote.js`（`parseSaveResponse / nextRevision / decideBoot`）+ 4 条测试。
+  两处要点：**"200 但缺 doc" 必须归 error**（读成空缸 ⇒ 第一次落盘就把服务器上那一缸覆盖掉）；
+  GET 与 PUT 的 200 是两种形状，用 `mode` 分开判 —— 不分开的话一次成功的保存会被判成 error，
+  然后降级写本机，"两份真相"就是这么来的。
+- 服务端 `server.ps1` 两条路由 + 原子写（tmp → Move）+ `tests/save-server.mjs` **13/13**：
+  404 / 首次 PUT revision 1 / 旧版本 409 且字节数不变且没落盘 / 正确版本 revision 2 /
+  服务器盖掉客户端送来的 999 / GET 读回 / tmp 不残留 / 未知 `/api/*` 404 / 静态文件仍可读 / 坏 JSON 400。
+- 接线 `main.js` 6 条 boot 级测试：远端起缸、不可达降级、409 冻结且此后不再 PUT、冲突期间进度进本机、
+  「接管」用服务器版本号再 PUT、「加载它的版本」GET 并 restore 现场、两端都有档且不同 ⇒ 启动即冲突。
+- HUD 一个角标 + 一条两按钮的冲突条（`saveBadgeFor / conflictNoticeFor` 是纯函数）+ 4 条测试。
+- 全套 **1233/1233**。
+
+### 20.2 真页面证据（这一轮**拿到了**）
+
+`server.ps1 -Port 8123` + 真浏览器页面（`navigate_page` 成功，截图仍因视口 0x0 拿不到）：
+
+1. 开缸后 `saveState.backend === 'remote'`、`revision === 0` —— 探测真的走了 `/api/save` 的 404 分支。
+2. `__tank.saveNow()` → `puts:1, ok:1`，服务器上出现 `save.json`（63332 字节、24 只、revision 1）。
+3. 从 Node 冒充"第二台设备"带 `baseRevision: 0` PUT → **409 + revision 1**。
+4. 再冒充一次把服务器推到 revision 2；页面 `saveNow()` 收到 409 →
+   `conflict: {remoteRevision: 2}`、`backend: 'local'`、角标文案「本地存档（同步冲突）」、冲突条出现且含两按钮。
+5. 点「接管」→ `PUT base 2` → `revision: 3`、冲突清零、backend 回到 remote、冲突条收回。
+
+这五步是**跨进程**的（真浏览器 → 真 PowerShell 服务器 → 真磁盘文件），比截图更能证明这一条的接线。
+
+### 20.3 仍然没有的
+
+- **没有截图**：`NATIVE_BROWSER_VIEWPORT_UNAVAILABLE … viewport=0x0`（页面隐藏）。
+  角标与冲突条的**排版**（手机窄屏会不会挤、两个按钮够不够大）仍需人眼。
+- **没有手机真机**：局域网这一档的整个卖点是手机，而本轮只在本机 localhost 上验过。
+  真要验：`netsh http add urlacl url=http://+:8123/ user=<你>` 之后用手机打开
+  `http://<电脑IP>:8123/`，两个设备同时开，一台喂食一台看着 —— 冲突条该在第二台落盘时出现。
+- **没有认证**：能连上端口的人都能读写这缸。只在家庭局域网里用。

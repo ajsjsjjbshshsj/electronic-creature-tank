@@ -310,3 +310,20 @@ export async function primeRemote(options) → { kind, revision, doc, reason }
 §2.1 纯层 → T1；§2.2 接线 → T3；§2.3 HUD → T4；§4 五条判据 → T1（1）、T2（2）、T3（3、4）、T4（5）。
 **Placeholder scan**：T3 的 `pushRemote` 与 `primeRemote` 给了签名与行为，实现细节在落地时补全
 （这一层与 `attachApiTier` 同形，照抄它的 fetch/错误分支）；T4 的 DOM 结构在落地时按 `dom-stub` 的既有形状写。
+
+---
+
+## 执行日志（计划自己写错的地方）
+
+1. **T1 的 `parseSaveResponse` 少了 PUT 那一半**：GET 的 200 带 `doc`，PUT 的 200 只带
+   `revision`。一个函数一个形状，于是"一次成功的保存"被判成 error → 降级写本机。
+   加 `mode` 参数把两条路分开判（404/409 的语义仍然共用一份实现）。
+2. **T2 的"其它 /api/* → 404"忘了关响应**：PowerShell 里只设 `StatusCode` 不 `Close()`，
+   fetch 会一直等 body —— 验收脚本的第七项当场停死。补了 `ContentLength64 = 0` + `Close()`。
+3. **T2 的验收脚本还差两件事**：`spawn('powershell')` 在 Windows 上要用 `powershell.exe`；
+   子进程 `kill()` 之后 Node 的事件循环仍被挂着（PowerShell 不理会那个信号），
+   必须 `taskkill /T /F` 并且最后 `process.exit()`。
+4. **T3 的 `decideBoot` 调用点写反过一次**：把"远端更新就静默用远端"当成了默认，
+   而 §7.5 的要求是"两边不同就摆给玩家"。测试里那条"两端都有档且不同 ⇒ 启动即冲突"就是它的地雷。
+5. **T4 的角标判据一开始是"backend === 'local'"**：这会骗人 —— 全新设备本来就没有远端。
+   改成 `fallbackReason !== null`（真的降级过）才挂。
