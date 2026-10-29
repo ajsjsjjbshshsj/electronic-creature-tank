@@ -6,7 +6,7 @@
 // 本模块**只碰三个字段**（c.bondId / c.bondSync / c.bondTotal），都是瞬时态、不入档
 // （save.js 的 CREATURE_SKIP_FIELDS）。关系事实住在 memory 里（role:'companion'），不在这里。
 //
-// 为什么单独一个模块而不是塞进 sim.js：门控有六个条件，而调参时唯一想知道的是
+// 为什么单独一个模块而不是塞进 sim.js：门控有五个条件，而调参时唯一想知道的是
 // "这一次是哪一条挡住了"。塞进 O(n²) 的世界循环里，就没法在 Node 里单独断言任何一条。
 import { CONFIG } from './config.js';
 import { affectionFor } from './memory.js';
@@ -17,16 +17,21 @@ const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 // 不兜底的话门控会**静默永不成立**（症状是"它们从来不社交"，且没有一处报错）。
 const num = (v) => (Number.isFinite(v) ? v : 0);
 
-// 单只这一侧的四条：活着、没病、没被拎着、正在社交；再加"吃饱 + 开心"两个读数门。
-// joy 读 CONFIG.mood.happyJoyMin —— 见 config.js 里 CONFIG.social 那段头上的那条纪律。
+// 单只这一侧的四条：活着、没病、没被拎着、正在社交；再加"吃饱"那个读数门。
+//
+// ⚠️ 这里**没有**"开心"那道门，尽管设计文档 v1 写过一条。主 spec §4.12 第 6 条的原文是
+// "两只**吃饱且互相好感**的个体会自发同步脉动"，没有"开心"；而实测（2026-10-27、seed 20261022、
+// 20 分钟）把 happyJoyMin = 0.45 加进来之后，pairEligible 的可及性从 2.88% 掉到 **0.038%**
+// —— 缸里两只**同时**开心的机会中位数 joy 只有 0.247（p90 = 0.407）。
+// 症状是 60 分钟一次同步都不发生（0 记铃、0 对伙伴），而且没有任何一处报错。
+// 裁定：回到 spec 原文的两条读数门 —— 吃饱、互相好感。设计文档已同步改写。
 function readySelf(c) {
   if (!c || c.alive !== true || c.sick || c.held) return false;
   if (!c.intent || c.intent.kind !== 'socialize') return false;
-  if (num(c.emotions && c.emotions.joy) < CONFIG.mood.happyJoyMin) return false;
   return (1 - num(c.needs && c.needs.hunger)) >= S.fedMin;
 }
 
-// 唯一的门控点：六个条件全成立才算"凑在一起"。
+// 唯一的门控点：五个条件全成立才算"凑在一起"。
 //
 // 第三条（**互相**是对方的目标）不是恒真，别把它当成摆设：behavior.decide 给 socialize
 // 挂的是 senses.neighbors[0].id，两只最近的个体常常正好互指，但"A 追 B、B 追 C"

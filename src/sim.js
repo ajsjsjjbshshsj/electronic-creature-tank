@@ -1371,9 +1371,19 @@ function tickSocial(world, dt) {
     }
     // 距离用世界坐标的欧氏距离：pairDist 是"凑在一起"的半径，与 socialize 的
     // stopDist（0.06）相容 —— 它们停在 0.06 处，仍在 0.09 之内。
-    const ok = b !== null
-      && pairEligible(a, b, Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y));
+    const dist = b === null ? NaN : Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y);
+    const near = Number.isFinite(dist) && dist <= CONFIG.social.pairDist;
+    const ok = near && pairEligible(a, b, dist);
     const r = bondStep(a, ok ? b.id : null, ok, dt);
+    if (near) {
+      // §4.8 那道"互相有好感"（affMin）的**唯一生产者**：凑在一起待着就会熟络、慢慢生出好感。
+      // 没有它，个体之间的 affection 全仓只有 resolve 里那笔 -0.01（碰撞的怨气）——
+      // 2026-10-27 实测：10 分钟里互相 socialize 且贴在一起的有 24496 个个体·tick，
+      // 而双向好感的最高值恒为 0.0000 ⇒ 同步永远不开始（60 分钟实跑 0 记铃、0 对伙伴）。
+      // 只写**自己**这一侧：单向的 fondness 是允许的（家谱与升级仍要求双向）。
+      adjustMemory(a.memory, b.id, CONFIG.social.idleAffectionRate * dt,
+        CONFIG.social.familiarityRate * dt);
+    }
     if (!ok) continue;
 
     const deg = r.degree;

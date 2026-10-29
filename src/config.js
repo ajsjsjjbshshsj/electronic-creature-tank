@@ -500,8 +500,21 @@ const CONFIG = {
     affMin: 0.15,          // 双方**互相**的好感下限（memory.affection ∈ [−1,1]）："互相好感"
     syncSeconds: 6,        // 连续同步这么久 → degree 到 1（响铃、算"同步上了"）
     breakDecay: 2,         // 中断后 episode 进度每秒退几秒；**必须 > 1**，否则断续也能攒满
-    totalSeconds: 90,      // 与同一只**累计**同步这么久 → 互相升级 companion（"长期凑在一起"）
-    totalDecay: 0.01,      // 分开时长期计数的指数衰减系数（半衰 ≈ 69 秒）
+    // 与同一只**累计**同步这么久 → 互相升级 companion（"长期凑在一起"）。
+    // 90 与 30 都是量出来的不可达值：2026-10-27 实测（有人喂的缸、30 分钟、两粒种子）
+    // 真实 bondTotal 的峰值只有 26.6s / 16.7s，而 30 秒那版一条伙伴都没出现。
+    // 12 秒 = **两次完整的同步 episode**：`crossed` 一次就是 syncSeconds = 6 秒，
+    // 所以它读作"它们反复同步过"，而不是"字面上的长期"。这个数在实测里 13 分钟就够到了。
+    totalSeconds: 12,
+    // 分开时长期计数的衰减：半衰 346s，与亲属那档"近乎不忘"（affectionDecayKin）同一个数。
+    // 原先 0.01（半衰 69s）会在两次同步之间把账抹平，"长期"两个字就成了空话。
+    totalDecay: 0.002,
+    // **凑在一起待着**时每秒涨的好感（不看同步度）。这是"互相有好感（affMin）"那道门的
+    // 唯一生产者：2026-10-27 实测 10 分钟里互相 socialize 且贴在一起的有 24496 个个体·tick，
+    // 而双向好感的最高值恒为 0.0000 —— 个体间的 affection 全仓只有碰撞那笔 -0.01，
+    // 于是同步永远不可能开始（60 分钟实跑 0 记铃、0 对伙伴）。
+    // 0.01 与 affectionDecay 0.02 一起给出平衡点 0.5：待在一起约 20 秒越过 affMin。
+    idleAffectionRate: 0.01,
     affectionRate: 0.05,   // 同步期间每秒给双方的好感 × degree（§4.8：同步脉动 → affection+）
     familiarityRate: 0.06, // 同期熟悉度（与 CONFIG.grab.familiarityRate 同量级）
     // 0.55 是**量出来的**，不是拍的：emotions.update 是一阶趋近，稳态增量 = rate / inertia

@@ -2463,18 +2463,20 @@ function pairWorld(seed, count = 2) {
   return [world, bondFrom(world.creatures[0], world.creatures[1])];
 }
 
-test('同步期间互买好感与熟悉度，而对照对（同一条门被打破）只会被时间淡掉', () => {
+test('同步期间互买好感与熟悉度，而独处的对照只会被时间淡掉', () => {
   const [world, [a, b]] = pairWorld(3);
   adjustMemory(a.memory, PLAYER_ID, 0.4, 0.7);
   adjustMemory(b.memory, PLAYER_ID, 0.4, 0.7);
 
-  // 对照缸：一模一样地摆好（连对玩家的两条记忆也一样），只把 b 的饥饿按在 1（fedMin 那道门）。
-  // 没有对照的话"好感涨了"可能只是 adjustMemory 被别处调用过 ——
-  // 而对照缸里同一段时间只会**下降**（decay），两边一比才说明涨的是同步买来的。
-  const [ctrlWorld, ctrl] = pairWorld(3);
-  adjustMemory(ctrl[0].memory, PLAYER_ID, 0.4, 0.7);
-  adjustMemory(ctrl[1].memory, PLAYER_ID, 0.4, 0.7);
-  const ctrlAffBefore = affectionFor(ctrl[0].memory, ctrl[1].id);
+  // 对照：**独处**的一只，记忆里同样有一条 0.5 的记录（对着一个不存在于缸里的 id）。
+  // 它没有第二只可凑，于是那张账上只剩 decay —— "涨"与"跌"的差别就只能来自"有没有那另一只"。
+  // ⚠️ 原先的对照是"把对方按住饿"：在"凑在一起就慢慢涨好感"这条慢通道接上之后，
+  //    饿着的一对仍然贴在一起，对照缸也会涨，那条判据就废了。
+  const solo = createWorld({ seed: 3, initialCreatures: 1 });
+  const lonely = solo.creatures[0];
+  adjustMemory(lonely.memory, 'ghost', 0.5, 0.5);
+  adjustMemory(lonely.memory, PLAYER_ID, 0.4, 0.7);
+  const soloBefore = affectionFor(lonely.memory, 'ghost');
 
   stepBonded(world, [a, b], 10);
   const aff = affectionFor(a.memory, b.id);
@@ -2485,24 +2487,20 @@ test('同步期间互买好感与熟悉度，而对照对（同一条门被打�
 
   const n = Math.round(10 / CONFIG.fixedDt);
   for (let i = 0; i < n; i += 1) {
-    holdBond(ctrl[0], ctrl[1]);
-    ctrl[1].needs.hunger = 1;
-    tickWorld(ctrlWorld, CONFIG.fixedDt);
-    ctrlWorld.events.length = 0;
+    tickWorld(solo, CONFIG.fixedDt);
+    solo.events.length = 0;
   }
-  const ctrlAff = affectionFor(ctrl[0].memory, ctrl[1].id);
-  assert.ok(ctrlAff < ctrlAffBefore, `对照对该下降，实到 ${ctrlAff}（起点 ${ctrlAffBefore}）`);
+  const soloAff = affectionFor(lonely.memory, 'ghost');
+  assert.ok(soloAff < soloBefore, `独处的那条该下降，实到 ${soloAff}（起点 ${soloBefore}）`);
 
-  // 对玩家那一条：同步缸与对照缸经过**同样的时间**（都会被 decay 淡掉），
+  // 对玩家那一条：同步缸与独处缸经过**同样的时间**（都会被 decay 淡掉），
   // 所以逐字节相等才说明 tickSocial 没有把好感顺手加到手所代表的 PLAYER 上。
   // 直接和"10 秒前的旧值"比是不行的：decay 本来就会改它，那会把正确的实现判红。
   assert.equal(JSON.stringify(a.memory.entries.find((e) => e.id === PLAYER_ID)),
-    JSON.stringify(ctrl[0].memory.entries.find((e) => e.id === PLAYER_ID)),
+    JSON.stringify(lonely.memory.entries.find((e) => e.id === PLAYER_ID)),
     '社交只许写"对彼此"的那一条：把玩家那条一起加是最容易犯的错');
 
-  // 对照缸里两只之间那条也该**没有**这笔账（它们从没同步上，条目只被 decay 淡过）。
-  assert.ok(affectionFor(ctrl[0].memory, ctrl[1].id)
-    < affectionFor(a.memory, b.id) - 0.1, '两个缸的差值要够大，否则上面那条判据分辨不了什么');
+  assert.ok(aff > soloAff + 0.1, `两缸的差值要够大，否则上面那条判据分辨不了什么（${aff} vs ${soloAff}）`);
 });
 
 test('同步把 arousal 推上去（§4.5 那一行"社交高峰"从此有生产者）', () => {
@@ -2612,4 +2610,37 @@ test('tickSocial 不给个体长新键、也不在世界对象上挂新容器', 
   assert.equal(Object.keys(a).sort().join(','), cKeys, '进度只许写进已有的三个字段');
   assert.equal(Object.keys(world).sort().join(','), wKeys,
     '不许在世界上新挂一个 pairs 容器：那会是第二份真相，还要跟着存档一起管');
+});
+
+test('A 追 B、B 追 C 时 A 与 B 不响：互相指向是门控，不是装饰', () => {
+  // 纯层那条"互相指向"（social.test.js 门控五条里的第三条）在**世界**里的对应判据。
+  // 少了它，一列排队的星星会被判成一对对在同步 —— 拥挤的缸里"A 追 B、B 追 C"很常见。
+  const world = createWorld({ seed: 3, initialCreatures: 3 });
+  const [a, b, c] = world.creatures;
+  a.pos.x = 0.40; a.pos.y = 0.50;
+  b.pos.x = 0.46; b.pos.y = 0.50;
+  c.pos.x = 0.52; c.pos.y = 0.50;
+  adjustMemory(a.memory, b.id, 0.5, 0.5);
+  adjustMemory(b.memory, a.id, 0.5, 0.5);     // 好感、距离、吃饱都合格，只差"互相"
+  const hold = (x, y) => {
+    x.needs.hunger = 0;
+    x.emotions.joy = CONFIG.mood.happyJoyMin + 0.2;
+    if (!x.intent || x.intent.kind !== 'socialize' || x.intent.targetId !== y.id) {
+      x.intent = {
+        kind: 'socialize', targetId: y.id,
+        targetPos: { x: y.pos.x, y: y.pos.y }, minDuration: 1e6,
+      };
+      x.intentTime = 0;
+    }
+  };
+  let n = 0;
+  const ticks = Math.round(40 / CONFIG.fixedDt);
+  for (let i = 0; i < ticks; i += 1) {
+    hold(a, b);
+    hold(b, c);
+    tickWorld(world, CONFIG.fixedDt);
+    n += world.events.filter((e) => e.kind === 'synced').length;
+    world.events.length = 0;
+  }
+  assert.equal(n, 0, `a→b、b→c 不是一对，40 秒里却响了 ${n} 记`);
 });
