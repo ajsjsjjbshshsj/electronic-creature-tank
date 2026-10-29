@@ -105,6 +105,7 @@ import { hear } from './heard.js';
 import { moodOf } from './emotions.js';
 import { mostUrgent } from './needs.js';
 import { NO_TIME } from './input.js';
+import { SAVE_PATH, parseSaveResponse, decideBoot } from './remote.js';
 
 // ---------------------------------------------------------------- 纯逻辑（可在 Node 测）
 
@@ -517,9 +518,15 @@ function attachSaveTier(probe, options) {
   const store = options.storage !== undefined ? options.storage : probe.store;
   const enc = new TextEncoder();     // 只用来量字节（saveState.bytes 是那条成本裁定的读数）
   const warned = {};
+  // ---- 共享存档（§7.5/§7.6，2026-10-29）----
+  // `options.remote` 是 boot 之前 primeRemote() 探到的结果（{kind, revision, doc, reason}）。
+  // 没有它 = 这台设备没开远端这条路（静态站、离线、或测试）⇒ 与从前一模一样。
+  const R = options.remote || null;
+  const remoteReachable = !!R && (R.kind === 'ok' || R.kind === 'none');
   const state = {
     // ---- 裁定要求的这七个字段一个不多一个不少地都在（spec §7.2.1）----
-    enabled: options.save !== false && !!store,
+    // 远端可达时即使本机没有存储也照样能存（§7.6 的另一半：手机上不依赖本机键）。
+    enabled: options.save !== false && (!!store || remoteReachable),
     source: 'fresh',                 // 'fresh' | 'restored' | 'corrupt-moved' | 'unreadable'
     reason: null,                    // 机器可搜的原文；null = 一切正常
     bytes: 0,                        // 最近一次**成功写入**的 utf8 字节数
@@ -538,6 +545,11 @@ function attachSaveTier(probe, options) {
     lastSavedAtSim: 0,               // 最近一次成功落盘时的**模拟秒**
     lastWriteAtMs: -Infinity,        // 最近一次成功落盘时的**墙上毫秒**（minIntervalMs 的下限就量它）
     seed: { used: 0, requested: null, source: 'clock' },
+    // ---- 共享存档的四个读数（HUD 的角标与冲突条只读这四个）----
+    backend: 'local',                // 'local' | 'remote'
+    revision: 0,                     // 最近一次**服务器确认**的版本号（客户端从不自行 +1）
+    fallbackReason: null,            // 非 null = 从远端降到这里的原因；角标只在它非空时挂
+    conflict: null,                  // { remoteRevision } | null
   };
   // 探针分得出两种"没有存储"：这台设备**根本没有**（不吵，enabled=false 就是证据），
   // 与**一摸就抛**（Safari 隐私模式）。后者是降级，必须响一次（§7.7）。
@@ -584,8 +596,25 @@ function attachSaveTier(probe, options) {
   // 一次读取 + 迁移 + 自检。**"任何一步失败"都算失败**：坏 JSON、比本程序新的版本、
   // 缺 creatures、过了 migrate 但过不了 assertCreatureShape（缺字段的记忆条目、脏 role）、
   // 以及被配额截断写到一半的那份。失败之后走的都是 quarantine 那一条路。
+  // 一份档能不能用：迁移 + 逐只自检 + 世界可恢复性。**任何一步失败都算失败**。
+  // 本地档与远端档走的是同一条路 —— 两处各写一套的症状是"远端那份过了、本地那份没过"，
+  // 而失败的那一份会被当成空缸，第一次落盘就把它盖掉。
+  const admit = (obj) => {
+    try {
+      const d = migrate(obj);
+      for (let i = 0; i < d.creatures.length; i++) assertCreatureShape(d.creatures[i]);
+      assertRestorable(d);
+      return d;
+    } catch (err) {
+      state.reason = String((err && err.message) || err);
+      return null;
+    }
+  };
+
   const load = () => {
-    if (!state.enabled) return null;
+    // 判 two things：save:false 是"这一层整个关掉"（连属性访问都不许有），
+    // 而 store 为空只说明这台设备没有本机存储（远端可达时照样能跑）。
+    if (options.save === false || !store) return null;
     let raw = null;
     try {
       raw = store.getItem(SAVE_KEY);
@@ -605,18 +634,13 @@ function attachSaveTier(probe, options) {
       return null;
     }
     const bytesOfRaw = enc.encode(String(raw)).length;
-    let doc = null;
-    try {
-      doc = migrate(JSON.parse(String(raw)));
-      for (let i = 0; i < doc.creatures.length; i++) assertCreatureShape(doc.creatures[i]);
-      // ⚠️ 这道必须在这里、**动世界之前**：restoreWorld 是就地改写的，
-      // 让它改到一半才抛，玩家拿到的是一缸被清掉一半的僵尸而不是一缸干净的新缸。
-      // 复核时这条测试一写出来就红了 —— 坏档当时能穿过 load()、在 boot 里炸掉整个页面。
-      assertRestorable(doc);
-    } catch (err) {
-      doc = null;
+    let parsed = null;
+    try { parsed = JSON.parse(String(raw)); } catch (err) {
       state.reason = String((err && err.message) || err);
     }
+    // ⚠️ admit 里的自检必须在这里、**动世界之前**：restoreWorld 是就地改写的，
+    // 让它改到一半才抛，玩家拿到的是一缸被清掉一半的僵尸而不是一缸干净的新缸。
+    const doc = parsed === null ? null : admit(parsed);
     if (doc) {
       state.source = 'restored';
       state.bytesRead = bytesOfRaw;
@@ -628,6 +652,101 @@ function attachSaveTier(probe, options) {
   };
 
   const doc = load();
+
+  // ---- 远端：谁当真相（§7.5 的"按 revision 比对"，2026-10-29）----
+  // fetcher 的注入与 api 档同一套：测试给 options.fetch，浏览器里用 globalThis.fetch
+  // （§3.2 的机器化守卫允许 main.js 摸它；别的模块一律不许）。
+  const fetcher = options.fetch !== undefined
+    ? options.fetch
+    : (typeof globalThis.fetch === 'function' ? (url, init) => globalThis.fetch(url, init) : null);
+  const remote = {
+    backend: remoteReachable ? 'remote' : 'local',
+    revision: R && R.kind === 'ok' ? (Number.isFinite(Number(R.revision)) ? Number(R.revision) : 0) : 0,
+    conflict: null,
+    inflight: null,
+    stats: { puts: 0, ok: 0, conflicts: 0, errors: 0, skipped: 0 },
+  };
+  let bootDoc = doc;
+  if (remote.backend === 'remote' && R.kind === 'ok') {
+    const remoteDoc = admit(R.doc);
+    if (!remoteDoc) {
+      remote.backend = 'local';
+      state.fallbackReason = `remote-doc:${state.reason || 'invalid'}`;
+    } else {
+      const decision = decideBoot(doc, remoteDoc);
+      if (decision === 'use-remote') { bootDoc = remoteDoc; state.source = 'restored'; }
+      else if (decision === 'ask') {
+        // 两边都有档且**不同**：先跑本地那份，把选择摆给玩家（绝不静默挑一边）。
+        remote.conflict = { remoteRevision: remote.revision };
+      }
+    }
+  } else if (R && R.kind !== 'none') {
+    state.fallbackReason = String(R.reason || R.kind);
+  }
+  state.backend = remote.backend;
+  state.revision = remote.revision;
+  state.conflict = remote.conflict;
+
+  // 从远端退回本机：**先**把这一缸写进本机，再切 backend —— 反过来的话这一拍的内容就丢了。
+  const fallbackLocal = (reason, text) => {
+    if (remote.backend !== 'remote') return;
+    remote.backend = 'local';
+    state.backend = 'local';
+    state.fallbackReason = reason;
+    if (store && text) {
+      try { store.setItem(SAVE_KEY, text); } catch (err) { state.writeErrors += 1; }
+    }
+  };
+
+  const onConflict = (remoteRevision) => {
+    remote.conflict = { remoteRevision: Number(remoteRevision) || 0 };
+    remote.stats.conflicts += 1;
+    state.conflict = remote.conflict;
+    // 冻结远端，但**继续往本机写**：冲突没解决之前这一缸也得活得下去（§7.5"绝不静默丢"）。
+    remote.backend = 'local';
+    state.backend = 'local';
+    state.fallbackReason = 'conflict';
+  };
+
+  // 一次 PUT。**异步、且不排队**：同一时刻只许一单在飞，后面那拍直接跳过并计数 ——
+  // 30 模拟秒之后下一次 cadence 会带上更新的那一份，排队只会把旧档按顺序盖上去。
+  const pushRemote = (text) => {
+    if (!fetcher) { fallbackLocal('no-fetch', text); return; }
+    if (remote.conflict) return;
+    if (remote.inflight) { remote.stats.skipped += 1; return; }
+    let payload;
+    try {
+      payload = JSON.stringify({ baseRevision: remote.revision, doc: JSON.parse(text) });
+    } catch (err) {
+      fallbackLocal('serialize-failed', text);
+      return;
+    }
+    remote.stats.puts += 1;
+    remote.inflight = Promise.resolve()
+      .then(() => fetcher(SAVE_PATH, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: payload,
+      }))
+      .then(async (res) => {
+        const body = res && typeof res.text === 'function' ? await res.text() : '';
+        const r = parseSaveResponse(res ? res.status : 0, body, 'put');
+        if (r.kind === 'ok') {
+          remote.revision = r.revision;
+          state.revision = r.revision;
+          remote.stats.ok += 1;
+          return;
+        }
+        if (r.kind === 'conflict') { onConflict(r.revision); return; }
+        remote.stats.errors += 1;
+        fallbackLocal(r.reason || 'put-failed', text);
+      })
+      .catch((err) => {
+        remote.stats.errors += 1;
+        fallbackLocal(String((err && err.message) || err), text);
+      })
+      .then(() => { remote.inflight = null; });
+  };
 
   let world = null;
   let clockMs = 0;
@@ -655,6 +774,16 @@ function attachSaveTier(probe, options) {
       state.reason = `序列化失败：${String((err && err.message) || err)}`;
       savedWarnOnce(warned, 'serialize', `${state.reason}：这一缸落不了盘，其余照常。`);
       return 0;
+    }
+    if (remote.backend === 'remote') {
+      // 远端模式**不写本机主键**：两份真相一旦并行，下次开机就得先猜谁是新的。
+      // 唯一的例外是降级/冲突那两处（fallbackLocal 里那次写，见它的注释）。
+      pushRemote(text);
+      state.writes += 1;
+      state.bytes = bytes;
+      state.lastWriteAtMs = tMs;
+      state.lastSavedAtSim = world.time;
+      return bytes;
     }
     try {
       store.setItem(SAVE_KEY, text);
@@ -725,7 +854,60 @@ function attachSaveTier(probe, options) {
   };
 
   return {
-    state, doc, attach, detach, frame,
+    state, doc: bootDoc, attach, detach, frame,
+    // 共享存档的**全部**可读读数（HUD 与 devtools 都只看这一份）。
+    remoteState: () => ({
+      backend: remote.backend,
+      revision: remote.revision,
+      conflict: remote.conflict,
+      inflight: !!remote.inflight,
+      stats: remote.stats,
+    }),
+    // §7.5 的两份选择。两个都要真的做点事：只弹提示不落地的按钮比没有更糟。
+    resolveConflict(choice) {
+      if (!remote.conflict) return false;
+      if (choice === 'force-mine') {
+        // "接管"：拿**服务器当前**的版本号当 baseRevision 再 PUT 一次（§7.5 的"强制覆盖"）。
+        remote.revision = remote.conflict.remoteRevision;
+        remote.conflict = null;
+        state.conflict = null;
+        remote.backend = 'remote';
+        state.backend = 'remote';
+        state.fallbackReason = null;
+        if (world) {
+          const text = JSON.stringify(serialize(world, {
+            savedAt: new Date(Date.now()).toISOString(),
+            timeScale: getPacing(),
+          }));
+          pushRemote(text);
+        }
+        return true;
+      }
+      if (choice === 'take-theirs') {
+        if (!fetcher) return false;
+        const p = Promise.resolve()
+          .then(() => fetcher(SAVE_PATH, { method: 'GET', headers: { accept: 'application/json' } }))
+          .then(async (res) => {
+            const body = res && typeof res.text === 'function' ? await res.text() : '';
+            const r = parseSaveResponse(res ? res.status : 0, body);
+            const d = r.kind === 'ok' ? admit(r.doc) : null;
+            if (!d) return false;
+            if (world) { restoreWorld(world, d); state.source = 'restored'; state.lastSavedAtSim = world.time; }
+            remote.revision = r.revision;
+            state.revision = r.revision;
+            remote.conflict = null;
+            state.conflict = null;
+            remote.backend = 'remote';
+            state.backend = 'remote';
+            state.fallbackReason = null;
+            return true;
+          })
+          .catch(() => false);
+        remote.inflight = p;
+        return p;
+      }
+      return false;
+    },
     saveNow() { return write('manual', clockMs); },
     clearSave() {
       if (!store) return 0;
@@ -741,6 +923,7 @@ function attachSaveTier(probe, options) {
       state.cleared = removed;
       // 主键空了 ⇒ "不许覆盖读不懂的档"这道禁令的前提消失了，允许重新落盘。
       if (state.blocked === 'quarantine-failed' || state.blocked === 'store-unreadable') state.blocked = null;
+      if (remote.conflict) { remote.conflict = null; state.conflict = null; }
       if (removed > 0) { state.lastSavedAtSim = world ? world.time : 0; state.lastWriteAtMs = -Infinity; }
       return removed;
     },
@@ -777,6 +960,34 @@ export function getMuted() {
 }
 
 // ---------------------------------------------------------------- 装配（浏览器侧）
+
+// 共享存档的**探测**：开缸之前问一次服务器"这条缸在不在、是第几版"（§7.5/§7.6）。
+//
+// 为什么在 boot 之外：boot 是同步的（60+ 条测试与所有调用点都按同步用它），
+// 而 fetch 是异步的。所以由入口（index.html 的 bootstrap）先 await 这一个，再 boot({ remote })。
+// 失败**不抛**：任何异常都归成 {kind:'error',reason}，调用方据此退回本机档（§7.6 的降级）。
+export async function primeRemote(opts) {
+  const o = opts || {};
+  const fetcher = o.fetch !== undefined
+    ? o.fetch
+    : (typeof globalThis.fetch === 'function' ? (url, init) => globalThis.fetch(url, init) : null);
+  if (!fetcher) return { kind: 'error', reason: 'no-fetch' };
+  const init = { method: 'GET', headers: { accept: 'application/json' } };
+  // 1.5 秒：局域网里这个数足够宽（本机 1ms 级），而手机连着一个不响应的地址时
+  // 玩家不该对着白屏等浏览器默认的 30 秒。AbortSignal.timeout 在 Node 18+/现代浏览器都有。
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    init.signal = AbortSignal.timeout(CONFIG.save.remoteTimeoutMs);
+  }
+  try {
+    const res = await fetcher(SAVE_PATH, init);
+    const text = res && typeof res.text === 'function' ? await res.text() : '';
+    // 静态站（GitHub Pages）会返回 200 + HTML：parseSaveResponse 归成 error，
+    // 于是自动走本机档 —— §7.6 那条"同一份代码同时支持共享存档和独立部署"就靠这一步。
+    return parseSaveResponse(res ? res.status : 0, text);
+  } catch (err) {
+    return { kind: 'error', reason: String((err && err.message) || err) };
+  }
+}
 
 export function boot(opts) {
   const options = opts || {};
@@ -1210,6 +1421,10 @@ export function boot(opts) {
     // quarantined/discarded 说那份读不懂的档现在在哪儿。
     save,
     saveState: save.state,
+    // ---- 共享存档（§7.5/§7.6，2026-10-29）----
+    // 这两个就是"两台设备"这件事的全部对外读数与唯一动作入口。
+    get remoteState() { return save.remoteState(); },
+    resolveConflict(choice) { return save.resolveConflict(choice); },
     // 立刻落一次盘（跳过 minIntervalMs 那道节流，但**不跳过** R-1 那道守卫：
     // 'quarantine-failed'/'store-unreadable' 时它返回 0 并什么都不写）。返回写入的字节数。
     saveNow() { return save.saveNow(); },

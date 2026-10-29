@@ -18,6 +18,10 @@ test('parseSaveResponse：四种归类，别的一律 error', () => {
   assert.equal(parseSaveResponse(409, 'no-json').kind, 'error', '409 也要有可读的 revision');
   // 404 不看 body：服务器给的 404 没有约定形状
   assert.deepEqual(parseSaveResponse(404, 'whatever'), { kind: 'none' });
+  // PUT 的回执只有 revision、没有 doc —— 用 GET 的规矩去读它就会把一次成功的保存
+  // 判成 error，然后降级写本机（远端模式下"两份真相"就是这么来的）。
+  assert.deepEqual(parseSaveResponse(200, '{"revision":6}', 'put'), { kind: 'ok', revision: 6 });
+  assert.equal(parseSaveResponse(200, '{"doc":{}}', 'put').kind, 'error', 'PUT 回执没 revision 仍是 error');
 });
 
 test('nextRevision 只加一，负数与脏值一律从 1 起', () => {

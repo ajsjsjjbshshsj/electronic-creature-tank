@@ -21,16 +21,21 @@ function json(text) {
 // ⚠️ "200 但缺 doc" 必须是 error，不许读成"服务器上还没有缸"：读错的那一步之后，
 // 第一次落盘就会把服务器上那一缸**覆盖成空缸**，而全程没有任何一处报错。
 // 404 反过来不看 body —— 那是"服务器上确实没有档"，形状由我们自己的服务器定。
-export function parseSaveResponse(status, text) {
+//
+// `mode` 区分两条路：GET 的 200 **必须**带 doc（那是缸本身），
+// PUT 的 200 只带 revision（那是一次回执）。两者共用一个函数是因为 404/409/error
+// 的语义完全一样；分开解析会让"PUT 的 409 也要带版本号"那条判据有两份实现。
+export function parseSaveResponse(status, text, mode = 'get') {
   const s = Number(status);
   if (s === 404) return { kind: 'none' };
   const body = json(text);
   if (s === 200) {
     const rev = body ? intOrNull(body.revision) : null;
-    if (!body || rev === null || rev < 0 || !body.doc || typeof body.doc !== 'object') {
+    const needDoc = mode !== 'put';
+    if (!body || rev === null || rev < 0 || (needDoc && (!body.doc || typeof body.doc !== 'object'))) {
       return { kind: 'error', reason: 'bad-save-response' };
     }
-    return { kind: 'ok', revision: rev, doc: body.doc };
+    return needDoc ? { kind: 'ok', revision: rev, doc: body.doc } : { kind: 'ok', revision: rev };
   }
   if (s === 409) {
     const rev = body ? intOrNull(body.revision) : null;
