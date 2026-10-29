@@ -387,6 +387,10 @@ const CONFIG = {
     dyingCalm: 0.6,            // 溶散末段把残余形变再压六成
     dyingCollapse: 0.55,       // 溶散到结束时目标半径缩到 45%（**不等于 0**：0 半径会让 render 退化）
 
+    // 同步脉动的**相位对齐**速率（× degree × dt，同步到顶时 1.6/秒 ⇒ 时间常数 0.6 秒）。
+    // 两只各拉一次，所以收敛到两者中点：画面上是"它们对上拍子"，不是"一只追着另一只"。
+    // 这是相位的**唯一产地** body.js 的一个旋钮，render 里不得再算第二份同步相位。
+    syncPhaseLerp: 1.6,
     // 冲击检测（碰撞局部凹陷，spec §5.1）。
     // 用的是**位置的二阶差分**，不是速度差 —— 理由见 src/body.js 里 detectImpact 的注释：
     // moveToward 撞墙时只 clamp 位置、不改 vel，所以 vel 在墙上没有任何信号。
@@ -483,6 +487,42 @@ const CONFIG = {
                                // （irritable 取反参与，所以易怒 = 不享受）。归一化是为了让
                                // 默认个体**恰好**落在 0.5 中位 —— 三项直接相加会算出 0.825，
                                // 全缸一律"喜欢被拎"，R-2 就白立了（tests/grab.test.js 钉住）
+  },
+  // ---- 社交同步（spec §4.12 第 6 条：socialize 的"高级表现"）----
+  // 两只吃饱、互相有好感、都开心的个体会自发同步脉动；同步满一程响一记两音小铃，
+  // 长期凑在一起的互相成为 companion（家谱虚线与信息卡"同伴"行的第一个生产者）。
+  // 设计与六条裁定见 docs/superpowers/specs/2026-10-27-social-bond-sync-design.md。
+  // ⚠️ 这一段里**没有** joyMin：高 joy 那道门读 CONFIG.mood.happyJoyMin ——
+  //    "它开心"在整份代码里只许有一个定义点（与 body.js 读 begEscalate 同一条纪律）。
+  social: {
+    pairDist: 0.09,        // 互相 socialize 且距离在此之内才算"凑在一起"（停距 0.06 + 余量）
+    fedMin: 0.6,           // 双方的 (1 − hunger) 下限：§4.12 第 6 条原文"两只吃饱"
+    affMin: 0.15,          // 双方**互相**的好感下限（memory.affection ∈ [−1,1]）："互相好感"
+    syncSeconds: 6,        // 连续同步这么久 → degree 到 1（响铃、算"同步上了"）
+    breakDecay: 2,         // 中断后 episode 进度每秒退几秒；**必须 > 1**，否则断续也能攒满
+    // 与同一只**累计**同步这么久 → 互相升级 companion（"长期凑在一起"）。
+    // 90 与 30 都是量出来的不可达值：2026-10-27 实测（有人喂的缸、30 分钟、两粒种子）
+    // 真实 bondTotal 的峰值只有 26.6s / 16.7s，而 30 秒那版一条伙伴都没出现。
+    // 12 秒 = **两次完整的同步 episode**：`crossed` 一次就是 syncSeconds = 6 秒，
+    // 所以它读作"它们反复同步过"，而不是"字面上的长期"。这个数在实测里 13 分钟就够到了。
+    totalSeconds: 12,
+    // 分开时长期计数的衰减：半衰 346s，与亲属那档"近乎不忘"（affectionDecayKin）同一个数。
+    // 原先 0.01（半衰 69s）会在两次同步之间把账抹平，"长期"两个字就成了空话。
+    totalDecay: 0.002,
+    // **凑在一起待着**时每秒涨的好感（不看同步度）。这是"互相有好感（affMin）"那道门的
+    // 唯一生产者：2026-10-27 实测 10 分钟里互相 socialize 且贴在一起的有 24496 个个体·tick，
+    // 而双向好感的最高值恒为 0.0000 —— 个体间的 affection 全仓只有碰撞那笔 -0.01，
+    // 于是同步永远不可能开始（60 分钟实跑 0 记铃、0 对伙伴）。
+    // 0.01 与 affectionDecay 0.02 一起给出平衡点 0.5：待在一起约 20 秒越过 affMin。
+    idleAffectionRate: 0.01,
+    affectionRate: 0.05,   // 同步期间每秒给双方的好感 × degree（§4.8：同步脉动 → affection+）
+    familiarityRate: 0.06, // 同期熟悉度（与 CONFIG.grab.familiarityRate 同量级）
+    // 0.55 是**量出来的**，不是拍的：emotions.update 是一阶趋近，稳态增量 = rate / inertia
+    // （CONFIG.emotions.inertia = 1.6）⇒ 同步到顶时 arousal 高出基线 0.34。
+    // 原写 0.12 时稳态只高 0.075，实测 5 秒后 0.055 —— 那是看不见的，而 §4.5 那一行
+    // 要求的是"全场最亮最快"，脉率/幅度/膨胀三处都读它。
+    arousalRate: 0.55,     // 社交高峰：arousal 已经接进脉率/亮度/膨胀，这条是"看得见"的出口
+    joyRate: 0.05,         // 稳态 +0.03：它主要不是给人看的，而是让"开心"那道门自己在同步里守住
   },
   fluff: {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型
@@ -802,6 +842,9 @@ const CONFIG = {
     // 0.3 刻意选在"**1× 下不 binding**（三秒窗最多放行 10 记 > 实测 8 记）、4× 下才咬人"：
     // 正常话痨的手感一个字都不动，只把倍速捅出来的那一梭子拦住。上限 ≈ 3.3 记/真实秒。
     chirpGapSec: 0.3,
+    // 同步小铃的**全局**最小间隔：一缸里多对同时同步时只放行第一记，其余计数
+    // （stats.bellDropped）。与 thud/chirp 同型 —— 装饰声不该在 4× 下打成一梭子。
+    bellGapSec: 0.6,
     releaseSec: 0.03,            // 每个声部在 noteSec 之后的释音段（stop 时刻 = 音长 + 这一段）
     silenceGain: 0.0001,         // 包络终点的"零"：真 0 会让 exponentialRamp 在本秒变成非法值
     noiseStepSec: 0.031,         // 噪声层各段读取共享 buffer 的偏移步长（碎裂感的来源）
@@ -833,6 +876,13 @@ const CONFIG = {
             attack: 0.004, peak: 0.34, pitchMix: 0.5 },
     chirp: { wave: 'sine', fromHz: 1150, toHz: 1560, noteSec: 0.045, gapSec: 0, reps: 1,
              attack: 0.003, peak: 0.20, pitchMix: 1 },
+    // 第九声（spec §5.4 表里"同步脉动（社交高峰，原「求偶成功」）"那一行）：
+    // 柔和的**两音**小铃，每声滑一个纯五度（1170/780 = 1.5）。
+    // peak 是全表**第二**轻（0.16，只在"几乎听不见"的死亡之下）：它是这一缸里唯一一记
+    // 纯装饰声，但玩家得听得见它 —— 比死亡还轻的话这记铃就白响了。
+    // pitchMix 只走 0.35：铃的基频已经高，全额乘小只的 2.6× 会跑到刺耳的区间。
+    bell: { wave: 'sine', fromHz: 780, toHz: 1170, noteSec: 0.22, gapSec: 0.09, reps: 2,
+            attack: 0.060, peak: 0.16, pitchMix: 0.35 },
   },
 
   // ---- 世界 ----

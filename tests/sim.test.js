@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CONFIG } from '../src/config.js';
 import { createRng } from '../src/rng.js';
-import { PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP } from '../src/memory.js';
+import {
+  PLAYER_ID, affectionFor, familiarityFor, get, ensure, KINSHIP,
+  adjust as adjustMemory, companionOf,
+} from '../src/memory.js';
 import { createCreature, sizeOf } from '../src/creature.js';
 import { ALL_GENES, randomGenome } from '../src/genes.js';
 import { MOODS } from '../src/emotions.js';
@@ -12,6 +15,8 @@ import { layEggs } from '../src/breeding.js';
 import { MIN_DURATION, EAT_HUNGER } from '../src/behavior.js';
 import { serialize, migrate } from '../src/save.js';
 import { thresholds } from '../src/personality.js';
+import { familyModelFor } from '../src/family.js';
+import { relationRowsFor } from '../src/hud.js';
 import {
   createWorld, tickWorld, perceive, addCreature, spawnFood, aliveCreatures, worldStats,
   restoreWorld,
@@ -2395,4 +2400,247 @@ test('教它一个词，它会在内核里自己说出来（heard → recall →
     `这只 1200 秒里只说了 ${said.length} 句：夹具不对，下面那条"说出来了"不算证据`);
   assert.ok(said.some((s) => s.includes(TOKEN)),
     `教了 6 遍、饿了 1200 秒，一次也没提那个词：${JSON.stringify(said.slice(0, 6))}`);
+});
+
+// ================================================================ 社交同步（spec §4.12 第 6 条）
+//
+// 下面这一组测的是**接线**：门控六条已经在 tests/social.test.js 里逐条钉过
+// （打破任一条 ⇒ pairEligible 为假），所以这里的 helper 把那六个条件一次摆好，
+// 每条测试只改动它自己要测的那一条。
+//
+// 一律用 initialCreatures: 2 或 3 的小缸：八只的满缸里第三者会把这一对撞开，
+// 距离一旦越过 pairDist 一个 tick，同步度就从 1 掉到 0.994，下一 tick 再跨一次上升沿
+// —— 那会让"40 秒恰好一记铃"变成看运气。第三者碰撞不是这条测试要测的东西。
+
+function bondFrom(a, b) {
+  a.pos.x = 0.40; a.pos.y = 0.50;
+  b.pos.x = 0.46; b.pos.y = 0.50;
+  for (const [c, o] of [[a, b], [b, a]]) {
+    c.intent = {
+      kind: 'socialize', targetId: o.id,
+      targetPos: { x: o.pos.x, y: o.pos.y }, minDuration: 1e6,
+    };
+    c.intentTime = 0;
+    c.needs.hunger = 0;
+    c.emotions.joy = 0.8;
+    adjustMemory(c.memory, o.id, 0.5, 0.5);      // delta：好感/熟悉度都到 0.5，门是 0.15
+  }
+  return [a, b];
+}
+
+// 每 tick 按住"这条测试不是在测的"那几条门：
+// · hunger —— 0.0083/秒，95 秒会自己涨过 fedMin（饥饿 0.4），于是测到的是"饿散了"；
+// · joy —— 情绪基线会不会自己掉下来是 emotions 的事，这条门在 social.test.js 里钉过；
+// · 意图锁 —— decide() 每 minDuration 重抽一次，重抽之后这一对就不再互相锁定了。
+function holdBond(a, b) {
+  for (const [c, o] of [[a, b], [b, a]]) {
+    c.needs.hunger = 0;
+    c.emotions.joy = Math.max(c.emotions.joy, CONFIG.mood.happyJoyMin + 0.2);
+    if (!c.intent || c.intent.kind !== 'socialize' || c.intent.targetId !== o.id) {
+      c.intent = {
+        kind: 'socialize', targetId: o.id,
+        targetPos: { x: o.pos.x, y: o.pos.y }, minDuration: 1e6,
+      };
+      c.intentTime = 0;
+    }
+  }
+}
+
+function stepBonded(world, pair, seconds, dt = CONFIG.fixedDt) {
+  const out = [];
+  const n = Math.round(seconds / dt);
+  for (let i = 0; i < n; i += 1) {
+    holdBond(pair[0], pair[1]);
+    tickWorld(world, dt);
+    for (const ev of world.events) if (ev.kind === 'synced') out.push(ev);
+    world.events.length = 0;
+  }
+  return out;
+}
+
+function pairWorld(seed, count = 2) {
+  const world = createWorld({ seed, initialCreatures: count });
+  return [world, bondFrom(world.creatures[0], world.creatures[1])];
+}
+
+test('同步期间互买好感与熟悉度，而独处的对照只会被时间淡掉', () => {
+  const [world, [a, b]] = pairWorld(3);
+  adjustMemory(a.memory, PLAYER_ID, 0.4, 0.7);
+  adjustMemory(b.memory, PLAYER_ID, 0.4, 0.7);
+
+  // 对照：**独处**的一只，记忆里同样有一条 0.5 的记录（对着一个不存在于缸里的 id）。
+  // 它没有第二只可凑，于是那张账上只剩 decay —— "涨"与"跌"的差别就只能来自"有没有那另一只"。
+  // ⚠️ 原先的对照是"把对方按住饿"：在"凑在一起就慢慢涨好感"这条慢通道接上之后，
+  //    饿着的一对仍然贴在一起，对照缸也会涨，那条判据就废了。
+  const solo = createWorld({ seed: 3, initialCreatures: 1 });
+  const lonely = solo.creatures[0];
+  adjustMemory(lonely.memory, 'ghost', 0.5, 0.5);
+  adjustMemory(lonely.memory, PLAYER_ID, 0.4, 0.7);
+  const soloBefore = affectionFor(lonely.memory, 'ghost');
+
+  stepBonded(world, [a, b], 10);
+  const aff = affectionFor(a.memory, b.id);
+  assert.ok(aff > 0.6, `十秒同步之后好感只到 ${aff}（起点 0.5）`);
+  assert.ok(familiarityFor(a.memory, b.id) > 0.5,
+    `熟悉度也要涨，实到 ${familiarityFor(a.memory, b.id)}`);
+  assert.ok(affectionFor(b.memory, a.id) > 0.6, '必须两边都写：只写一边家谱与升级都会瘸');
+
+  const n = Math.round(10 / CONFIG.fixedDt);
+  for (let i = 0; i < n; i += 1) {
+    tickWorld(solo, CONFIG.fixedDt);
+    solo.events.length = 0;
+  }
+  const soloAff = affectionFor(lonely.memory, 'ghost');
+  assert.ok(soloAff < soloBefore, `独处的那条该下降，实到 ${soloAff}（起点 ${soloBefore}）`);
+
+  // 对玩家那一条：同步缸与独处缸经过**同样的时间**（都会被 decay 淡掉），
+  // 所以逐字节相等才说明 tickSocial 没有把好感顺手加到手所代表的 PLAYER 上。
+  // 直接和"10 秒前的旧值"比是不行的：decay 本来就会改它，那会把正确的实现判红。
+  assert.equal(JSON.stringify(a.memory.entries.find((e) => e.id === PLAYER_ID)),
+    JSON.stringify(lonely.memory.entries.find((e) => e.id === PLAYER_ID)),
+    '社交只许写"对彼此"的那一条：把玩家那条一起加是最容易犯的错');
+
+  assert.ok(aff > soloAff + 0.1, `两缸的差值要够大，否则上面那条判据分辨不了什么（${aff} vs ${soloAff}）`);
+});
+
+test('同步把 arousal 推上去（§4.5 那一行"社交高峰"从此有生产者）', () => {
+  const [world, [a, b]] = pairWorld(3);
+  a.emotions.arousal = 0;
+  b.emotions.arousal = 0;
+  stepBonded(world, [a, b], 12);
+  // 0.2 这条线是有含义的：同步到顶的稳态增量是 arousalRate/inertia = 0.34，
+  // 而原来 0.12 那版稳态只有 0.075（5 秒实测 0.055）—— 那在脉率/膨胀上看不出来。
+  // 所以这条判据同时在钉"注入存在"与"注入够大"，而不只是大于 0。
+  assert.ok(a.emotions.arousal > 0.2, `arousal 只到 ${a.emotions.arousal}`);
+  assert.ok(b.emotions.arousal > 0.2, `对方也要一起亮，实到 ${b.emotions.arousal}`);
+  assert.ok(Number.isFinite(a.emotions.arousal) && a.emotions.arousal <= 1);
+
+  // 对照组：同样的两只、同样 12 秒，只把对方按住饿 —— arousal 必须留在低位。
+  // 没有这一半的话，"arousal 涨了"也可能来自好奇/产卵别的通道。
+  const [ctrlWorld, ctrl] = pairWorld(3);
+  ctrl[0].emotions.arousal = 0;
+  ctrl[1].emotions.arousal = 0;
+  const ticks = Math.round(12 / CONFIG.fixedDt);
+  for (let i = 0; i < ticks; i += 1) {
+    holdBond(ctrl[0], ctrl[1]);
+    ctrl[1].needs.hunger = 1;
+    tickWorld(ctrlWorld, CONFIG.fixedDt);
+    ctrlWorld.events.length = 0;
+  }
+  assert.ok(ctrl[0].emotions.arousal < 0.1,
+    `没同步的一对不该被推高，实到 ${ctrl[0].emotions.arousal}`);
+});
+
+test('synced 事件是上升沿：一次 episode 恰好一条，且带 withId', () => {
+  const [world, [a, b]] = pairWorld(3);
+  const seen = stepBonded(world, [a, b], 40);
+  assert.equal(seen.length, 1, `40 秒里响了 ${seen.length} 记，应该恰好一记（6 秒跨一次顶）`);
+  assert.deepEqual([seen[0].id, seen[0].withId].sort(), [a.id, b.id].sort(),
+    '事件要带上"跟谁"：铃声之外的消费方（将来的气泡）只有这个读数');
+});
+
+test('打破 fedMin 那一条门，40 秒里一记铃都不该有', () => {
+  const [world, pair] = pairWorld(3);
+  let n = 0;
+  const ticks = Math.round(40 / CONFIG.fixedDt);
+  for (let i = 0; i < ticks; i += 1) {
+    holdBond(pair[0], pair[1]);
+    pair[1].needs.hunger = 1;                 // 对方饿着：这条门在 social.test.js 里也钉过
+    tickWorld(world, CONFIG.fixedDt);
+    n += world.events.filter((e) => e.kind === 'synced').length;
+    world.events.length = 0;
+  }
+  assert.equal(n, 0, `门没关住：响了 ${n} 记`);
+});
+
+test('长期同步之后**双方**都记下 companion，家谱虚线与信息卡同伴行同源出现', () => {
+  const [world, [a, b]] = pairWorld(3);
+  stepBonded(world, [a, b], CONFIG.social.totalSeconds + 5);
+  assert.equal(companionOf(a.memory)?.id, b.id, '升级必须是双方的：只升一边家谱画不出边');
+  assert.equal(companionOf(b.memory)?.id, a.id);
+
+  const model = familyModelFor(world, a.id);
+  assert.equal(model.edges.filter((e) => e.kind === 'companion').length, 1,
+    '家谱的伙伴虚线：这一轮之前恒为 0 条（清单 §17.3 如实记过）');
+  const rows = relationRowsFor(a, world);
+  const pal = rows.find((r) => r.label === '同伴');
+  assert.ok(pal && String(pal.value).includes(b.name),
+    `信息卡的同伴行该写着 ${b.name}，实到 ${JSON.stringify(rows)}`);
+});
+
+test('伙伴还活着时不换人；伙伴死了之后才可以结新伙（裁定 3）', () => {
+  const world = createWorld({ seed: 3, initialCreatures: 3 });
+  const [a, b] = bondFrom(world.creatures[0], world.creatures[1]);
+  const c = world.creatures[2];
+  const secs = CONFIG.social.totalSeconds + 5;
+  stepBonded(world, [a, b], secs);
+  assert.equal(companionOf(a.memory).id, b.id, '前置条件：a 的伙伴是 b');
+
+  // b 还活着，只是不再参与：a 与 c 摆成合格对，同步够久 —— 伙伴不许被换掉。
+  bondFrom(a, c);
+  stepBonded(world, [a, c], secs);
+  assert.equal(companionOf(a.memory).id, b.id,
+    'b 还活着就换人的话，家谱那条虚线会随谁先凑上对而跳来跳去');
+
+  // b 死掉之后，a 才可以与 c 结伙（一颗星不该永远守着尸体）。
+  b.alive = false;
+  stepBonded(world, [a, c], secs + 20);
+  assert.equal(companionOf(a.memory).id, c.id, 'b 死了之后 a 应该能结新伙');
+  assert.equal(a.memory.entries.filter((e) => e.role === 'companion').length, 1,
+    '换人是"改那一条"，不是"再加一条"：至多一个伙伴');
+});
+
+test('血缘优先：已经是 mother 的那条不会被社交改写成 companion', () => {
+  const [world, [a, b]] = pairWorld(3);
+  // ensure 对**已存在**的条目只返回、不改写（这是它自己的契约），而 bondFrom
+  // 已经把这条建出来了，所以要直接把血缘写上去。
+  const mom = ensure(a.memory, b.id);
+  mom.role = 'mother';
+  mom.kinship = KINSHIP.mother;
+  stepBonded(world, [a, b], CONFIG.social.totalSeconds + 5);
+  assert.equal(get(a.memory, b.id).role, 'mother', '血缘是历史事实，覆盖它等于伪造家谱');
+  assert.equal(companionOf(a.memory), null);
+});
+
+test('tickSocial 不给个体长新键、也不在世界对象上挂新容器', () => {
+  const [world, [a]] = pairWorld(3);
+  const cKeys = Object.keys(a).sort().join(',');
+  const wKeys = Object.keys(world).sort().join(',');
+  stepBonded(world, [a, world.creatures[1]], 20);
+  assert.equal(Object.keys(a).sort().join(','), cKeys, '进度只许写进已有的三个字段');
+  assert.equal(Object.keys(world).sort().join(','), wKeys,
+    '不许在世界上新挂一个 pairs 容器：那会是第二份真相，还要跟着存档一起管');
+});
+
+test('A 追 B、B 追 C 时 A 与 B 不响：互相指向是门控，不是装饰', () => {
+  // 纯层那条"互相指向"（social.test.js 门控五条里的第三条）在**世界**里的对应判据。
+  // 少了它，一列排队的星星会被判成一对对在同步 —— 拥挤的缸里"A 追 B、B 追 C"很常见。
+  const world = createWorld({ seed: 3, initialCreatures: 3 });
+  const [a, b, c] = world.creatures;
+  a.pos.x = 0.40; a.pos.y = 0.50;
+  b.pos.x = 0.46; b.pos.y = 0.50;
+  c.pos.x = 0.52; c.pos.y = 0.50;
+  adjustMemory(a.memory, b.id, 0.5, 0.5);
+  adjustMemory(b.memory, a.id, 0.5, 0.5);     // 好感、距离、吃饱都合格，只差"互相"
+  const hold = (x, y) => {
+    x.needs.hunger = 0;
+    x.emotions.joy = CONFIG.mood.happyJoyMin + 0.2;
+    if (!x.intent || x.intent.kind !== 'socialize' || x.intent.targetId !== y.id) {
+      x.intent = {
+        kind: 'socialize', targetId: y.id,
+        targetPos: { x: y.pos.x, y: y.pos.y }, minDuration: 1e6,
+      };
+      x.intentTime = 0;
+    }
+  };
+  let n = 0;
+  const ticks = Math.round(40 / CONFIG.fixedDt);
+  for (let i = 0; i < ticks; i += 1) {
+    hold(a, b);
+    hold(b, c);
+    tickWorld(world, CONFIG.fixedDt);
+    n += world.events.filter((e) => e.kind === 'synced').length;
+    world.events.length = 0;
+  }
+  assert.equal(n, 0, `a→b、b→c 不是一对，40 秒里却响了 ${n} 记`);
 });

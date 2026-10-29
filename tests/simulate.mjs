@@ -89,7 +89,9 @@ import { CONFIG } from '../src/config.js';
 import { phenotype } from '../src/genes.js';
 import { createWorld, tickWorld, aliveCreatures, worldStats } from '../src/sim.js';
 // adjust 只在"玩家羁绊观察"里用一次，用途写在那一节（内核买不到好感时才用得上）。
-import { adjust, affectionFor, familiarityFor, PLAYER_ID } from '../src/memory.js';
+import {
+  adjust, affectionFor, familiarityFor, PLAYER_ID, companionOf,
+} from '../src/memory.js';
 // 抚摸/戳的速度阈值从 behavior 取，不写本地字面量：这个数在项目里原本有三份，
 // 导出它（EAT_DIST 同理）就是为了不再有第二份。
 import { HAND_SPEED_POKE } from '../src/behavior.js';
@@ -134,6 +136,21 @@ function harvestSay(w) {
   }
 }
 
+// ---- 社交同步统计（2026-10-27）----
+// spec §4.12 第 6 条的"socialize 高级表现"。这两行是那条的**实跑证据**：
+// 判据（设计文档第 10 条）是 synced **非零**、且**远小于** tick 数 ——
+// 与 tick 同量级就意味着门控形同虚设（pairEligible 恒真），铃会退化成白噪音。
+let syncedTotal = 0;
+const syncedPairs = new Map();       // "a|b" → 这一对响过几次
+function harvestSocial(w) {
+  for (const ev of w.events) {
+    if (ev.kind !== 'synced') continue;
+    syncedTotal += 1;
+    const key = [ev.id, ev.withId].sort().join('|');
+    syncedPairs.set(key, (syncedPairs.get(key) || 0) + 1);
+  }
+}
+
 console.log(`种子 ${seed} · 模拟 ${minutes} 分钟 · 上限 ${world.populationCap}`);
 console.log('─'.repeat(74));
 console.log(
@@ -165,6 +182,7 @@ let hueFirstViolation = null;
 for (let step = 0; step <= totalSteps; step++) {
   if (step > 0) tickWorld(world, dt);
   harvestSay(world);
+  harvestSocial(world);
   // 表现层会消费 events 后清空；无头运行时也必须清，否则队列无限增长
   world.events.length = 0;
 
@@ -244,6 +262,32 @@ console.log(`  孵化失败     ${s.hatchFailures}  （达种群上限所致）`
 // （2026-10-20："求偶被拒"统计量随孤雌制删除 —— 没有对象就没有拒绝，它恒为 0。）
 console.log(`  最高世代     ${s.generation}`);
 console.log(`  灭绝时刻     ${extinctAt < 0 ? '未灭绝' : extinctAt.toFixed(0) + 's'}`);
+
+// ---- 社交同步（2026-10-27）----
+// "伙伴对数"数的是**双向**的：a 的 memory 里记着 b、b 的也记着 a，才算一对。
+// 只数单向的话，一个"单相思"（进程被人为中断在升级中途）会被算成一对。
+let pals = 0;
+const palPairs = [];
+const seenPair = new Set();
+for (const c of aliveCreatures(world)) {
+  const e = companionOf(c.memory);
+  if (!e) continue;
+  const key = [c.id, e.id].sort().join('|');
+  if (seenPair.has(key)) continue;
+  seenPair.add(key);
+  const other = world.creatures.find((x) => x.id === e.id);
+  if (!other) continue;
+  const back = companionOf(other.memory);
+  if (back && back.id === c.id) {
+    pals += 1;
+    const na = c.name || c.id;
+    const nb = other.name || other.id;
+    palPairs.push(`${na}↔${nb}`);
+  }
+}
+console.log(`  伙伴对数     ${pals} 对${palPairs.length ? `（${palPairs.join('、')}）` : ''}`);
+console.log(`  同步小铃     ${syncedTotal} 记 / ${totalSteps} tick`
+  + `（${syncedPairs.size} 对响过；平均 ${(syncedTotal / Math.max(1, minutes)).toFixed(2)} 记/分钟）`);
 
 if (hueSampleCount > 0) {
   console.log(`  色相范围     ${hueMin.toFixed(1)}° – ${hueMax.toFixed(1)}°  `

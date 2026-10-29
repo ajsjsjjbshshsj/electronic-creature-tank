@@ -27,7 +27,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { CONFIG } from '../src/config.js';
 import { createBody, updateBody, springParams, meanRadius, starRadius,
-  blinkInterval, tailSwingRate, reconcileBodies, updateBodies, renderSizeOf } from '../src/body.js';
+  blinkInterval, tailSwingRate, reconcileBodies, updateBodies, renderSizeOf,
+  syncPhases } from '../src/body.js';
 import { createCreature, sizeOf } from '../src/creature.js';
 import { randomGenome } from '../src/genes.js';
 import { createRng } from '../src/rng.js';
@@ -1077,4 +1078,87 @@ test('updateBodies 逐只更新且互不污染：两只个体的形状各自跟�
   for (let i = 0; i < Math.round(2 / DT); i++) updateBodies(bodies, world, DT);
   assert.ok(meanRadius(bodies.get('happy')) > meanRadius(bodies.get('scared')),
     '同体型下开心的那只应当比害怕的那只鼓');
+});
+
+// ================================================================ 同步脉动的相位对齐（§4.12 第 6 条）
+//
+// body.phase 是脉动相位的**唯一产地**（render 的 breatheOf / 光晕都只读它），
+// 所以"两只对上拍子"必须在这里发生 —— 在 render 里另算一份同步相位就是第二个时钟。
+
+const mkBonder = (id, seed) => {
+  const c = createCreature({
+    id, name: id, x: 0.5, y: 0.5, rng: createRng(seed), genes: randomGenome(createRng(seed)),
+  });
+  return c;
+};
+
+const phaseGap = (bodies, ia, ib) =>
+  Math.abs((((bodies.get(ib).phase - bodies.get(ia).phase + 0.5) % 1) + 1) % 1 - 0.5);
+
+test('同步的两只相位收敛，且**两只都动过**（不是一只追着另一只）', () => {
+  const world = { creatures: [] };
+  const bodies = new Map();
+  const a = mkBonder('a', 11);
+  const b = mkBonder('b', 22);
+  a.bondId = 'b'; a.bondSync = CONFIG.social.syncSeconds;
+  b.bondId = 'a'; b.bondSync = CONFIG.social.syncSeconds;
+  world.creatures.push(a, b);
+  bodies.set('a', createBody(a.traits));
+  bodies.set('b', createBody(b.traits));
+  bodies.get('a').phase = 0.10;
+  bodies.get('b').phase = 0.60;
+
+  const start = phaseGap(bodies, 'a', 'b');
+  for (let i = 0; i < Math.round(3 / DT); i += 1) syncPhases(bodies, world, DT);
+  assert.ok(phaseGap(bodies, 'a', 'b') < 1e-3,
+    `3 秒后相位差还有 ${phaseGap(bodies, 'a', 'b')}（起点 ${start}）`);
+  // 双向拉：若实现只拉一侧，另一侧的初值会原封不动。这两条是那个 bug 的直接判据。
+  assert.ok(Math.abs(bodies.get('a').phase - 0.10) > 0.05, 'a 必须真的动过');
+  assert.ok(Math.abs(bodies.get('b').phase - 0.60) > 0.05, 'b 也必须真的动过');
+});
+
+test('degree 为 0 的一对相位分毫不动；跨 0 那一点也让 phase 恒在 [0,1)', () => {
+  const world = { creatures: [] };
+  const bodies = new Map();
+  const a = mkBonder('a', 33);
+  const b = mkBonder('b', 44);
+  a.bondId = 'b'; a.bondSync = 0;            // 有伙伴，但一帧都没同步上
+  b.bondId = 'a'; b.bondSync = 0;
+  world.creatures.push(a, b);
+  bodies.set('a', createBody(a.traits));
+  bodies.set('b', createBody(b.traits));
+  bodies.get('a').phase = 0.10;
+  bodies.get('b').phase = 0.60;
+
+  for (let i = 0; i < Math.round(3 / DT); i += 1) syncPhases(bodies, world, DT);
+  assert.equal(bodies.get('a').phase, 0.10, '没同步就不许动：相位是"对上拍子"，不是"凑个热闹"');
+  assert.equal(bodies.get('b').phase, 0.60);
+
+  a.bondSync = CONFIG.social.syncSeconds;
+  b.bondSync = CONFIG.social.syncSeconds;
+  for (let i = 0; i < Math.round(60 / DT); i += 1) {
+    bodies.get('a').phase = 0.99;
+    bodies.get('b').phase = 0.01;            // 反复把两只摆在圈的接缝两侧
+    syncPhases(bodies, world, DT);
+    for (const id of ['a', 'b']) {
+      const p = bodies.get(id).phase;
+      assert.ok(p >= 0 && p < 1, `phase 跑出 [0,1)：${p}`);
+      assert.ok(Number.isFinite(p), 'phase 变成 NaN 了');
+    }
+  }
+});
+
+test('updateBodies 每子步都会对齐一次（接线判据，防"函数写了没人调"）', () => {
+  const world = { creatures: [], playerHand: null };
+  const bodies = new Map();
+  const a = mkBonder('a', 55);
+  const b = mkBonder('b', 66);
+  a.bondId = 'b'; a.bondSync = CONFIG.social.syncSeconds;
+  b.bondId = 'a'; b.bondSync = CONFIG.social.syncSeconds;
+  world.creatures.push(a, b);
+  for (let i = 0; i < Math.round(3 / DT); i += 1) updateBodies(bodies, world, DT);
+  // 0.02 比"3 秒对齐"松：updateBody 每步自己也推 phase，两条腿各走各的，
+  // 能收敛到这个量级就说明对齐确实在跑；没人调的话两只的相位差会留在 0.5 附近。
+  assert.ok(phaseGap(bodies, 'a', 'b') < 0.02,
+    `updateBodies 之后两只仍然不同步：${bodies.get('a').phase} vs ${bodies.get('b').phase}`);
 });

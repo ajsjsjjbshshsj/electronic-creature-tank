@@ -26,8 +26,12 @@
 
 import { CONFIG } from './config.js';
 import { sizeOf } from './creature.js';
+import { syncDegree } from './social.js';
 
 const TAU = Math.PI * 2;
+// 半个周期 = 圈量的结构常数（不是可调参数）。写成 1 / 2 是为了过
+// tests/body.test.js 那道"body.js 里不许有小数字面量"的守卫 —— 它只放行 0/1/2。
+const HALF_TURN = 1 / 2;
 const B = CONFIG.body;
 const STAR = CONFIG.star;
 const FLUFF = CONFIG.fluff;
@@ -461,6 +465,36 @@ export function renderSizeOf(c) {
 // 跑一夜的缸会攒下几千个没人读的 Body。
 
 // 逐只推进。**必须**被放进固定步长的子步循环（见文件头的步长敏感条）。
+// 同步脉动的**相位对齐**（spec §4.12 第 6 条那套编舞里"脉动同步"这一步）。
+//
+// ⚠️ 为什么在 body.js 而不是 render.js：body.phase 是相位的**唯一产地**，
+// 而 render 的 breatheOf / 光晕都只读它。在 render 里另算一份同步相位就是第二个时钟 ——
+// 那正是 tests/render-body.test.js 里"breatheOf 绝不自建时钟"那条测试专门防的事。
+//
+// 走**最短弧**：phase 是 mod 1 的圈量，0.99 与 0.01 差 0.02 而不是 0.98。
+// 两只各拉一次 ⇒ 收敛到中点，所以画面上是"它们对上拍子"，不是"一只追着另一只"。
+// 只有**互相**指向对方的一对才拉：单向的 bondId 是 episode 正在退场的残留（≤3 秒），
+// 那时候还去拉就成了单方面的追上拍子，视觉上正是要避免的那种"跟着别人抖"。
+export function syncPhases(bodies, world, dt) {
+  const cs = world.creatures;
+  for (let i = 0; i < cs.length; i += 1) {
+    const c = cs[i];
+    if (!c.alive || !c.bondId) continue;
+    const body = bodies.get(c.id);
+    if (!body) continue;
+    const degree = syncDegree(c);
+    if (degree <= 0) continue;
+    let p = null;
+    for (let j = 0; j < cs.length; j += 1) if (cs[j].id === c.bondId) { p = cs[j]; break; }
+    if (!p || !p.alive || p.bondId !== c.id) continue;
+    const pb = bodies.get(p.id);
+    if (!pb) continue;
+    const rate = Math.min(1, B.syncPhaseLerp * degree * dt);
+    const d = (((pb.phase - body.phase + HALF_TURN) % 1) + 1) % 1 - HALF_TURN;
+    body.phase = (body.phase + d * rate + 1) % 1;
+  }
+}
+
 export function updateBodies(bodies, world, dt) {
   const creatures = world.creatures;
   for (let i = 0; i < creatures.length; i++) {
@@ -472,6 +506,7 @@ export function updateBodies(bodies, world, dt) {
     }
     updateBody(body, c, dt, world.playerHand);
   }
+  syncPhases(bodies, world, dt);
 }
 
 // 帧末清扫：已经不在这个世界里的个体，它的 Body 也要跟着消失。

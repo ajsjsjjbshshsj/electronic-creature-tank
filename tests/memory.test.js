@@ -6,6 +6,7 @@ import {
   PLAYER_ID, ROLES, KINSHIP,
   createMemory, get, ensure, adjust, affectionFor, familiarityFor,
   decay, prune, kinshipBetween, remember,
+  companionOf, promoteCompanion, demoteCompanion,
 } from '../src/memory.js';
 
 // ============================================================================
@@ -929,4 +930,80 @@ test('玩家豁免不改变满容量时的条目总数（不多留一条）', ()
       `remember 第 ${i} 轮容量越界: ${m.entries.length} > ${CONFIG.memoryCapacity}`);
     assert.ok(get(m, PLAYER_ID), `remember 第 ${i} 轮玩家被淘汰了`);
   }
+});
+
+// ============================================================================
+// companion 的升级三件套（2026-10-27 伙伴同步）。
+// 规则合起来是设计文档的裁定 3：至多一个伙伴、血缘优先永不覆盖、
+// 占位者活着不换人（判在 sim.js，因为要读世界）、占位者已死才可以换。
+// ============================================================================
+
+test('promoteCompanion 只升级 role 为 null 的那条，绝不覆盖血缘', () => {
+  const m = createMemory();
+  adjust(m, 'x', 0.4, 0.6);
+  assert.equal(promoteCompanion(m, 'x'), true);
+  assert.equal(get(m, 'x').role, 'companion');
+  assert.equal(promoteCompanion(m, 'x'), false, '重复升级返回 false');
+  assert.equal(get(m, 'x').role, 'companion', '重复升级也不该把 role 改成别的');
+
+  ensure(m, 'MOM', { kinship: KINSHIP.mother, role: 'mother' });
+  assert.equal(promoteCompanion(m, 'MOM'), false, '妈妈不能被改写成伙伴');
+  assert.equal(get(m, 'MOM').role, 'mother');
+  assert.equal(get(m, 'MOM').kinship, KINSHIP.mother, 'kinship 也不许被顺手改掉');
+});
+
+test('promoteCompanion 对不存在的 id 会建条目（sim 那一侧先写过好感，这里是兜底）', () => {
+  const m = createMemory();
+  assert.equal(promoteCompanion(m, 'new'), true);
+  const e = get(m, 'new');
+  assert.equal(e.role, 'companion');
+  assert.equal(e.kinship, 0, '伙伴没有血缘（spec §4.8：companion 的 kinship 为 0）');
+});
+
+test('companionOf 找到那唯一一条；没有时是 null（不是 undefined）', () => {
+  const m = createMemory();
+  assert.equal(companionOf(m), null);
+  adjust(m, 'y', 0.2, 0.3);
+  assert.equal(companionOf(m), null, '有好感不等于有伙伴');
+  promoteCompanion(m, 'x');
+  assert.equal(promoteCompanion(m, 'y'), false, '至多一个伙伴：占位者还在就不换人');
+  assert.equal(get(m, 'y').role, null, '被拒的那条不许被顺手写上 role');
+  assert.equal(companionOf(m).id, 'x', 'companionOf 只返回**第一条**，所以唯一性必须直接数');
+  assert.equal(m.entries.filter((e) => e.role === 'companion').length, 1,
+    '唯一性要直接数，不能靠 companionOf 只返回一条来假装');
+});
+
+test('demoteCompanion 只 demote 伙伴：血缘、陌生条目、不存在的 id 都不动', () => {
+  const m = createMemory();
+  ensure(m, 'MOM', { kinship: KINSHIP.mother, role: 'mother' });
+  adjust(m, 'y', 0.2, 0.3);
+  assert.equal(demoteCompanion(m, 'MOM'), false);
+  assert.equal(get(m, 'MOM').role, 'mother');
+  assert.equal(demoteCompanion(m, 'y'), false);
+  assert.equal(get(m, 'y').role, null);
+  assert.equal(demoteCompanion(m, 'nobody'), false);
+  assert.equal(get(m, 'nobody'), null, '查一下不许变成记一笔（不许顺手 ensure）');
+  promoteCompanion(m, 'x');
+  assert.equal(demoteCompanion(m, 'x'), true);
+  assert.equal(get(m, 'x').role, null);
+  assert.equal(companionOf(m), null);
+});
+
+test('companion 走慢衰减：升级之后好感按 affectionDecayKin 淡（spec §4.8"近乎不忘"）', () => {
+  const dt = 100;   // 必须足够长：dt=10 时两种速率只差 1.2×，下面那条"能分辨"的判据会自己变红
+  const m = createMemory();
+  adjust(m, 'x', 0.8, 0.9);
+  promoteCompanion(m, 'x');
+  decay(m, dt);
+  const kin = 0.8 * Math.exp(-CONFIG.affectionDecayKin * dt);
+  const normal = 0.8 * Math.exp(-CONFIG.affectionDecay * dt);
+  assert.ok(Math.abs(get(m, 'x').affection - kin) < 1e-9,
+    `伙伴应当走慢衰减 ${kin}，实到 ${get(m, 'x').affection}（普通速率会到 ${normal}）`);
+  assert.ok(kin > normal * 1.5, '这条判据本身要能分辨两种速率，否则上面那句是空的');
+
+  // demote 之后立刻回到普通速率：role 是 decay 唯一的判据来源
+  demoteCompanion(m, 'x');
+  const before = get(m, 'x').affection;
+  decay(m, dt);
+  assert.ok(Math.abs(get(m, 'x').affection - before * Math.exp(-CONFIG.affectionDecay * dt)) < 1e-9);
 });

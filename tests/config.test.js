@@ -108,7 +108,12 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   // ⚠️ 65 → 66、54 → 55（2026-10-25 手部视觉）：新增 **CONFIG.hand 一段**（一个节点、19 个标量）。
   //    形状与行为分工同 avatar/hud：几何换算由 tests/hand.test.js 钉，绘制账单由
   //    tests/render-hand.test.js 钉；这里只钉"这一段确实存在且没有被悄悄拓宽"。
-  assert.equal(visited.length, 66, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 66 → 67、55 → 56（2026-10-27 伙伴同步）：新增 **CONFIG.social 一段**（一个节点、11 个标量）。
+  //    与 grab 同型：旋钮之间没有"逐键比对"的结构关系，所以不需要子表。
+  //    行为由 tests/social.test.js（纯层门控）与 tests/sim.test.js（tickSocial 接线）钉。
+  // ⚠️ 67 → 68（同一轮，Task 6）：CONFIG.audio 多一张 **bell 声表**（节点 +1，键 +2：
+  //    bell + bellGapSec）。顶层键数不变 —— 它挂在已有的 audio 里。
+  assert.equal(visited.length, 68, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'api', 'audio', 'avatar', 'behavior', 'blink', 'body', 'bodyPoints',
@@ -117,10 +122,10 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'fluff', 'food', 'foodMax', 'foodRespawnRate', 'glowHueBuckets', 'grab', 'gridCell', 'hand',
     'heard', 'hop', 'hud', 'hueRange', 'initialCreatures', 'maxSize', 'memoryCapacity', 'minSize',
     'mood', 'motion', 'mournDuration', 'mournRadius', 'mutationRate', 'needs', 'particles',
-    'perceiveRadius', 'populationCap', 'render', 'save', 'speech', 'stage', 'star', 'tail',
+    'perceiveRadius', 'populationCap', 'render', 'save', 'social', 'speech', 'stage', 'star', 'tail',
     'timeScales',
-  ], 'CONFIG 顶层键名（55 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
-  assert.equal(Object.keys(CONFIG).length, 55);
+  ], 'CONFIG 顶层键名（56 个，数出来的不是估的）变了 —— 加一项或删一项都要在这里说清楚');
+  assert.equal(Object.keys(CONFIG).length, 56);
   for (const path of [
     'CONFIG',
     'CONFIG.behavior', 'CONFIG.eggTint', 'CONFIG.particles',   // 抽查时代漏掉的三个
@@ -139,6 +144,7 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
     'CONFIG.hud',                                                                 // 计划 3 Task 3 新增（HUD 的九个常数，其中三个是 gestures.js 的真相源）
     'CONFIG.grab', 'CONFIG.grab.w', 'CONFIG.emotions.eventMagnitude.grabbedRough',  // 拎着玩（Task 1 常数 + Task 3 两张事件行）
     'CONFIG.hand',                                                                // 手部视觉（几何换算与绘制账单分别在 hand/render-hand 测试里）
+    'CONFIG.social',                                                              // 伙伴同步（2026-10-27：门控与同步度读数的 11 个旋钮）
   ]) {
     assert.ok(visited.includes(path), `遍历没有到达 ${path}`);
   }
@@ -688,7 +694,7 @@ test('尾巴与眨眼都不许新增基因位点，且 activity 地板两处必�
     'spec §4.6：眨眼频率与 §4.7.2 蹦跳同源，都由 activity 驱动 —— 地板分家就是假设分家');
 });
 
-test('软体弹簧的二十九个常量齐备，且两端都欠阻尼（spec §4.7 过冲要求的数值前提）', () => {
+test('软体弹簧的三十个常量齐备，且两端都欠阻尼（spec §4.7 过冲要求的数值前提）', () => {
   const B = CONFIG.body;
   assert.deepEqual(Object.keys(B).sort(), [
     'angerFlatten', 'angerSharpen', 'arousalExpand', 'curiosityElongate', 'dentDecay', 'dentMax',
@@ -696,8 +702,12 @@ test('软体弹簧的二十九个常量齐备，且两端都欠阻尼（spec §4
     'maxStretchSpeed', 'petDentMax', 'pulseAmpArousal', 'pulseAmpBase', 'pulseAmpJoy', 'pulseAmpSleepy',
     'pulseRateArousal', 'pulseRateBase', 'pulseRateFloor', 'pulseRateSleepy',
     'sickCalm', 'sleepyCalm', 'stiffnessAtFullWobble', 'stiffnessAtZeroWobble',
-    'stretchK', 'zetaAtFullWobble', 'zetaAtZeroWobble',
+    'stretchK', 'syncPhaseLerp', 'zetaAtFullWobble', 'zetaAtZeroWobble',
   ], '软体弹簧的旋钮集，不多不少');
+  // 2026-10-27 新增 syncPhaseLerp（同步脉动的相位对齐速率）：29 → 30。
+  // 它是 body.phase 唯一的对齐来源，render 里不得再算第二份 —— 由 tests/render-body.test.js
+  // 那条"breatheOf 绝不自建时钟"守着。
+  assert.equal(B.syncPhaseLerp, 1.6);
   assert.equal(B.stiffnessAtZeroWobble, 220);
   assert.equal(B.stiffnessAtFullWobble, 80);
   assert.equal(B.zetaAtZeroWobble, 0.70);
@@ -758,21 +768,22 @@ test('软体弹簧的二十九个常量齐备，且两端都欠阻尼（spec §4
 //   只钉行为 → 把 joy.toHz 从 900 改成 600 时行为断言仍然全绿（它按 CONFIG 比）；
 //   只钉数值 → 把音高因子写成常数时数值全对，而"小只高、大只低"那条承诺没了。
 
-test('叫声表的三十六项齐备（28 个调度量 + 8 张声表子行，node 数出来的），且 spec §5.4 逐字那几个数被钉死', () => {
+test('叫声表的三十八项齐备（29 个调度量 + 9 张声表子行，node 数出来的），且 spec §5.4 逐字那几个数被钉死', () => {
   const W = CONFIG.audio;
   assert.deepEqual(Object.keys(W).sort(), [
-    'affectionMin', 'anger', 'beg', 'chirp', 'chirpGapSec', 'cooldownSec', 'death', 'fallbackSampleRate',
+    'affectionMin', 'anger', 'beg', 'bell', 'bellGapSec', 'chirp', 'chirpGapSec', 'cooldownSec',
+    'death', 'fallbackSampleRate',
     'filterQ', 'filterRatioMax', 'filterRatioMin', 'hatch', 'hueBuckets', 'hueTurn', 'joy',
     'lfoSeedModulus', 'lfoSeedSpread', 'lookaheadSec', 'masterGain', 'maxVoices',
     'noiseBufferSec', 'noiseStepSec', 'overtoneMix', 'overtoneRatioMax', 'overtoneRatioMin',
     'pitchMax', 'pitchMin', 'refSize', 'releaseSec', 'silenceGain', 'sleepy', 'sleepyMin',
     'thud', 'thudGapSec', 'thudPerSec', 'tiredMin',
-  ], 'CONFIG.audio 的三十六项键集（node 数出来的），不多不少：28 个调度量 + 八张声表子行');
+  ], 'CONFIG.audio 的三十八项键集（node 数出来的），不多不少：29 个调度量 + 九张声表子行');
 
   // 八行的**共同形状**：少了任何一项都会让某一行听得出差别而测不出来（"短促"变长、"极轻"变响），
   // 所以整行 deepEqual 键集而不是只抽查 fromHz。noise*/lfo* 是可选附加层，允许多出来。
   const CORE = ['attack', 'fromHz', 'gapSec', 'noteSec', 'peak', 'pitchMix', 'reps', 'toHz', 'wave'];
-  for (const key of ['joy', 'beg', 'anger', 'sleepy', 'hatch', 'death', 'thud', 'chirp']) {
+  for (const key of ['joy', 'beg', 'anger', 'sleepy', 'hatch', 'death', 'thud', 'chirp', 'bell']) {
     const extra = Object.keys(W[key]).filter((k) => !CORE.includes(k));
     assert.deepEqual(Object.keys(W[key]).filter((k) => CORE.includes(k)).sort(), CORE,
       `${key} 那一行缺了核心字段`);

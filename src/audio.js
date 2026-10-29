@@ -60,17 +60,22 @@ const num = (v) => (Number.isFinite(v) ? v : 0);
 // （NaN 与任何数比较都是 false ⇒ 不兜底的话跨越判据会**静默永不成立**）。
 const read = (obj, key) => num(obj && obj[key]);
 
-// 八种发声。前六个是 spec §5.4 表里那六行，后两个是计划 2 的增量（§5.4.1 第 5 条）：
-// thud = hop 落地那记闷响，chirp = 出词前那记「啾」。
+// 九种发声。前六个是 spec §5.4 表里那六行，后三个是增量（§5.4.1 第 5 条）：
+// thud = hop 落地那记闷响，chirp = 出词前那记「啾」，
+// bell = 同步脉动那记两音小铃（§5.4 表最后一行，2026-10-27 由 sim.js 的 tickSocial 接上生产者）。
 export const CALL_KEYS = Object.freeze([
-  'joy', 'beg', 'anger', 'sleepy', 'hatch', 'death', 'thud', 'chirp',
+  'joy', 'beg', 'anger', 'sleepy', 'hatch', 'death', 'thud', 'chirp', 'bell',
 ]);
 
-// 内核事件 → 叫声。**只有这三条**：eat / laid / poke / dissolved / drift / emigrate /
+// 内核事件 → 叫声。**只有这四条**：eat / laid / poke / dissolved / drift / emigrate /
 // eggFailed / error 一律不出声（spec §5.4 表里没有它们，§5.4.1 第 2 条记了裁定）。
 // poke 尤其**不**单列一记：戳会把 anger 推过 CONFIG.mood.angerMin，
 // 生气那一声明天然把它接走了 —— 再配一个"被戳音效"就是给同一个动作发两个信号。
-const EVENT_CALL = Object.freeze({ say: 'chirp', hatch: 'hatch', death: 'death' });
+// synced 走事件通道而不是第 7 个 DETECTOR：同步是**一对**的性质，而 DETECTOR 的
+// entries 是**逐只**的（同一对会各发一次，得再写一层去重）。
+const EVENT_CALL = Object.freeze({
+  say: 'chirp', hatch: 'hatch', death: 'death', synced: 'bell',
+});
 export function callForEvent(kind) {
   const k = kind === undefined || kind === null ? '' : String(kind);
   return Object.prototype.hasOwnProperty.call(EVENT_CALL, k) ? EVENT_CALL[k] : null;
@@ -323,6 +328,7 @@ export function createAudio(opts) {
   const voices = [];             // 发声槽：{ end, nodes }
   const stats = {
     frames: 0, events: 0, played: 0, dropped: 0, thudDropped: 0, chirpDropped: 0,
+    bellDropped: 0,
     created: 0, started: 0, stopped: 0, disconnected: 0,
     reclaimed: 0, entries: 0, entriesMax: 0,
     silentEvents: 0, mutedSkips: 0, filterSkipped: 0, noiseSkipped: 0,
@@ -338,6 +344,8 @@ export function createAudio(opts) {
   // 事件通道**不过**每只的冷却（那条是给跨越那六声用的），所以一缸话痨在 4× 下会把
   // 这记"这声音是它自己发的"的前导音打成一梭子 —— 那既不是前导音也不是声音，是嗡嗡。
   let lastChirpAt = Number.NEGATIVE_INFINITY;
+  // 同步小铃的全局闸门时刻：一缸里多对同时同步时只放行第一记。
+  let lastBellAt = Number.NEGATIVE_INFINITY;
   let noise = null;              // 一块、终身复用（容量由 CONFIG.audio.noiseBufferSec 定）
 
   // 主输出：一个常驻 gain 节点。静音走它 + 不再排程**两条**，
@@ -608,6 +616,14 @@ export function createAudio(opts) {
           const t = now();
           if (t - lastChirpAt < AUD.chirpGapSec) { stats.chirpDropped += 1; continue; }
           lastChirpAt = t;        // 与 thud 同一口径：占坑在排程之前，静音期间也不留积压
+        }
+        if (key === 'bell') {
+          // 与 thud / chirp 同型的全局闸门：一缸里多对同时同步时只放行第一记，
+          // 其余**计数**而不静默（§5.4.1 第 5 条：溢出必须有数）。
+          // 同一对的两次同步跨了 6 秒，正常人耳分辨不出"是谁在响"，只听见一记就够。
+          const t = now();
+          if (t - lastBellAt < AUD.bellGapSec) { stats.bellDropped += 1; continue; }
+          lastBellAt = t;
         }
         if (schedule(planSound(key, voiceOf(findCreature(world, ev.id)), at(), idSeed(ev.id)))) made += 1;
       }

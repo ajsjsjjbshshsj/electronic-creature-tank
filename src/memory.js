@@ -168,6 +168,40 @@ export function familiarityFor(memory, id) {
   return e ? e.familiarity : 0;
 }
 
+// ---- companion（spec §4.8：长期凑在一起、会自发同步脉动的那只）----
+// 生产者在 sim.js 的 tickSocial（2026-10-27）；在此之前这个 role 全仓**没有一处会写**，
+// 于是家谱的伙伴虚线与信息卡的"同伴"行恒为空（清单 §17.3 如实记过这一条）。
+//
+// 三个函数各只管一件事，合起来是设计文档的裁定 3：
+//   · 至多一个伙伴；· 血缘优先，永不覆盖；· 换人要先把旧的 demote 掉。
+// "占位者是否还活着"要读世界，所以那半步判在 sim.js（promoteIfNeeded），不在这里 ——
+// 本模块不认识 world，这是它保持纯数据层的原因。
+export function companionOf(memory) {
+  for (const e of memory.entries) if (e.role === 'companion') return e;
+  return null;
+}
+
+// 幂等且**不覆盖**：与 ensure 不覆盖已有 kinship/role 同一条纪律 ——
+// "它是它妈妈"这条事实不该被社交改写成"它是它伙伴"。
+// 已有别的伙伴时返回 false：唯一性在这里守，不靠调用方自觉。
+export function promoteCompanion(memory, id) {
+  const cur = companionOf(memory);
+  if (cur !== null && cur.id !== id) return false;
+  const e = ensure(memory, id);
+  if (e.role !== null) return false;
+  e.role = 'companion';
+  return true;
+}
+
+// 只 demote 伙伴。条目不存在时返回 false 且**不新建**：
+// 顺手 ensure 会让"查一下"变成"记一笔"，那是记忆层最不该有的副作用。
+export function demoteCompanion(memory, id) {
+  const e = get(memory, id);
+  if (!e || e.role !== 'companion') return false;
+  e.role = null;
+  return true;
+}
+
 export function kinshipBetween(memory, id) {
   const e = get(memory, id);
   return e ? e.kinship : 0;

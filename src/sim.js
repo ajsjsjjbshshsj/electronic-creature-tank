@@ -35,6 +35,7 @@ import { computeTargets, update as updateEmotions, applyEvent, moodOf } from './
 import {
   adjust as adjustMemory, decay as decayMemory, ensure as ensureMemory,
   affectionFor, PLAYER_ID, KINSHIP,
+  companionOf, promoteCompanion, demoteCompanion,
 } from './memory.js';
 import { createCreature, ageCreature, canBreed, sizeOf, STAGES } from './creature.js';
 import { maybeSay } from './speech.js';
@@ -45,6 +46,7 @@ import {
 } from './breeding.js';
 import { decide, EAT_DIST, EAT_HUNGER, HAND_SPEED_POKE } from './behavior.js';
 import { heldStep, enjoyOf, carryEffects } from './grab.js';
+import { pairEligible, companionReady, bondStep } from './social.js';
 
 // 与 needs / emotions / memory / behavior 里的同名函数同型：两个比较对 NaN 都是 false，
 // 所以 NaN 会**原样穿过**。这里刻意不加逐调用的有限性守卫（60Hz × 24 只的热路径），
@@ -1342,6 +1344,78 @@ function tickEggs(world, dt) {
   }
 }
 
+// ---------------------------------------------------------------- 社交同步
+
+// spec §4.12 第 6 条的"socialize 高级表现"：两只吃饱、互相有好感、都开心的个体
+// 会自发同步脉动；跨过顶点响一记小铃（audio.js 的 synced → bell），
+// 长期凑在一起的互相成为 companion（家谱虚线与信息卡"同伴"行的生产者）。
+// 设计与六条裁定见 docs/superpowers/specs/2026-10-27-social-bond-sync-design.md。
+//
+// **逐只**遍历而不是成对遍历，两个理由：
+//   1. 没在跟任何人同步的那些也要衰减 —— 成对循环只走"凑上对的"，
+//      漏掉的那一半会永远停在旧进度上（度卡在 1，铃随时可能再响一次）。
+//   2. 每只只写**自己**这一侧（自己的 memory、自己的情绪），所以两只各跑一次
+//      正好是完整的一笔，不需要"谁先谁后"或"别加两遍"这种约定。
+// 事件去重靠 `a.id < b.id`：上升沿在两只身上可能不在同一 tick（各自的历史进度不同），
+// 但只有 id 较小的一侧会放行 ⇒ 一次 episode 恰好一条。
+function tickSocial(world, dt) {
+  const alive = aliveCreatures(world);
+  for (let i = 0; i < alive.length; i += 1) {
+    const a = alive[i];
+    const wantId = a.intent && a.intent.kind === 'socialize' ? a.intent.targetId : null;
+    let b = null;
+    if (wantId !== null && wantId !== undefined) {
+      for (let j = 0; j < alive.length; j += 1) {
+        if (alive[j].id === wantId) { b = alive[j]; break; }
+      }
+    }
+    // 距离用世界坐标的欧氏距离：pairDist 是"凑在一起"的半径，与 socialize 的
+    // stopDist（0.06）相容 —— 它们停在 0.06 处，仍在 0.09 之内。
+    const dist = b === null ? NaN : Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y);
+    const near = Number.isFinite(dist) && dist <= CONFIG.social.pairDist;
+    const ok = near && pairEligible(a, b, dist);
+    const r = bondStep(a, ok ? b.id : null, ok, dt);
+    if (near) {
+      // §4.8 那道"互相有好感"（affMin）的**唯一生产者**：凑在一起待着就会熟络、慢慢生出好感。
+      // 没有它，个体之间的 affection 全仓只有 resolve 里那笔 -0.01（碰撞的怨气）——
+      // 2026-10-27 实测：10 分钟里互相 socialize 且贴在一起的有 24496 个个体·tick，
+      // 而双向好感的最高值恒为 0.0000 ⇒ 同步永远不开始（60 分钟实跑 0 记铃、0 对伙伴）。
+      // 只写**自己**这一侧：单向的 fondness 是允许的（家谱与升级仍要求双向）。
+      adjustMemory(a.memory, b.id, CONFIG.social.idleAffectionRate * dt,
+        CONFIG.social.familiarityRate * dt);
+    }
+    if (!ok) continue;
+
+    const deg = r.degree;
+    if (deg > 0) {
+      // §4.8：同步脉动 → affection+。熟悉度同期上升（它们在互相认识）。
+      adjustMemory(a.memory, b.id, CONFIG.social.affectionRate * deg * dt,
+        CONFIG.social.familiarityRate * dt);
+      // §4.5 那一行原文就是"社交高峰：与对方脉动同步、膨胀展示、全场最亮"，
+      // 而 body.js 已经把 arousal 接进脉率/幅度/膨胀 ⇒ 这三样是这条注入的现成读数。
+      a.emotions.arousal = clamp01(a.emotions.arousal + CONFIG.social.arousalRate * deg * dt);
+      a.emotions.joy = clamp01(a.emotions.joy + CONFIG.social.joyRate * deg * dt);
+    }
+    if (r.crossed && a.id < b.id) {
+      world.events.push({ kind: 'synced', id: a.id, withId: b.id });
+    }
+    if (companionReady(a)) promoteIfNeeded(world, a, b.id);
+  }
+}
+
+// 裁定 3 的后两条要读世界（占位者还活着吗），所以判在这里、不放进 memory.js：
+// memory 是纯的"关系账本"，它不知道谁还活着。
+function promoteIfNeeded(world, c, partnerId) {
+  const cur = companionOf(c.memory);
+  if (cur !== null && cur.id !== partnerId) {
+    let alive = false;
+    for (const x of world.creatures) if (x.id === cur.id && x.alive) { alive = true; break; }
+    if (alive) return;                       // 占位者还在 ⇒ 不换人（家谱虚线不该跳）
+    demoteCompanion(c.memory, cur.id);
+  }
+  promoteCompanion(c.memory, partnerId);
+}
+
 // ---------------------------------------------------------------- 交互结算
 
 function resolve(world, dt) {
@@ -1472,6 +1546,9 @@ export function tickWorld(world, dt) {
 
   maybeDrift(world);
   tickEggs(world, dt);
+  // 读的是本 tick 决策完的意图与移动后的位置；碰撞推开在它之后，
+  // 所以"贴到 0.06 停下"的那个距离在这一步已经成立。
+  tickSocial(world, dt);
   resolve(world, dt);
   reapDead(world, dt);
   // 放在最后：本 tick 里新建的关系条目（碰撞、拒绝、孵化）都已经写完，
