@@ -1098,3 +1098,29 @@ Task 5（7）、Task 6（8）、Task 3（9）。§4"明确不做"的四条不需
 `promoteCompanion(memory, id) → boolean`、`demoteCompanion(memory, id) → boolean`、
 `companionOf(memory) → entry|null`、`callForEvent('synced') === 'bell'`
 在 Task 1/2/4/5/6 的 Interfaces 与代码块中拼写一致。
+
+---
+
+## 执行日志（计划自己的错，落地时逐条改写）
+
+1. **Task 1 的 `pairEligible` 多了一道门**："双方都开心（happyJoyMin）"。主 spec §4.12 第 6 条
+   原文只有"吃饱且互相好感"。实测把可及性从 2.88% 压到 0.038%（seed 20261022、20 分钟），
+   于是 60 分钟一次同步都不会发生。**删掉**，并在 `tests/social.test.js` 里留了一条反向地雷
+   （joy 从 −1 扫到 1，判定不许变）。
+2. **Task 4 的 `tickSocial` 少了一条写入**：计划只写了"合格时买好感"，但个体之间的 `affection`
+   在整个内核里**没有正生产者**（只有碰撞的 −0.01），所以 `affMin` 那道门恒不可达。
+   补 `idleAffectionRate`（凑在一起但没同步时也慢慢涨）。
+3. **Task 1 的 `totalSeconds: 90` 与 `totalDecay: 0.01` 都是拍脑袋值**：90 秒在真缸里不可达
+   （有人喂的缸 30 分钟峰值 26.6s），0.01 的半衰只有 69 秒、会在两次同步之间把账抹平。
+   改 12 / 0.002。
+4. **Task 1 的 `arousalRate: 0.12` 太小**：一阶趋近的稳态增量是 `rate / inertia`，
+   0.12 只给 0.075（5 秒实测 0.055），脉率/膨胀上看不出来。改 0.55（稳态 0.34）。
+5. **Task 6 的铃峰值取"全表最低"是错的**：死亡那一声是**刻意**最轻（0.12，"几乎听不见"），
+   铃比它还轻就等于没响。改 0.16（全表第二轻）。
+6. **Task 6 的两条测试写的是不存在的 API**：`planSound('bell').parts` 里两音是**同一行的重放**
+   （`reps: 2`），不存在"第二声比第一声高"；`Recorder` / `creatureAt` 也不存在，
+   实际是 `createGraphStub()` / `creature(id, size, hue)` / `fakeWorld([...])`。
+7. **Task 4 的"对照对只会被时间淡掉"在补了 `idleAffectionRate` 之后失效**：饿着的两只仍然
+   贴在一起，对照缸也会涨。改成"独处的一只对着一个不存在于缸里的 id"。
+8. **Task 7 的 60 分钟判据"非零"在修完三处死门之前根本不成立**（0 记铃、0 对伙伴）。
+   这也说明"先写判据、再让实跑去证伪"是对的 —— 只跑单测的话这一轮会带着三个死门合并。

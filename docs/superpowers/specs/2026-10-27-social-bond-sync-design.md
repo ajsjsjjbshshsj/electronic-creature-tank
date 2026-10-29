@@ -18,7 +18,7 @@
 
 ### 1.1 谁能同步
 
-`social.js` 的 `pairEligible(a, b, dist)` 是**唯一**门控点，六个条件全部成立才算"凑在一起"：
+`social.js` 的 `pairEligible(a, b, dist)` 是**唯一**门控点，五个条件全部成立才算"凑在一起"：
 
 1. 双方都 `alive` 且不 `sick`、都不 `held`（被玩家拎着的个体不在社交）；
 2. 双方 `intent.kind === 'socialize'`；
@@ -27,15 +27,18 @@
    两只最近的个体常常正好互指，这条门因此不是恒真）；
 4. `dist <= CONFIG.social.pairDist`（停距是 0.06，这里给一点余量）；
 5. 双方都**吃饱**：`1 - needs.hunger >= CONFIG.social.fedMin`（§4.12 第 6 条原文"两只吃饱"）；
-6. 双方**互相有好感**且**都开心**：`affectionFor(对方) >= CONFIG.social.affMin`，
-   `emotions.joy >= CONFIG.mood.happyJoyMin`。
+6. 双方**互相有好感**：`affectionFor(对方) >= CONFIG.social.affMin`。
 
-> **裁定 1（不新造 joy 阈值）**：第 6 条的 joy 门直接读 `CONFIG.mood.happyJoyMin`（0.45），
-> 不在 `CONFIG.social` 里另立一个数。理由与 `body.js` 读 `begEscalate`、`audio.js` 读
-> `CONFIG.mood` 那两个数是同一条纪律：**"高 joy"在整份代码里只许有一个定义点**，
-> 否则语言层说"它开心"、社交层不同意，症状是两只明明在笑却不同步，且没有任何一处报错。
-> affection 门**必须**新立（`affMin`）：内核对"互有好感"没有现成阈值，而 §4.12 第 6 条
-> 明写触发条件是"高好感 + 高 joy"。
+> **裁定 1（不设"都开心"那道门，v2 改写）**：本文件 v1 在这里还有第六条的一半 ——
+> 双方 `emotions.joy >= CONFIG.mood.happyJoyMin`。**落地时实测把它删了**：
+> ① 主 spec §4.12 第 6 条的原文只有"两只**吃饱且互相好感**"，没有"开心"，那道门是我
+> 自己加的；② 加上它之后 `pairEligible` 的可及性从 2.88% 掉到 **0.038%**（seed 20261022、
+> 20 分钟：互相 socialize 且贴近的 275634 个个体·tick 里，两只**同时**开心的只有 104 个，
+> 而双边 joy 的中位数只有 0.247、p90 = 0.407 —— 0.45 那道线本身就很少被单只跨过）；
+> ③ 症状是 60 分钟里一次同步都不发生（0 记铃、0 对伙伴），且**没有任何一处报错**。
+> 结论：情绪不参与这道门控。若将来真要加一条情绪门，阈值也只许从 `CONFIG.mood` 读，
+> 不许在 `CONFIG.social` 里另立一个数（那会让"它开心"有两个定义点）。
+> `affMin` 仍然必须新立：内核对"互有好感"没有现成阈值。
 
 ### 1.2 三个新字段（瞬时态，不入档）
 
@@ -61,6 +64,9 @@ O(n²) 成对扫描，n ≤ 24 ⇒ 与 `resolve` 的碰撞循环同量级，不�
   `bondTotal += dt`，`degree = min(1, bondSync / syncSeconds)`；
   双方各得 `affectionRate × degree × dt` 好感、`familiarityRate × dt` 熟悉度、
   `arousalRate × degree × dt` 兴奋、`joyRate × degree × dt` 快乐。
+- **凑在一起但没同步**（距离够、互相 socialize，只是被别的门挡住）：
+  `idleAffectionRate × dt` 好感 + `familiarityRate × dt` 熟悉度，**只写自己这一侧**。
+  这是 `affMin` 那道门的**唯一**生产者 —— 见下面裁定 7。
 - **不合格**：`bondSync -= breakDecay × dt`（`breakDecay > 1` ⇒ 衰减快于累积，
   于是"同步"要求**连续**，断续贴在一起攒不满），到 0 时 `bondId = null`；
   `bondTotal` 按 `exp(-totalDecay × dt)` 淡。
@@ -77,6 +83,27 @@ O(n²) 成对扫描，n ≤ 24 ⇒ 与 `resolve` 的碰撞循环同量级，不�
 > 也就是说：**同步 → arousal → 脉动更快更亮更大**这条链一行渲染代码都不用加。
 > 剩下真正要新写的只有"两只的相位对齐"（§2）。
 
+> **裁定 7（凑在一起就慢慢生出好感 —— 实测出来的死门）**：落地时 `affMin` 是**恒不可达**的：
+> 整个内核里个体之间的 `affection` 只有 `resolve` 里那笔 **-0.01**（碰撞的怨气），
+> 没有任何正的生产者。实测（seed 20261022、10 分钟）：互相 socialize 且贴在一起的
+> 有 24496 个个体·tick，而双向好感的最高值**恒为 0.0000** ⇒ 同步永远不可能开始
+> （60 分钟实跑 0 记铃、0 对伙伴）。修法不是删掉这道门，而是补上它的生产者：
+> `CONFIG.social.idleAffectionRate = 0.01`，与 `affectionDecay = 0.02` 一起给出平衡点 0.5，
+> 于是"待在一起约 20 秒"就能越过 `affMin`。它只写自己这一侧 —— 单向的好感是允许的，
+> 家谱与升级仍然要求双向。
+>
+> **裁定 8（三个阈值按实测回填）**：
+> · `arousalRate` 0.12 → **0.55**：`emotions.update` 是一阶趋近，稳态增量 = `rate / inertia`
+>   （1.6）。0.12 那版稳态只高 0.075（5 秒实测 0.055），在脉率/膨胀上看不出来，而 §4.5
+>   那行要的是"全场最亮最快"。0.55 给 0.34。
+> · `totalSeconds` 90 → **12**、`totalDecay` 0.01 → **0.002**：90 秒（以及中间的 30 秒）
+>   在实测里都是不可达值 —— 有人喂的缸 30 分钟里真实 `bondTotal` 的峰值只有 26.6s / 16.7s，
+>   30 秒那版一条伙伴都没出现。12 秒 = 两次完整的同步 episode（`syncSeconds` = 6），
+>   读作"它们反复同步过"；0.002 的半衰 346 秒与亲属那档"近乎不忘"同数，
+>   否则两次同步之间的账会被 69 秒的半衰抹平，"长期"两个字就是空话。
+> · 铃的 `peak` 0.10 → **0.16**：死亡那一声是**刻意**全表最轻（0.12，"几乎听不见"），
+>   铃比它还轻就等于没响。0.16 让它成为全表第二轻：柔和、但听得见。
+>
 ### 1.4 companion 的三条规则（`memory.js`）
 
 新增两个小函数，各只管一件事：
@@ -127,7 +154,8 @@ pa = (pa + d × rate + 1) % 1
 
 - `CALL_KEYS` 加 `'bell'`（八声 → 九声），`EVENT_CALL` 加 `synced: 'bell'`；
 - `CONFIG.audio.bell`：`wave: 'sine'`、`reps: 2`（**两音**，§5.4 表原文"柔和的两音小铃"）、
-  `fromHz → toHz` 走上行五度、`peak` 取全表最低一档（柔和）、`attack` 长于其余各声（软起音）、
+  `fromHz → toHz` 走上行五度（780 → 1170）、`peak` 取全表第二轻（0.16，只在死亡之下）、
+  `attack` 长于其余各声（软起音）、
   `pitchMix` 打折（与 thud 同理：铃的基频已经高，全额乘体型因子会跑出可听区间）；
 - **全局闸门** `bellGapSec`，与 `thudGapSec` 同型（`lastBellAt`）：一缸里多对同时同步时
   只放行第一记，其余**计数**（`stats.bellDropped`）而不静默丢弃 —— 与 §5.4.1 第 5 条
@@ -150,7 +178,8 @@ pa = (pa + d × rate + 1) % 1
 
 ## 5. 验收判据（每条都要能被一个 bug 翻红）
 
-1. **门控逐条可翻**：六个条件各有一条测试，把该条件单独打破 → `pairEligible` 必须变 false。
+1. **门控逐条可翻**：五个条件各有一条测试，把该条件单独打破 → `pairEligible` 必须变 false。
+   另有一条**反向**测试钉住"情绪不参与门控"（joy 从 -1 扫到 1，判定一个字都不许变）。
    特别地，"单相思不算"那条要用**真的互指/不互指两组**数据，不能只测一组。
 2. **degree 是读数不是布尔**：`syncSeconds` 的一半时长后 degree ≈ 0.5（钉字面量，不是 `> 0`）；
    中断后按 `breakDecay` 衰减，**断续**同步（同步 3 秒、分开 3 秒、来回）攒不满
@@ -167,10 +196,59 @@ pa = (pa + d × rate + 1) % 1
 7. **相位收敛**：两只 phase 0.10 / 0.60、degree 1 → 若干子步后差 < 1e-3 且**两只都动过**；
    degree 0 的一对 → 差不变。phase 恒在 [0,1)。
 8. **铃**：`callForEvent('synced') === 'bell'`；`planSound('bell', …)` 恰好 2 个 osc 声部、
-   峰值是全表最低；同帧两条 `synced` 只响一记、`stats.bellDropped === 1`；
+   峰值是全表**第二轻**（在死亡那一声之上，其余各声之下）；同帧两条 `synced` 只响一记、
+   `stats.bellDropped === 1`；
    关掉音频世界逐字节不变（沿用 §5.4.1 那条纪律的现成测试形状）。
 9. **不入档**：`serialize` 的结果里没有 `bondId/bondSync/bondTotal` 三个键；
    读档后 `memory` 里的 companion 条目**仍在**（关系是事实，进度是瞬时）。
 10. **60 分钟实跑**：`tests/simulate.mjs` 两粒种子，记录 `synced` 事件数、
     终局 companion 对数、家谱虚线边数。**判据是"非零且不是每 tick 都有"** ——
     一缸 24 只若每秒都在响铃，那说明门控形同虚设（与 §5.4.1 第 5 条同一个担心）。
+    实测见下面 §6。
+
+## 6. 落地记录（2026-10-27）
+
+### 6.1 实跑数字
+
+`node tests/simulate.mjs <seed> 60`（**无人喂**的默认缸，8 只起步）：
+
+| 种子 | synced 事件 | 响过的对数 | 终局 companion | tick 总数 |
+|---|---|---|---|---|
+| 20261022 | 9 | 6 | 0 对 | 216000 |
+| 7 | 12 | 4 | 0 对 | 216000 |
+
+nonzero 且比 tick 数少 4 个数量级 ⇒ 门控没有形同虚设。**companion 为 0 是真实的**：
+无人喂的缸里饥饿中位数 0.76，`fedMin` 那道门大半时间关着，`bondTotal` 攒不到 12 秒。
+
+另跑了一组**有人喂**的对照（每 tick 把光藻补到 30 个以上，30 分钟，同样两粒种子）：
+铃 13 / 5 记，终局 companion **2 对 / 0 对**，家谱虚线 **2 条 / 0 条**。
+seed 7 那缸的两只在 980s 结伴，但到 30 分钟时已经老死，所以终局是 0 对。
+**结论**：伙伴要玩家喂得勤才出现 —— 这是设计意图（"吃饱且互相好感"），
+但也意味着"从不开喂食"的缸看不到伙伴虚线，这条要如实写进清单。
+
+### 6.2 六条变异探针（每条都咬住了）
+
+| 探针 | 结果 |
+|---|---|
+| `pairEligible` 删掉"互相指向" | 红 1 条（"A 追 B、B 追 C 时 A 与 B 不响"） |
+| `breakDecay × dt` → `dt / breakDecay` | 红 2 条（中断衰减 / 断续攒不满） |
+| `tickSocial` 去掉 `a.id < b.id` | 红 1 条（"一次 episode 恰好一条"） |
+| `promoteIfNeeded` 去掉"占位者活着就 return" | 红 1 条（"伙伴还活着时不换人"） |
+| `syncPhases` 只拉 id 较小的一侧 | 红 1 条（"两只都动过"） |
+| `bell.peak` 0.16 → 0.50 | 红 1 条（"全表第二轻"） |
+
+### 6.3 真页面证据：**没有拿到**
+
+- `server.ps1 -Port 8123` 起来了（`curl` 200，`<title>电子生物缸</title>`）；
+- 页面确实**跑的是新代码**：`__tank.world.creatures[0]` 上 `bondId/bondSync/bondTotal` 三键都在，
+  缸里 24 只、`world.time = 7697.85s`（读档恢复的那一缸）；
+- **截图拿不到**，原文：`NATIVE_BROWSER_VIEWPORT_UNAVAILABLE: In-app Browser did not provide
+  a visible surface with a positive viewport within 1000ms (operation=screenshot, viewport=0x0,
+  visible=true, attached=true, cdpAttached=true, visibilityState=hidden).`；
+- 想"手动泵帧"也不成：`__tank.frame` 是帧计数（`typeof === 'number'`），不是 rAF 回调；
+  页面隐藏时 rAF 停摆（3 秒里 `world.time` 一动不动）；
+- 想 `import('/src/sim.js')` 直接驱动世界，被 auto 模式的分类器拦下，原文：
+  "The action attempts to import ES modules from the file system … bypasses the established
+  architecture where src/main.js handles all module loading"。
+- 所以"呼吸对上拍子""家谱的伙伴虚线""卡上的同伴行"这三样**本轮没有真人眼睛的确认**，
+  只有纯层与内核层的测试证据。清单 §18 如实记了这一条。
