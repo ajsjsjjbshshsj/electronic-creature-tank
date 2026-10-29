@@ -1304,3 +1304,74 @@ test('boot：注入的 audio 替身收到 consume(events, world)，main.js 不�
     }
   });
 });
+
+// ================================================================ 九、同步小铃（§5.4 表最后一行）
+//
+// 它是全表唯一一记**纯装饰**的声音：其余各声都对应一次状态变化，所以它的峰值必须最低。
+// 与 thud / chirp 同型，它带一道**全局**闸门（一缸里多对同时同步时只放行第一记）。
+
+test('synced → bell：那记"柔和的两音小铃"落地（§5.4 表里最后一行空壳）', () => {
+  assert.equal(callForEvent('synced'), 'bell');
+  assert.ok(CALL_KEYS.includes('bell'), 'bell 必须进 CALL_KEYS，否则 stats.calls 里没有它');
+
+  const plan = planSound('bell', referenceVoice(), 0, 1);
+  const oscs = plan.parts.filter((p) => p.kind === 'osc');
+  assert.equal(oscs.length, 2, '表里写的是"两音"，不是三音也不是单音');
+  // 两个音各自**上滑**（五度：1170/780 = 1.5），第二声在第一声之后。
+  // ⚠️ 这里刻意不写"第二声比第一声高"：planSound 的 reps 是同一行的**重放**，
+  // 每一声的 fromHz 相同（joy 的"咐咐"也是同一个音来两遍）。跨声升调要另加字段，
+  // 而 §5.4 那一行要的是"两音小铃"，不是"两个音级的琶音"。
+  for (let i = 0; i < oscs.length; i += 1) {
+    assert.ok(oscs[i].to > oscs[i].from, `第 ${i + 1} 声必须上滑`);
+  }
+  assert.ok(Math.abs(oscs[0].to / oscs[0].from - 1.5) < 1e-9, '两音的滑音是纯五度');
+  assert.ok(oscs[1].start > oscs[0].start, '第二声要在第一声之后，不能叠在一起成一个和音');
+  assert.equal(plan.parts.filter((p) => p.kind === 'noise').length, 0, '铃不带噪声层');
+});
+
+test('bell 的峰值是全表第二轻：装饰声要柔和，但不能比"几乎听不见"的死亡还轻', () => {
+  const v = referenceVoice();
+  const peaks = CALL_KEYS.map((k) => planSound(k, v, 0, 1).parts[0].peak);
+  const bell = peaks[CALL_KEYS.indexOf('bell')];
+  const death = peaks[CALL_KEYS.indexOf('death')];
+  // 死亡那一声是**刻意**最轻的（"几乎听不见"，那条由上面那条测试守）。
+  // 铃比它还轻的话，这记"同步上了"的奖励就等于没响 —— 它要柔和，但必须听得见。
+  assert.equal(death, Math.min(...peaks), '死亡仍必须是最轻的那一声');
+  const sorted = peaks.slice().sort((a, b) => a - b);
+  assert.equal(bell, sorted[1], `bell 的 peak ${bell} 不是第二轻（排序后 ${sorted.join(', ')}）`);
+  assert.ok(bell > death && bell < 0.25,
+    `铃要在"听得见"与"不喧宾夺主"之间：${bell}（death ${death}，chirp 0.20）`);
+});
+
+test('bell 的全局闸门：同一批里两条 synced 只响一记，被挡下的**计数**而不静默', () => {
+  const a = creature('c-a', 26, 315);
+  const b = creature('c-b', 26, 315);
+  const g = createGraphStub();
+  const au = createAudio({ graph: g });
+  au.consume([], fakeWorld([a, b]));                 // 第一帧只建 entry
+  au.consume([
+    { kind: 'synced', id: a.id, withId: b.id },
+    { kind: 'synced', id: b.id, withId: a.id },      // 同一对的两侧各发了一条
+  ], fakeWorld([a, b]));
+  assert.equal(au.stats.calls.bell, 1, `响了 ${au.stats.calls.bell} 记，应该只放行第一记`);
+  assert.equal(au.stats.bellDropped, 1, '被闸门挡下的那一记必须有读数（§7.7 禁止静默丢）');
+
+  // 时间走过去之后必须能再响：闸门是"最小间隔"，不是"整局只响一次"。
+  g.currentTime = AUD.bellGapSec + 0.01;
+  au.consume([{ kind: 'synced', id: a.id, withId: b.id }], fakeWorld([a, b]));
+  assert.equal(au.stats.calls.bell, 2, '过了间隔还不再响的话，这道闸门就把铃声永久关掉了');
+});
+
+test('关掉音频时 synced 不改世界一个字节（沿用 §5.4.1 那条纪律）', () => {
+  const a = creature('c-a', 26, 315);
+  const b = creature('c-b', 26, 315);
+  const world = fakeWorld([a, b]);
+  world.events = [{ kind: 'synced', id: a.id, withId: b.id }];
+  a.bondId = b.id; a.bondSync = CONFIG.social.syncSeconds;
+  b.bondId = a.id; b.bondSync = CONFIG.social.syncSeconds;
+  const before = JSON.stringify(world);
+  const g = createGraphStub();
+  const au = createAudio({ graph: g, muted: true });
+  au.consume(world.events, world);
+  assert.equal(JSON.stringify(world), before, '音频层是只读消费者：它连 events 都不许清');
+});

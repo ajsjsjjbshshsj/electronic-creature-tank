@@ -829,6 +829,9 @@ const CONFIG = {
     // 0.3 刻意选在"**1× 下不 binding**（三秒窗最多放行 10 记 > 实测 8 记）、4× 下才咬人"：
     // 正常话痨的手感一个字都不动，只把倍速捅出来的那一梭子拦住。上限 ≈ 3.3 记/真实秒。
     chirpGapSec: 0.3,
+    // 同步小铃的**全局**最小间隔：一缸里多对同时同步时只放行第一记，其余计数
+    // （stats.bellDropped）。与 thud/chirp 同型 —— 装饰声不该在 4× 下打成一梭子。
+    bellGapSec: 0.6,
     releaseSec: 0.03,            // 每个声部在 noteSec 之后的释音段（stop 时刻 = 音长 + 这一段）
     silenceGain: 0.0001,         // 包络终点的"零"：真 0 会让 exponentialRamp 在本秒变成非法值
     noiseStepSec: 0.031,         // 噪声层各段读取共享 buffer 的偏移步长（碎裂感的来源）
@@ -860,6 +863,13 @@ const CONFIG = {
             attack: 0.004, peak: 0.34, pitchMix: 0.5 },
     chirp: { wave: 'sine', fromHz: 1150, toHz: 1560, noteSec: 0.045, gapSec: 0, reps: 1,
              attack: 0.003, peak: 0.20, pitchMix: 1 },
+    // 第九声（spec §5.4 表里"同步脉动（社交高峰，原「求偶成功」）"那一行）：
+    // 柔和的**两音**小铃，每声滑一个纯五度（1170/780 = 1.5）。
+    // peak 是全表**第二**轻（0.16，只在"几乎听不见"的死亡之下）：它是这一缸里唯一一记
+    // 纯装饰声，但玩家得听得见它 —— 比死亡还轻的话这记铃就白响了。
+    // pitchMix 只走 0.35：铃的基频已经高，全额乘小只的 2.6× 会跑到刺耳的区间。
+    bell: { wave: 'sine', fromHz: 780, toHz: 1170, noteSec: 0.22, gapSec: 0.09, reps: 2,
+            attack: 0.060, peak: 0.16, pitchMix: 0.35 },
   },
 
   // ---- 世界 ----

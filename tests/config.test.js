@@ -111,7 +111,9 @@ test('deepFreeze 递归到 CONFIG 的每一个对象与数组节点', () => {
   // ⚠️ 66 → 67、55 → 56（2026-10-27 伙伴同步）：新增 **CONFIG.social 一段**（一个节点、11 个标量）。
   //    与 grab 同型：旋钮之间没有"逐键比对"的结构关系，所以不需要子表。
   //    行为由 tests/social.test.js（纯层门控）与 tests/sim.test.js（tickSocial 接线）钉。
-  assert.equal(visited.length, 67, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
+  // ⚠️ 67 → 68（同一轮，Task 6）：CONFIG.audio 多一张 **bell 声表**（节点 +1，键 +2：
+  //    bell + bellGapSec）。顶层键数不变 —— 它挂在已有的 audio 里。
+  assert.equal(visited.length, 68, `CONFIG 的对象/数组节点数变了（现 ${visited.length}）`);
   // 段名同样精确钉住：只有节点数会漏掉"删了一段又加了一段、总数恰好一样"这种巧合。
   assert.deepEqual(Object.keys(CONFIG).sort(), [
     'affectionDecay', 'affectionDecayKin', 'api', 'audio', 'avatar', 'behavior', 'blink', 'body', 'bodyPoints',
@@ -766,21 +768,22 @@ test('软体弹簧的三十个常量齐备，且两端都欠阻尼（spec §4.7 
 //   只钉行为 → 把 joy.toHz 从 900 改成 600 时行为断言仍然全绿（它按 CONFIG 比）；
 //   只钉数值 → 把音高因子写成常数时数值全对，而"小只高、大只低"那条承诺没了。
 
-test('叫声表的三十六项齐备（28 个调度量 + 8 张声表子行，node 数出来的），且 spec §5.4 逐字那几个数被钉死', () => {
+test('叫声表的三十八项齐备（29 个调度量 + 9 张声表子行，node 数出来的），且 spec §5.4 逐字那几个数被钉死', () => {
   const W = CONFIG.audio;
   assert.deepEqual(Object.keys(W).sort(), [
-    'affectionMin', 'anger', 'beg', 'chirp', 'chirpGapSec', 'cooldownSec', 'death', 'fallbackSampleRate',
+    'affectionMin', 'anger', 'beg', 'bell', 'bellGapSec', 'chirp', 'chirpGapSec', 'cooldownSec',
+    'death', 'fallbackSampleRate',
     'filterQ', 'filterRatioMax', 'filterRatioMin', 'hatch', 'hueBuckets', 'hueTurn', 'joy',
     'lfoSeedModulus', 'lfoSeedSpread', 'lookaheadSec', 'masterGain', 'maxVoices',
     'noiseBufferSec', 'noiseStepSec', 'overtoneMix', 'overtoneRatioMax', 'overtoneRatioMin',
     'pitchMax', 'pitchMin', 'refSize', 'releaseSec', 'silenceGain', 'sleepy', 'sleepyMin',
     'thud', 'thudGapSec', 'thudPerSec', 'tiredMin',
-  ], 'CONFIG.audio 的三十六项键集（node 数出来的），不多不少：28 个调度量 + 八张声表子行');
+  ], 'CONFIG.audio 的三十八项键集（node 数出来的），不多不少：29 个调度量 + 九张声表子行');
 
   // 八行的**共同形状**：少了任何一项都会让某一行听得出差别而测不出来（"短促"变长、"极轻"变响），
   // 所以整行 deepEqual 键集而不是只抽查 fromHz。noise*/lfo* 是可选附加层，允许多出来。
   const CORE = ['attack', 'fromHz', 'gapSec', 'noteSec', 'peak', 'pitchMix', 'reps', 'toHz', 'wave'];
-  for (const key of ['joy', 'beg', 'anger', 'sleepy', 'hatch', 'death', 'thud', 'chirp']) {
+  for (const key of ['joy', 'beg', 'anger', 'sleepy', 'hatch', 'death', 'thud', 'chirp', 'bell']) {
     const extra = Object.keys(W[key]).filter((k) => !CORE.includes(k));
     assert.deepEqual(Object.keys(W[key]).filter((k) => CORE.includes(k)).sort(), CORE,
       `${key} 那一行缺了核心字段`);
