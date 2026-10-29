@@ -1570,5 +1570,22 @@ export function boot(opts) {
 // （__tank.setTimeScale(4) / __tank.setMuted(true) / __tank.audio.stats 取证）。
 // 计划 3 加了 HUD 之后应当删掉它（或者留着当调试入口，但要写进文档）。
 if (typeof globalThis.document !== 'undefined') {
-  globalThis.__tank = boot();
+  // 共享存档：**先**问一次服务器（异步），再开缸（同步）。boot 保持同步是刻意的 ——
+  // 它的 60+ 条测试与所有调用点都按同步用它，为了一个可选的探测把整个入口改成 async
+  // 会让"没开服务器"的每一条路径都多一层 await。这里 await 的代价只是首帧晚 1.5 秒上限。
+  //
+  // ⚠️ 探测失败**不阻止开缸**：primeRemote 从不抛，失败就是 kind:'error'，boot 照常走本机档。
+  globalThis.__tank = await bootWithRemote();
+}
+
+async function bootWithRemote() {
+  let remote = null;
+  try {
+    remote = await primeRemote();
+  } catch (err) {
+    // primeRemote 自己已经把异常收成 {kind:'error'} 了；这一层只兜"它自己也坏了"那种
+    // 不该发生的事 —— 兜住之后仍然是"退回本机档"，而不是白屏。
+    remote = { kind: 'error', reason: String((err && err.message) || err) };
+  }
+  return boot({ remote });
 }

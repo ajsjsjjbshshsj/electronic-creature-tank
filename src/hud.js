@@ -108,6 +108,38 @@ const joinNames = (list) => (list.length ? list.slice(0, H.cardWordsMax).join('�
  * 关系四行。spec §6.3 的家谱树属计划 4，这四行是**同一批数据的另一种画法**，
  * 它满足 §9.2 第 2 条（"你能看出两只之间的关系"）。
  */
+// ---- 共享存档的两条读数（§7.5/§7.6，2026-10-29）----
+//
+// 纯函数：**只看 saveState**，不摸 DOM、不摸 controller。这样"角标什么时候出现"
+// 与"冲突时那两个按钮"都有可断言的形状，而 DOM 层只剩"照着画"。
+//
+// 角标只在**降级**时出现：全新设备本来就没有远端，那时 backend 是 local 但
+// fallbackReason 是 null —— 给它挂一个"本地存档"等于告诉玩家"你的共享坏了"，
+// 而实际上他只是还没开服务器。
+export function saveBadgeFor(saveState) {
+  const st = saveState || {};
+  if (st.backend !== 'local' || st.fallbackReason === null || st.fallbackReason === undefined) {
+    return { show: false, label: '' };
+  }
+  const why = st.fallbackReason === 'conflict' ? '同步冲突' : '服务器不可达';
+  return { show: true, label: `本地存档（${why}）` };
+}
+
+// 冲突条：文案用主 spec §7.5 的原文，两个动作就是那一节的两个选项。
+// 两个按钮都必须带 aria-label（"接管"单独两个字在屏幕阅读器里没有上下文）。
+export function conflictNoticeFor(saveState) {
+  const st = saveState || {};
+  if (!st.conflict) return { show: false, text: '', actions: [] };
+  return {
+    show: true,
+    text: `另一台设备刚刚改动了这个世界（它现在是第 ${Number(st.conflict.remoteRevision) || 0} 版）`,
+    actions: [
+      { id: 'take-theirs', label: '加载它的版本', aria: '加载另一台设备的版本' },
+      { id: 'force-mine', label: '接管', aria: '用本机的版本覆盖服务器' },
+    ],
+  };
+}
+
 export function relationRowsFor(c, world) {
   const lineage = (c && c.lineage) || {};
   const kids = (Array.isArray(lineage.offspring) ? lineage.offspring : [])
@@ -283,6 +315,24 @@ export function mountHud(doc, deps) {
   const foodbar = el(doc, 'div', 'hud-foodbar', root);
   const card = el(doc, 'div', 'hud-card', root);
   card.tabIndex = -1;   // 可编程聚焦：从家谱进来时把键盘焦点带进卡里
+
+  // ---- 共享存档：角标 + 冲突条（§7.5/§7.6，2026-10-29）----
+  // 两个元素**一开始就建好、默认 hidden**：按需 new 节点会在第一次冲突那一刻改掉 DOM 结构，
+  // 而 HUD 其余部分都是按"结构稳定、只改文本"写的（与左上四条读数同一条纪律）。
+  const saveBadge = el(doc, 'div', 'hud-save-badge', root);
+  saveBadge.hidden = true;
+  const conflictBar = el(doc, 'div', 'hud-conflict', root);
+  conflictBar.hidden = true;
+  conflictBar.setAttribute('role', 'status');
+  const conflictText = el(doc, 'span', 'hud-conflict-text', conflictBar);
+  // 两个按钮就是 §7.5 的两个选项。都带 aria-label：单独的"接管"两个字在屏幕阅读器里没有上下文。
+  for (const a of conflictNoticeFor({ conflict: { remoteRevision: 0 } }).actions) {
+    const b = button(doc, conflictBar, a.label, 'hud-conflict-btn');
+    b.setAttribute('aria-label', a.aria);
+    // 缺 resolveConflict 时**就让它抛**：那是接线没接上，不是用户输入的问题
+    // （与 pressScale 调 controller.setTimeScale 同一条口径）。
+    b.addEventListener('click', () => controller.resolveConflict(a.id));
+  }
 
   // ---- 右上：倍速 / 暂停 / 静音 / 设置 ----
   // 音频被浏览器**明确拒绝**时才不挂静音键（spec §5.4.1 第 8 条）：一个按了永远没反应的
@@ -929,6 +979,20 @@ export function mountHud(doc, deps) {
       if (rFood.textContent !== String(r.foods)) rFood.textContent = String(r.foods);
       if (rEgg.textContent !== String(r.eggs)) rEgg.textContent = String(r.eggs);
       if (rTime.textContent !== r.timeLabel) rTime.textContent = r.timeLabel;
+      // 共享存档的两条读数：角标只在**降级**时出现（全新设备不挂），冲突条只在冲突时出现。
+      // 与上面四条读数同一套"值变了才写"：每帧无条件改 hidden 会让浏览器每帧都碰一次布局。
+      const badge = saveBadgeFor(controller.saveState);
+      if (saveBadge._shown !== badge.show || saveBadge.textContent !== badge.label) {
+        saveBadge._shown = badge.show;
+        saveBadge.hidden = !badge.show;
+        if (saveBadge.textContent !== badge.label) saveBadge.textContent = badge.label;
+      }
+      const notice = conflictNoticeFor(controller.saveState);
+      if (conflictBar._shown !== notice.show || conflictText.textContent !== notice.text) {
+        conflictBar._shown = notice.show;
+        conflictBar.hidden = !notice.show;
+        if (conflictText.textContent !== notice.text) conflictText.textContent = notice.text;
+      }
       // 落盘那一行同样骑帧（F-10）。面板没开时 `paintSaveLine` 第一行就 return，
       // 所以"不开设置页 ⇒ 零额外 DOM 写"这条与上面那四条读数的"值变了才写"是同一套。
       paintSaveLine();

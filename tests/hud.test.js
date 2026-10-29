@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   readoutFor, formatAge, cardFor, relationRowsFor, radarFor, heartFillFor, sizeTier,
+  saveBadgeFor, conflictNoticeFor,
 } from '../src/hud.js';
 import { CONFIG } from '../src/config.js';
 import { createEmotions } from '../src/emotions.js';
@@ -285,4 +286,37 @@ test('formatAge：四段刻度，秒位补零（不补的话时间在跳秒时�
   assert.equal(formatAge(86400 * 3 + 3600 * 5), '3天05时');
   assert.equal(formatAge(NaN), '—');
   assert.equal(formatAge(-1), '—');
+});
+
+// ---- 共享存档的两条读数（§7.5/§7.6，2026-10-29）----
+
+test('saveBadgeFor：全新设备不挂角标，只有**降级**过才挂', () => {
+  // 全新设备：backend 是 local，但没有降级过 —— 挂"本地存档"等于告诉玩家共享坏了，
+  // 而实际上他只是还没开服务器。
+  assert.equal(saveBadgeFor({ backend: 'local', fallbackReason: null }).show, false);
+  assert.equal(saveBadgeFor({ backend: 'remote', fallbackReason: null }).show, false);
+  // 真降级：两种原因各自的文案
+  const down = saveBadgeFor({ backend: 'local', fallbackReason: 'ECONNREFUSED' });
+  assert.equal(down.show, true);
+  assert.match(down.label, /本地存档/);
+  assert.match(down.label, /服务器不可达/);
+  const conf = saveBadgeFor({ backend: 'local', fallbackReason: 'conflict' });
+  assert.match(conf.label, /冲突/, '冲突降级的角标要说出"冲突"而不是"不可达"');
+  // 脏入参不许抛
+  assert.equal(saveBadgeFor(null).show, false);
+  assert.equal(saveBadgeFor(undefined).show, false);
+});
+
+test('conflictNoticeFor：§7.5 原文的两个选项，两个都要有 aria', () => {
+  assert.equal(conflictNoticeFor({ conflict: null }).show, false);
+  const n = conflictNoticeFor({ conflict: { remoteRevision: 9 } });
+  assert.equal(n.show, true);
+  assert.match(n.text, /另一台设备/);
+  assert.match(n.text, /9/, '要把对面的版本号念出来，不然玩家没法判断哪边更新');
+  assert.deepEqual(n.actions.map((a) => a.id).sort(), ['force-mine', 'take-theirs']);
+  assert.deepEqual(n.actions.map((a) => a.label), ['加载它的版本', '接管'], '两个按钮的文案就是 §7.5 的两个选项');
+  for (const a of n.actions) assert.ok(a.aria && a.aria.length > a.label.length, `${a.id} 的 aria 要带上下文`);
+  // 反向：不带 revision 的脏冲突也不许抛出 NaN
+  assert.equal(conflictNoticeFor({ conflict: {} }).show, true);
+  assert.match(conflictNoticeFor({ conflict: {} }).text, /0/);
 });
