@@ -500,8 +500,12 @@ const CONFIG = {
     totalDecay: 0.01,      // 分开时长期计数的指数衰减系数（半衰 ≈ 69 秒）
     affectionRate: 0.05,   // 同步期间每秒给双方的好感 × degree（§4.8：同步脉动 → affection+）
     familiarityRate: 0.06, // 同期熟悉度（与 CONFIG.grab.familiarityRate 同量级）
-    arousalRate: 0.12,     // 社交高峰：arousal 已经接进脉率/亮度/膨胀，这条是"看得见"的出口
-    joyRate: 0.05,
+    // 0.55 是**量出来的**，不是拍的：emotions.update 是一阶趋近，稳态增量 = rate / inertia
+    // （CONFIG.emotions.inertia = 1.6）⇒ 同步到顶时 arousal 高出基线 0.34。
+    // 原写 0.12 时稳态只高 0.075，实测 5 秒后 0.055 —— 那是看不见的，而 §4.5 那一行
+    // 要求的是"全场最亮最快"，脉率/幅度/膨胀三处都读它。
+    arousalRate: 0.55,     // 社交高峰：arousal 已经接进脉率/亮度/膨胀，这条是"看得见"的出口
+    joyRate: 0.05,         // 稳态 +0.03：它主要不是给人看的，而是让"开心"那道门自己在同步里守住
   },
   fluff: {
     lenRatio: 0.18,            // FLUFF_LEN_RATIO：毛长 = 该值 × 身体半径 × fluff 表现型

@@ -47,7 +47,7 @@ test('CONFIG.social 的旋钮被字面量钉住（不是 > 0）', () => {
   assert.equal(S.totalDecay, 0.01);
   assert.equal(S.affectionRate, 0.05);
   assert.equal(S.familiarityRate, 0.06);
-  assert.equal(S.arousalRate, 0.12);
+  assert.equal(S.arousalRate, 0.55);
   assert.equal(S.joyRate, 0.05);
   assert.ok(S.breakDecay > 1, 'breakDecay <= 1 的话断续与连续没有区别');
 });
