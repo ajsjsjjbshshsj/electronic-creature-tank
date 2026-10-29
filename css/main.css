@@ -70,6 +70,18 @@ body {
   display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; max-width: 60vw; }
 .hud-foodbar { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
   display: flex; gap: 10px; }
+/* 共享存档（2026-10-29）：角标只在降级时显示（hidden 由 hud.js 切）；
+   冲突条贴底居中、比食物条高一点，两个按钮就是 §7.5 那两个选项。 */
+.hud-save-badge { position: absolute; top: 40px; left: 12px; font-size: 12px;
+  padding: 3px 8px; border-radius: 10px; background: rgba(45, 18, 64, .72);
+  color: #ffd9e8; opacity: .9; }
+.hud-save-badge[hidden] { display: none; }
+.hud-conflict { position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%);
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center;
+  max-width: 92vw; padding: 8px 12px; border-radius: 12px;
+  background: rgba(20, 10, 40, .92); border: 1px solid rgba(255, 217, 232, .3); }
+.hud-conflict[hidden] { display: none; }
+.hud-conflict-text { font-size: 12px; color: #ffd9e8; }
 .hud-card { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(88vw, 340px); max-height: 76vh; overflow-y: auto; display: none;
   background: rgba(20, 10, 40, .93); border: 1px solid rgba(255, 217, 232, .22);

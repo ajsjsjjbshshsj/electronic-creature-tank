@@ -1019,10 +1019,13 @@ test('抚摸通道的两个旋钮被字面量钉住，且好感速率与淡忘�
 // boot 级用例钉。这一段最容易做错的是那两个**键名**：它们带版本号，而版本号的含义就是
 // "格式变了就别再读旧的那一个" —— 键名与 SAVE_VERSION 脱钩等于把两代存档搅在一起。
 
-test('存档落地的四项常数：节奏用模拟秒、下限严格低于最坏节奏、两个键名各住一处且都带版本号', () => {
+test('存档落地的五项常数：节奏用模拟秒、下限严格低于最坏节奏、两个键名各住一处且都带版本号', () => {
   const S = CONFIG.save;
-  assert.deepEqual(Object.keys(S).sort(), ['corruptKey', 'everySimSec', 'key', 'minIntervalMs'],
+  // 2026-10-29：四项 → 五项，多了 remoteTimeoutMs（共享存档的探测超时）。
+  assert.deepEqual(Object.keys(S).sort(),
+    ['corruptKey', 'everySimSec', 'key', 'minIntervalMs', 'remoteTimeoutMs'],
     'CONFIG.save 的键集（node 数出来的）变了 —— 加一项删一项都要在这里说清楚');
+  assert.equal(S.remoteTimeoutMs, 1500);
   // 键名：两个都在**同一个命名空间**里，且都带 v2 那个后缀（裁定 R-2）。
   // ⚠️ 断言里写的是字面量而不是模板串：拼出来就测不到"有人把版本号从名字里删掉"这件事。
   assert.equal(S.key, 'tank.save.v2');

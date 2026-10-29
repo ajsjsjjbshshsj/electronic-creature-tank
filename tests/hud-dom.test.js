@@ -61,6 +61,8 @@ function mount(over = {}) {
     setPaused: (v) => { calls.push(['pause', v]); return v; },
     stop: () => calls.push(['stop']),
     saveState: 'saveState' in over ? over.saveState : { source: 'fresh', bytes: 0, writes: 0 },
+    // 共享存档的两个选择（2026-10-29）：HUD 只上报"玩家选了哪一边"，其余归 main。
+    resolveConflict: (id) => calls.push(['conflict', id]),
     saveNow: () => calls.push(['saveNow']),
     clearSave: () => calls.push(['clearSave']),
     // getApiConfig / setApiConfig 必须成对地读写**同一份** cfg —— 真页面里它们背后是
@@ -862,4 +864,38 @@ test('拖拽：hud 不许知道 canvas 语义 —— 它只许上报像素', () 
   // 源码判据读的是代码，注释里出现同一个词是常态 —— 这类守卫写宽了就是等着被人注释掉。
   assert.ok(!/\.viewport\b|\.clientWidth\b|\.getBoundingClientRect\s*\(/.test(src),
     'hud.js 里出现了视口/布局读数 ⇒ "在不在缸内"这个判断漏进 HUD 了，它该问调用方');
+});
+
+// ---------------------------------------------------------------- 共享存档（§7.5/§7.6）
+
+test('角标默认不显示；降级之后才显示，且说出原因', () => {
+  const ok = mount({ saveState: { source: 'fresh', bytes: 0, writes: 0, backend: 'remote', fallbackReason: null } });
+  ok.hud.frame(0, W([]));
+  assert.equal(find(ok.root, 'div', 'hud-save-badge').hidden, true, '共享正常时不许挂角标');
+
+  const down = mount({ saveState: { source: 'fresh', bytes: 0, writes: 0, backend: 'local', fallbackReason: 'ECONNREFUSED' } });
+  down.hud.frame(0, W([]));
+  const badge = find(down.root, 'div', 'hud-save-badge');
+  assert.equal(badge.hidden, false);
+  assert.match(textOf(badge), /本地存档/);
+});
+
+test('冲突条：只在该出现的时候出现，两个按钮各按 §7.5 的两个选项上报', () => {
+  const st = { source: 'fresh', bytes: 0, writes: 0, backend: 'local', fallbackReason: 'conflict', conflict: { remoteRevision: 9 } };
+  const { hud, root, calls } = mount({ saveState: st });
+  hud.frame(0, W([]));
+  const bar = find(root, 'div', 'hud-conflict');
+  assert.equal(bar.hidden, false, '有冲突时条子必须出现');
+  assert.match(textOf(find(bar, 'span', 'hud-conflict-text')), /另一台设备/);
+  const btns = findAll(bar, 'button', 'hud-conflict-btn');
+  assert.deepEqual(btns.map(textOf), ['加载它的版本', '接管']);
+  for (const b of btns) assert.ok(b.attrs['aria-label'], '两个按钮都要 aria-label');
+  click(btns[0]);
+  click(btns[1]);
+  assert.deepEqual(calls.filter((c) => c[0] === 'conflict'), [['conflict', 'take-theirs'], ['conflict', 'force-mine']]);
+
+  // 冲突解开之后条子要收回去（值变了才写，但 hidden 必须真的翻回去）
+  st.conflict = null;
+  hud.frame(1000, W([]));
+  assert.equal(bar.hidden, true);
 });
