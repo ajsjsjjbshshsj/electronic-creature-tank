@@ -692,7 +692,7 @@ test('尾巴与眨眼都不许新增基因位点，且 activity 地板两处必�
     'spec §4.6：眨眼频率与 §4.7.2 蹦跳同源，都由 activity 驱动 —— 地板分家就是假设分家');
 });
 
-test('软体弹簧的二十九个常量齐备，且两端都欠阻尼（spec §4.7 过冲要求的数值前提）', () => {
+test('软体弹簧的三十个常量齐备，且两端都欠阻尼（spec §4.7 过冲要求的数值前提）', () => {
   const B = CONFIG.body;
   assert.deepEqual(Object.keys(B).sort(), [
     'angerFlatten', 'angerSharpen', 'arousalExpand', 'curiosityElongate', 'dentDecay', 'dentMax',
@@ -700,8 +700,12 @@ test('软体弹簧的二十九个常量齐备，且两端都欠阻尼（spec §4
     'maxStretchSpeed', 'petDentMax', 'pulseAmpArousal', 'pulseAmpBase', 'pulseAmpJoy', 'pulseAmpSleepy',
     'pulseRateArousal', 'pulseRateBase', 'pulseRateFloor', 'pulseRateSleepy',
     'sickCalm', 'sleepyCalm', 'stiffnessAtFullWobble', 'stiffnessAtZeroWobble',
-    'stretchK', 'zetaAtFullWobble', 'zetaAtZeroWobble',
+    'stretchK', 'syncPhaseLerp', 'zetaAtFullWobble', 'zetaAtZeroWobble',
   ], '软体弹簧的旋钮集，不多不少');
+  // 2026-10-27 新增 syncPhaseLerp（同步脉动的相位对齐速率）：29 → 30。
+  // 它是 body.phase 唯一的对齐来源，render 里不得再算第二份 —— 由 tests/render-body.test.js
+  // 那条"breatheOf 绝不自建时钟"守着。
+  assert.equal(B.syncPhaseLerp, 1.6);
   assert.equal(B.stiffnessAtZeroWobble, 220);
   assert.equal(B.stiffnessAtFullWobble, 80);
   assert.equal(B.zetaAtZeroWobble, 0.70);
