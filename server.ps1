@@ -3,7 +3,9 @@
 # 为什么必须有它：浏览器把 file:// 下的 ES Modules 当跨源请求拒绝加载，
 # 双击 index.html 只会得到一片空白。所以"零依赖"指零 npm 依赖，不是零服务器。
 #
-# 本计划只做静态文件服务。spec §7.1 的 /api/save 读写属计划 3。
+# 静态文件服务 + /api/save（共享存档，2026-10-29 落地）。
+# ⚠️ /api/save **没有认证**：能连上这个端口的人都能读写这缸 ⇒ 只适合家庭局域网。
+# 协议见 docs/superpowers/specs/2026-10-29-shared-save-lan-design.md。
 
 [CmdletBinding()]
 param(
@@ -72,6 +74,72 @@ if ($LanMode) {
 Write-Host '  关掉本窗口或 Ctrl+C 即停止。' -ForegroundColor DarkGray
 Write-Host ''
 
+
+# ---- /api/save（共享存档，2026-10-29）----
+# 协议与控制方 2026-10-29 的两条裁定见 docs/superpowers/specs/2026-10-29-shared-save-lan-design.md。
+# ⚠️ **没有认证**：能连上这个端口的人都能读、能写这缸，所以它只适合家庭局域网。
+# revision 只由**服务器**递增（spec §7.5 原文）：客户端携带它加载时读到的那个数，
+# 两边各算一套编号的那种错法在这里一次性排掉。
+$SaveFile = Join-Path $RootFull 'save.json'
+$SaveTemp = Join-Path $RootFull 'save.json.tmp'
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Write-ApiJson($ctx, [int]$status, $payload) {
+  # 空响应体必须写 0 字节而不是"空对象"：404 那条路由的约定就是没有 body。
+  $text = if ($null -eq $payload) { '' } else { ConvertTo-Json -InputObject $payload -Depth 40 -Compress }
+  $bytes = $Utf8NoBom.GetBytes($text)
+  $ctx.Response.StatusCode = $status
+  $ctx.Response.ContentType = 'application/json; charset=utf-8'
+  $ctx.Response.ContentLength64 = $bytes.Length
+  if ($bytes.Length -gt 0) { $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length) }
+  $ctx.Response.Close()
+}
+
+function Read-SaveFile {
+  if (-not (Test-Path -LiteralPath $SaveFile -PathType Leaf)) { return $null }
+  try { return ([System.IO.File]::ReadAllText($SaveFile, $Utf8NoBom) | ConvertFrom-Json) }
+  # 坏档按"没有"处理：下一次 PUT 从 0 重新建。**不删也不改**那份坏文件 ——
+  # 它是证据（spec §7.7 对坏档的一贯态度）。
+  catch { return $null }
+}
+
+function Invoke-SaveApi($ctx) {
+  $method = $ctx.Request.HttpMethod
+  $doc = Read-SaveFile
+  $cur = if ($null -eq $doc) { 0 } else { [int]$doc.revision }
+
+  if ($method -eq 'GET') {
+    if ($null -eq $doc) { Write-ApiJson $ctx 404 $null }
+    else { Write-ApiJson $ctx 200 ([pscustomobject]@{ revision = $cur; doc = $doc }) }
+    return
+  }
+  if ($method -ne 'PUT') { Write-ApiJson $ctx 405 $null; return }
+
+  $reader = New-Object System.IO.StreamReader($ctx.Request.InputStream, $Utf8NoBom)
+  $raw = $reader.ReadToEnd()
+  $reader.Dispose()
+  $body = $null
+  try { $body = $raw | ConvertFrom-Json } catch { $body = $null }
+  if ($null -eq $body -or $null -eq $body.doc) { Write-ApiJson $ctx 400 $null; return }
+
+  $base = 0
+  if ($null -ne $body.baseRevision) { $base = [int]$body.baseRevision }
+  if ($base -ne $cur) {
+    # **一个字节都不写**（§7.5 "不覆盖"）。409 带回磁盘上的版本：客户端的"接管"要用它。
+    Write-ApiJson $ctx 409 ([pscustomobject]@{ revision = $cur })
+    return
+  }
+
+  $next = $cur + 1
+  # revision 由服务器盖上去，客户端送来的那个值一律不认（Add -Force 覆盖它）。
+  $body.doc | Add-Member -NotePropertyName revision -NotePropertyValue $next -Force
+  $text = ConvertTo-Json -InputObject $body.doc -Depth 40 -Compress
+  # 原子写：先 tmp 再 Move。写到一半断电也不会在 save.json 上留下半份档。
+  [System.IO.File]::WriteAllText($SaveTemp, $text, $Utf8NoBom)
+  Move-Item -LiteralPath $SaveTemp -Destination $SaveFile -Force
+  Write-ApiJson $ctx 200 ([pscustomobject]@{ revision = $next })
+}
+
 if (-not $NoBrowser) { Start-Process "http://localhost:$Port/" }
 
 try {
@@ -81,6 +149,21 @@ try {
     try {
       $Raw = $Context.Request.Url.AbsolutePath
       if ($Raw -eq '/') { $Raw = '/index.html' }
+
+      # /api/save 走存档路由；其余 /api/* 一律 404（不给自己留暗门）。
+      if ($Raw -eq '/api/save') {
+        Invoke-SaveApi $Context
+        continue        # Invoke-SaveApi 自己关了响应，别再走下面的静态文件分支
+      }
+      if ($Raw.StartsWith('/api/')) {
+        # 必须**关掉**响应再 continue：只设 StatusCode 不关，客户端会一直等 body
+        # （实测症状：fetch 永远挂着，验收脚本在第七项停死）。
+        $Res.StatusCode = 404
+        $Res.ContentLength64 = 0
+        $Res.Close()
+        continue
+      }
+
       $Decoded = [System.Uri]::UnescapeDataString($Raw)
       $Candidate = [System.IO.Path]::GetFullPath((Join-Path $RootFull $Decoded.TrimStart('/')))
 
