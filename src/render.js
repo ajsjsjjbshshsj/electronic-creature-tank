@@ -745,6 +745,55 @@ function drawTailLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, viewport) {
   ctx.restore();
 }
 
+// 局部炸毛（2026-10-29）：被戳时只在**被戳那一侧**的一个窄扇区里把毛立起来。
+//
+// 与抚摸倒伏共用同一套几何（body.js 投影好的方向、writeBodyScreen 的屏幕坐标），
+// 但方向相反：倒伏是压下去的一条暗带，炸毛是往外探的几根浅色毛尖。
+// 不新增 sprite、不改 fluff 两张贴图的账单 —— 所有毛段共用**一条** path、一次 stroke。
+export function drawPokeFurLayer(ctx, renderer, c, body, cx, cy, r, ca, sa) {
+  if (!c || !c.beingPoked || !body || !(body.fluffLen > 0)) return;
+  if (c.alive === false || c.sick) return;
+  if (!(r > 0) || !Number.isFinite(cx) || !Number.isFinite(cy)) return;
+  const pokeX = Number.isFinite(body.pokeX) ? body.pokeX : 0;
+  const pokeY = Number.isFinite(body.pokeY) ? body.pokeY : 0;
+  if (pokeX === 0 && pokeY === 0) return;
+  writeBodyScreen(renderer, body, cx, cy, r, c.facing, renderer.fx.squashV);
+  const F = CONFIG.fluff;
+  const angle = Math.atan2(pokeY, pokeX);
+  const sx = renderer.sx;
+  const sy = renderer.sy;
+  const pts = body.points;
+  const len = r * F.pokeLen;
+  const n = Math.max(1, Math.floor(F.pokeCount));
+  ctx.save();
+  ctx.lineCap = 'round';
+  // 浅色：炸起来的毛是"被惊到竖起"的毛尖，比本体亮（与碎边同一条明度语义）
+  ctx.strokeStyle = hsla(c.traits.hue, 0.55, 0.88, F.pokeAlpha);
+  ctx.lineWidth = F.pokeWidth;
+  ctx.beginPath();
+  for (let k = 0; k < n; k += 1) {
+    const a = angle + (n === 1 ? 0 : (k / (n - 1) - 0.5) * 2 * F.pokeSpread);
+    // 轮廓点是等角采样的 ⇒ 找角度最近的即可（与倒伏扇区同一套判定）
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < pts.length; i += 1) {
+      const p = pts[i];
+      let d = Math.abs(Math.atan2(p.ry, p.rx) - a) % TAU;
+      if (d > Math.PI) d = TAU - d;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    const bx = sx[best];
+    const by = sy[best];
+    const ox = bx - cx;
+    const oy = by - cy;
+    const olen = Math.hypot(ox, oy) || 1;
+    ctx.moveTo(bx, by);
+    ctx.lineTo(bx + (ox / olen) * len, by + (oy / olen) * len);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 // 第 7 层：毛尖碎边。⚠️ 只此一次贴图 + 一次矩阵，**不重算毛的位置**（spec §4.7）。
 // sprite 里的星形轮廓与身体静止轮廓同源于 body.js 的 starRadius，所以五个角对得上；
 // 当前这帧的 squash 由 writeBodyScreen 量出来写进矩阵 —— 毛跟着身体一起被压扁，
@@ -1102,6 +1151,7 @@ export function drawCreature(ctx, renderer, c, body, viewport) {
   drawEyeLayer(ctx, renderer, c, cx, cy, r, ca, sa);       // 第 6 层（B15）
   drawFluffLayer(ctx, renderer, c, body, cx, cy, r, ca, sa, dpr);
   drawPetFurLayer(ctx, renderer, c, body, cx, cy, r, ca, sa);
+  drawPokeFurLayer(ctx, renderer, c, body, cx, cy, r, ca, sa);
   ctx.restore();
 }
 

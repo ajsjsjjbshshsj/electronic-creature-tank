@@ -148,6 +148,8 @@ export function createBody(traits) {
     impactY: 0,
     petX: 0,                      // 近手侧的单位方向（facing 局部空间）；毛层只读它做局部倒伏
     petY: 0,
+    pokeX: 0,                     // 同上，但只在 beingPoked 时写；毛层只读它做局部炸毛
+    pokeY: 0,
     wobble: clamp01(t.wobble),
     fluff: clamp01(t.fluff),      // spec §4.1 的性状位点，透传到表现层（§4.7 毛长）
     radius: 0,                    // 世界单位（sizeOf 的缓存）；updateBody 每步刷新
@@ -365,6 +367,23 @@ export function updateBody(body, c, dt, hand) {
   const petting = petX !== 0 || petY !== 0;
   body.petX = petting ? petX : 0;
   body.petY = petting ? petY : 0;
+
+  // 戳的方向与抚摸同一条投影，只是寄存器不同（beingPoked）：同一根手指、不同速度，
+  // 表现完全相反（压下去 / 立起来），所以两个方向字段必须各自独立。
+  let pokeX = 0;
+  let pokeY = 0;
+  if (c.beingPoked && hand) {
+    const dx = hand.pos.x - c.pos.x;
+    const dy = hand.pos.y - c.pos.y;
+    const len = Math.hypot(dx, dy);
+    if (len > 0) {
+      pokeX = (dx * fx + dy * fy) / len;
+      pokeY = (dx * -fy + dy * fx) / len;
+    }
+  }
+  const poking = pokeX !== 0 || pokeY !== 0;
+  body.pokeX = poking ? pokeX : 0;
+  body.pokeY = poking ? pokeY : 0;
   if (impact > 0 || petting) {
     const ix = body.impactX;
     const iy = body.impactY;
