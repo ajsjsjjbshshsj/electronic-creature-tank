@@ -16,7 +16,7 @@ import {
   coreColorFor, peltStopsFor, patternColorFor, patternAlphaFor, peltAlphaFor, glowAlphaFor,
   innerAlphaFor, innerRadiusFor, fluffOuterRadius, fluffInnerRadius, peltKey,
   breatheOf, tailLiftPx, writeBodyScreen, buildBodyPath, drawCreature,
-  getGlowSprite, getFluffSprite,
+  getGlowSprite, getFluffSprite, glowCompositeLumAt,
 } from '../src/render.js';
 // ==================================================================== 桩
 //
@@ -1022,4 +1022,59 @@ test('尾尖不许退化到看不见：锥度有上界、绝对尺寸有下界�
   const s2 = r2.tailSeg;
   assert.ok(s2.radii[s2.count - 1] >= 1,
     `成体在手机视口上尾尖只有 ${s2.radii[s2.count - 1].toFixed(2)} CSS px（< 1 就是 sub-pixel）`);
+});
+
+// ================================================================ F-1：光晕跨出 canvas 之后还看得见吗
+//
+// 这一条是**算出来的**，不是看出来的：清单 §1.6 用真像素量到"身体外 1.6–1.9r 只抬 1.3/255"。
+// 根因有两层，缺一层都算不对：
+//   ① 光晕 sprite 的渐变在 t ≈ 0.9 处几乎归零（旧最后一档 0.6→0.12、1→0）；
+//   ② 那层还乘着 globalAlpha = traits.glow × glowAlphaFactor（0.30）。
+// 所以判据必须把两层乘起来，再叠到水体底色上 —— 只算 ① 会得出"亮 40 个单位"的假结论。
+
+const LUM = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+// 水体三档底色（CONFIG.colors.bgTop/bgMid/bgBottom 与 css/main.css 是同一组，assets 测试守着）
+const BG_BANDS = [
+  LUM(0x0b, 0x06, 0x20),
+  LUM(0x1a, 0x0b, 0x2e),
+  LUM(0x2d, 0x12, 0x40),
+];
+
+test('F-1：1.2r 那一圈叠在最亮的水体底色上，必须抬得动（旧参数是 3.4/255，肉眼不可见）', () => {
+  const ga = 1 * CONFIG.render.glowAlphaFactor;         // 最亮的个体：glow = 1
+  const bg = BG_BANDS[BG_BANDS.length - 1];             // 最亮的底色 = 最坏情况
+  const t12 = 1.2 / CONFIG.render.glowRadiusFactor;
+  const delta = glowCompositeLumAt(t12, bg, ga) - bg;
+  assert.ok(delta >= 10,
+    `1.2r 处只抬了 ${delta.toFixed(1)}/255 —— 这一圈看不见，F-1 就没修好`);
+  // 反空转：把旧的渐变换回来，同一条算式必须掉到门槛以下 —— 否则这条判据分辨不了任何东西。
+  const oldStops = [0, 0.25, 0.6, 1].map((at, i) => ({ at, alpha: [0.95, 0.45, 0.12, 0][i] }));
+  const oldAlphaAt = (x) => {
+    for (let i = 1; i < oldStops.length; i += 1) {
+      if (x <= oldStops[i].at) {
+        const a = oldStops[i - 1]; const b = oldStops[i];
+        return a.alpha + (b.alpha - a.alpha) * ((x - a.at) / (b.at - a.at || 1));
+      }
+    }
+    return 0;
+  };
+  const oldFg = 155;                                    // 旧渐变的颜色亮度（lum .62–.73 量级）
+  const oldDelta = oldAlphaAt(t12) * ga * (oldFg - bg);
+  assert.ok(oldDelta < 10,
+    `旧参数在这条判据下算出 ${oldDelta.toFixed(1)}，不该过门槛 —— 否则这条测试测的不是 F-1`);
+});
+
+test('F-1：更外圈（1.6r）也要比修之前亮，且整个光晕随 glow 基因单调', () => {
+  const bg = BG_BANDS[0];                               // 顶部深水：对比最强的一档
+  const ga1 = 1 * CONFIG.render.glowAlphaFactor;
+  const ga035 = 0.35 * CONFIG.render.glowAlphaFactor;
+  const t16 = 1.6 / CONFIG.render.glowRadiusFactor;
+  const d1 = glowCompositeLumAt(t16, bg, ga1) - bg;
+  const d035 = glowCompositeLumAt(t16, bg, ga035) - bg;
+  // 它比 1.2r 那一圈暗一档是**刻意的**（光晕要往外淡）；这里的门槛只钉"还看得见"，
+  // 修之前同一点是 1.0–1.3/255（清单 §1.6 的真像素实测）。
+  assert.ok(d1 >= 6, `1.6r 处修完应当 ≥ 6/255，实测 ${d1.toFixed(1)}`);
+  assert.ok(d035 < d1, 'glow 小的个体光晕必须更弱（traits.glow 仍然是这条通道的唯一输入）');
+  // 内圈必须比外圈亮：光晕的方向如果反了，画面上就是一圈套在身上的深色环
+  assert.ok(glowCompositeLumAt(0.6, bg, ga1) > glowCompositeLumAt(t16, bg, ga1));
 });

@@ -1418,6 +1418,77 @@ export function drawFoods(ctx, renderer, world, viewport) {
 // 这些函数只在 createRenderer 与首次命中缓存时被调用，**绝不在 draw 里调用**。
 // tests/render-body.test.js 用注入的 makeCanvas 计数器守住"稳态 100 帧零新建"。
 
+// 第 1 层光晕的渐变（按 sprite 半径归一的位置 → 颜色）。
+//
+// ⚠️ 2026-10-29（F-1）：原来的最后一档是 0.6 → alpha 0.12、1.0 → 0。
+// 而 sprite 被放大到 1.75r，于是"身体外那一圈"（1.6–1.9r）落在 t ≈ 0.91–1.0，
+// alpha 只剩 0.02–0.00 —— 叠在深水背景上只抬 1.3/255，肉眼不可见（清单 §1.6 的实测）。
+// 修法不是把水搬进 canvas（那会推翻 §3.4-5），而是给光晕一条**真的能看见的肩**：
+// 0.85 处留 0.18、最后 15% 才淡到 0。判据由 tests/render-body.test.js 的
+// "F-1：1.6r 处叠在深水上必须抬得动亮度"那条钉住（它是算出来的，不是看出来的）。
+// ⚠️ 2026-10-29（F-1）：修法不是把水搬进 canvas（那会推翻 §3.4-5），而是把光晕的能量
+// **集中到紧贴轮廓的那一圈**：0.6 处从 0.12 提到 0.42、0.85 处留 0.30。
+// 这两档乘上 glowAlphaFactor（0.30）之后，1.05–1.3r 那一圈的合成增量才第一次越过
+// "肉眼可见"的门槛（不再是清单 §1.6 实测的 +1.3/255）。判据是算出来的：
+// tests/render-body.test.js 的 "F-1" 两条。
+export const GLOW_STOPS = Object.freeze([
+  { at: 0, sat: 0.70, lum: 0.73, alpha: 0.95 },
+  { at: 0.25, sat: 0.70, lum: 0.70, alpha: 0.50 },
+  { at: 0.60, sat: 0.70, lum: 0.64, alpha: 0.42 },
+  { at: 0.85, sat: 0.72, lum: 0.72, alpha: 0.30 },
+  { at: 1, sat: 0.72, lum: 0.72, alpha: 0 },
+]);
+
+// 光晕在"距离 sprite 中心 t（0..1）"处的 alpha 与颜色亮度（0..255 感知亮度近似）。
+// 纯函数、与绘制无关：F-1 的判据要在 Node 里算"叠上去抬几个亮度单位"，
+// 而那种计算只能站在"渐变的定义"上做，不能站在"桩记了几次调用"上做。
+export function glowAlphaAt(t) {
+  const x = Number.isFinite(t) ? Math.min(1, Math.max(0, t)) : 0;
+  const st = GLOW_STOPS;
+  for (let i = 1; i < st.length; i += 1) {
+    if (x <= st[i].at) {
+      const a = st[i - 1];
+      const b = st[i];
+      const k = b.at === a.at ? 0 : (x - a.at) / (b.at - a.at);
+      return a.alpha + (b.alpha - a.alpha) * k;
+    }
+  }
+  return 0;
+}
+
+function hslLum255(sat, lum) {
+  // HSL → RGB（S 与 L 都是 0..1），再取 0.2126/0.7152/0.0722 的感知亮度。
+  const c = (1 - Math.abs(2 * lum - 1)) * sat;
+  const hp = 0;                       // 色相不参与亮度：三个通道的加权和与它无关（同一 S/L 下）
+  const x2 = c * (1 - Math.abs((hp / 60) % 2 - 1));
+  const [r1, g1, b1] = [c, x2, 0];
+  const m = lum - c / 2;
+  return 255 * (0.2126 * (r1 + m) + 0.7152 * (g1 + m) + 0.0722 * (b1 + m));
+}
+
+// 光晕在 t 处"叠在某个背景亮度上"之后的感知亮度。用于 F-1 的判据与将来调参。
+export function glowCompositeLumAt(t, bgLum, globalAlpha = 1) {
+  // sprite 自身的 alpha **再乘**绘制那一层的 globalAlpha（= traits.glow × glowAlphaFactor）。
+  // 不乘这一下，算出来的亮度会比屏幕上高 3–9 倍 —— 那正是 F-1 一开始被漏掉的原因：
+  // 光晕 sprite 的渐变只决定了"形状"，而它到底多亮由那一层的 globalAlpha 封顶。
+  const a = glowAlphaAt(t) * (Number.isFinite(globalAlpha) ? Math.min(1, Math.max(0, globalAlpha)) : 1);
+  const st = GLOW_STOPS;
+  // 取 t 所在区间两端颜色亮度的插值（颜色与 alpha 用同一条折线）
+  let lum = st[st.length - 1].lum;
+  for (let i = 1; i < st.length; i += 1) {
+    if (t <= st[i].at) {
+      const p = st[i - 1];
+      const q = st[i];
+      const k = q.at === p.at ? 0 : Math.max(0, Math.min(1, (t - p.at) / (q.at - p.at)));
+      lum = p.lum + (q.lum - p.lum) * k;
+      break;
+    }
+  }
+  const fg = hslLum255(st[0].sat, lum);
+  const bg = Number.isFinite(bgLum) ? bgLum : 0;
+  return fg * a + bg * (1 - a);
+}
+
 function buildGlowSprites(renderer) {
   const N = CONFIG.glowHueBuckets;
   const size = R.glowSpriteSize;
@@ -1426,12 +1497,9 @@ function buildGlowSprites(renderer) {
     const h = bucketHue(b, N);
     const made = renderer.makeCanvas(size, size);
     const g = made.ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    // 中心亮、边缘透明。sat/lum 取 decode 的中值：把两者也纳入分桶会让 sprite 从 32 爆到
-    // 32×4×4，而光晕是模糊的大光斑，饱和度差异在这个尺度上看不出来。
-    g.addColorStop(0, hsla(h, 0.70, 0.73, 0.95));
-    g.addColorStop(0.25, hsla(h, 0.70, 0.70, 0.45));
-    g.addColorStop(0.6, hsla(h, 0.70, 0.62, 0.12));
-    g.addColorStop(1, hsla(h, 0.70, 0.60, 0));
+    // sat/lum 取 decode 的中值：把两者也纳入分桶会让 sprite 从 32 爆到 32×4×4，
+    // 而光晕是模糊的大光斑，饱和度差异在这个尺度上看不出来。
+    for (const st of GLOW_STOPS) g.addColorStop(st.at, hsla(h, st.sat, st.lum, st.alpha));
     made.ctx.fillStyle = g;
     made.ctx.fillRect(0, 0, size, size);
     renderer.glow.push({ ctx: made.ctx, surface: made.surface, size });
