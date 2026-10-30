@@ -2644,3 +2644,52 @@ test('A 追 B、B 追 C 时 A 与 B 不响：互相指向是门控，不是装�
   }
   assert.equal(n, 0, `a→b、b→c 不是一对，40 秒里却响了 ${n} 记`);
 });
+
+// ---- 亲属容忍（spec §4.8/§4.12："更容忍亲属靠近"）----
+//
+// 这条在 2026-10-29 之前**没有生产者**：碰撞结算对所有个体一视同仁，perceive 也不按 kinship
+// 放宽距离。判据必须两样同时测：推开得更少（身体）与好感罚更轻（关系）——
+// 只测前者的话，一个"推得少但照样记仇"的实现会全绿。
+
+function overlapWorld(related) {
+  const world = createWorld({ seed: 41, initialCreatures: 2 });
+  const [a, b] = world.creatures;
+  a.pos.x = 0.5; a.pos.y = 0.5;
+  b.pos.x = 0.5 + 1e-5; b.pos.y = 0.5;      // 几乎完全重叠（d > 1e-6，会进碰撞分支）
+  for (const c of [a, b]) {
+    c.vel.x = 0; c.vel.y = 0; c.moving = false;
+    c.intent = { kind: 'rest', minDuration: 1e6 };
+    c.intentTime = 0;
+  }
+  if (related) {
+    ensure(a.memory, b.id, { kinship: KINSHIP.mother, role: 'mother' });
+    ensure(b.memory, a.id, { kinship: KINSHIP.mother, role: 'offspring' });
+  }
+  return { world, a, b };
+}
+
+test('亲属更容忍靠近：同样重叠的一对，亲人被推开得更少、好感罚也更轻', () => {
+  const kinRun = overlapWorld(true);
+  const strangerRun = overlapWorld(false);
+  tickWorld(kinRun.world, CONFIG.fixedDt);
+  tickWorld(strangerRun.world, CONFIG.fixedDt);
+
+  const distOf = ({ a, b }) => Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y);
+  const kinDist = distOf(kinRun);
+  const strangerDist = distOf(strangerRun);
+  assert.ok(strangerDist > 0, '对照组必须先真的被推开，否则这条测试什么都没测');
+  assert.ok(Math.abs(kinDist / strangerDist - CONFIG.behavior.kinPushScale) < 0.05,
+    `亲人被推开的距离应当是对照的 ${CONFIG.behavior.kinPushScale} 倍，实测 ${kinDist.toFixed(6)} vs ${strangerDist.toFixed(6)}`);
+
+  const kinAff = affectionFor(kinRun.a.memory, kinRun.b.id);
+  const strangerAff = affectionFor(strangerRun.a.memory, strangerRun.b.id);
+  assert.ok(strangerAff < 0, '陌生人撞一下必须掉好感（对照）');
+  assert.ok(kinAff > strangerAff, `亲属掉得必须更少：${kinAff} vs ${strangerAff}`);
+  assert.ok(Math.abs(kinAff - strangerAff * CONFIG.behavior.kinBumpScale) < 1e-9,
+    `亲属的好感罚应当是对照的 ${CONFIG.behavior.kinBumpScale} 倍：${kinAff} vs ${strangerAff}`);
+  // 反向：完全无亲缘（默认 0）的一对**不许**吃这个折扣 —— 上面两组之外的第三组，
+  // 否则"kinship > 0 才打折"这条条件本身没被验过。
+  const plain = overlapWorld(false);
+  tickWorld(plain.world, CONFIG.fixedDt);
+  assert.equal(affectionFor(plain.a.memory, plain.b.id), strangerAff, '无亲缘的对照组之间必须一致');
+});

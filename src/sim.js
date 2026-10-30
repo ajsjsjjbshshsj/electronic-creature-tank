@@ -34,7 +34,7 @@ import { decay as decayNeeds, feed as feedNeeds, comfort, startle as startleNeed
 import { computeTargets, update as updateEmotions, applyEvent, moodOf } from './emotions.js';
 import {
   adjust as adjustMemory, decay as decayMemory, ensure as ensureMemory,
-  affectionFor, PLAYER_ID, KINSHIP,
+  affectionFor, kinshipBetween, PLAYER_ID, KINSHIP,
   companionOf, promoteCompanion, demoteCompanion,
 } from './memory.js';
 import { createCreature, ageCreature, canBreed, sizeOf, STAGES } from './creature.js';
@@ -1438,7 +1438,12 @@ function resolve(world, dt) {
       const d = Math.hypot(dx, dy);
       const minDist = (sizeOf(a) + sizeOf(b)) / 2000;
       if (d < minDist && d > 1e-6) {
-        const push = (minDist - d) / 2;
+        // 亲属偏好（spec §4.8/§4.12）：kinship > 0 的一对更容忍彼此靠近 ——
+        // 推开、被撞的情绪冲击、好感罚三样一起打折（见 CONFIG.behavior.kin*）。
+        // 判据只看"有没有亲缘"，不看角色：母子、同胞、祖孙都是 kinship > 0。
+        const kin = kinshipBetween(a.memory, b.id) > 0 || kinshipBetween(b.memory, a.id) > 0;
+        const kb = kin ? CONFIG.behavior.kinBumpScale : 1;
+        const push = (minDist - d) / 2 * (kin ? CONFIG.behavior.kinPushScale : 1);
         const nx = dx / d;
         const ny = dy / d;
         a.pos.x = clampPos(a.pos.x - nx * push);
@@ -1448,15 +1453,11 @@ function resolve(world, dt) {
 
         // 2026-10-20：原来这里包着一层"求偶中的碰撞不算冲突"的豁免（仪式本来就要贴近）。
         // 没有仪式了，豁免条件恒真 —— 留着就是一段永不成立的分支在假装做事，所以直接摊平。
-        applyEvent(a.emotions, 'bumped', 0.4);
-        applyEvent(b.emotions, 'bumped', 0.4);
-        // 记住这笔小账：好感轻微下降，多次碰撞才会累积成恩怨
-        adjustMemory(a.memory, b.id, -0.01, 0.02);
-        adjustMemory(b.memory, a.id, -0.01, 0.02);
-        // ⚠️ spec 4.8 的"更容忍亲属靠近"在整个内核里**没有生产者**：
-        // 这里的推开对所有个体一视同仁（推的是身体，不是关系），perceive 也不按 kinship
-        // 放宽距离。2026-10-20 孤雌之后近亲回避已随 mateScore 一起删除，现在 kinship 的消费者
-        // 只剩 memory.decay 的慢衰减通道与家谱。如实记下，免得后来者以为这里已经实现了它。
+        applyEvent(a.emotions, 'bumped', 0.4 * kb);
+        applyEvent(b.emotions, 'bumped', 0.4 * kb);
+        // 记住这笔小账：好感轻微下降，多次碰撞才会累积成恩怨（亲属那边打得同样轻）
+        adjustMemory(a.memory, b.id, -0.01 * kb, 0.02);
+        adjustMemory(b.memory, a.id, -0.01 * kb, 0.02);
       }
     }
   }
