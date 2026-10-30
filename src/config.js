@@ -540,6 +540,14 @@ const CONFIG = {
     petTuftLen: 0.32,          // 单根伏毛长度 × 身体半径；要长到从手边露出来
     petTuftWidth: 1.8,         // 伏毛线宽（CSS px）
     petTuftAlpha: 0.50,        // 伏毛亮度
+    // 局部炸毛（2026-10-29）：只在 c.beingPoked 时画**被戳那一侧**的一个窄扇区。
+    // 与倒伏共用同一套方向来源（body.pokeX/pokeY），但方向相反：倒伏压下去，炸毛立起来。
+    // 不新增 sprite、每只每帧只多一次 stroke（所有毛段共用一条 path）。
+    pokeSpread: 0.85,          // 扇区半角（rad）：比倒伏窄，读起来是"被戳了一下"而不是"整只炸开"
+    pokeCount: 7,              // 每侧 7 根足够密；再多也看不出差别，只多花路径段
+    pokeLen: 0.50,             // 伸出长度 × 身体半径：探出轮廓约半个半径
+    pokeWidth: 1.8,            // 线宽（CSS px）
+    pokeAlpha: 0.55,           // 亮度：比抚摸那条压毛带（0.22）显眼，因为戳是"惊"不是"贴"
   },
   tail: {
     segs: 3,                   // TAIL_SEGS

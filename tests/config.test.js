@@ -403,9 +403,12 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
   assert.ok(CONFIG.star.innerRatio > 0 && CONFIG.star.innerRatio < CONFIG.star.outerRatio,
     '内凹必须严格小于外角，否则"不是星形就是圆"');
 
+  // 2026-10-29：8 → 13 项，多了局部炸毛那五个（戳的方向来自 body.pokeX/pokeY）。
   assert.deepEqual(Object.keys(CONFIG.fluff).sort(), [
     'lenRatio', 'petPressAlpha', 'petPressWidth', 'petSpread', 'petTuftAlpha',
-    'petTuftLen', 'petTuftWidth', 'sprites',
+    'petTuftLen', 'petTuftWidth',
+    'pokeAlpha', 'pokeCount', 'pokeLen', 'pokeSpread', 'pokeWidth',
+    'sprites',
   ]);
   assert.equal(CONFIG.fluff.lenRatio, 0.18);
   // sprites = 2 是 spec §4.7 那条性能生死线的读数：
@@ -417,6 +420,13 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
   assert.ok(CONFIG.fluff.petTuftAlpha > 0 && CONFIG.fluff.petTuftAlpha <= 1);
   assert.ok(CONFIG.fluff.petTuftLen > 0 && CONFIG.fluff.petTuftWidth > 0);
   assert.ok(CONFIG.fluff.petPressWidth >= 1, '压毛带至少要盖过原来的毛尖宽度');
+  // 炸毛：扇区必须比倒伏窄（"被戳了一下"不是"整只炸开"），且比压毛带显眼（戳是"惊"）。
+  assert.ok(CONFIG.fluff.pokeSpread > 0 && CONFIG.fluff.pokeSpread < CONFIG.fluff.petSpread,
+    '炸毛扇区要比抚摸倒伏窄');
+  assert.ok(CONFIG.fluff.pokeCount >= 3 && CONFIG.fluff.pokeCount <= 12);
+  assert.ok(CONFIG.fluff.pokeLen > 0 && CONFIG.fluff.pokeLen < 1, '伸出长度小于一个半径');
+  assert.ok(CONFIG.fluff.pokeAlpha > CONFIG.fluff.petPressAlpha,
+    '炸毛要比压毛带亮：戳是"惊"，摸是"贴"');
 
   assert.equal(CONFIG.tail.segs, 3);
   assert.equal(CONFIG.tail.lenRatio, 0.5, '链长 = 0.5 × 身体半径，**由体型派生、不新增基因**');
