@@ -279,6 +279,11 @@ const CONFIG = {
 
   // ---- 行为 ----
   behavior: {
+    // 亲属容忍（spec §4.8/§4.12："更容忍亲属靠近"）。碰撞结算里按 kinship > 0 判定，
+    // 三样都打折而不是全免：推开 ×0.5（可以贴得更近）、bumped 情绪冲击 ×0.3、好感罚 ×0.3。
+    // 全免的话一窝兄弟姐妹会叠成一坨（身体仍然要占地方）；不打折的话 spec 那句话没有生产者。
+    kinPushScale: 0.5,
+    kinBumpScale: 0.3,
     noiseScale: 0.12,          // 效用评分的随机扰动幅度，避免机械感
     minIntentDuration: 1.2,    // 秒；行为的最短持续时间，防止高频抖动切换
     seekFoodUrgency: 1.6,      // 觅食评分对饥饿的放大
