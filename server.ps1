@@ -77,9 +77,12 @@ if ($LanMode) {
 # ⚠️ 它仍然走同一个端口与同一套 URL ACL：上面那条 urlacl 没跑的话，Tailscale 也连不上。
 $TailscaleIp = $null
 try {
+  # PATH 里找不到就试安装目录：Windows 安装器**不一定**把 Tailscale 加进当前会话的 PATH
+  # （2026-10-31 实测：服务在跑、tailscale.exe 在 Program Files，而 Get-Command 找不到它）。
   $ts = Get-Command tailscale -ErrorAction SilentlyContinue
-  if ($ts) {
-    $line = (& $ts.Source ip -4 2>$null | Select-Object -First 1)
+  $tsExe = if ($ts) { $ts.Source } else { Join-Path (Join-Path $env:ProgramFiles 'Tailscale') 'tailscale.exe' }
+  if (Test-Path -LiteralPath $tsExe) {
+    $line = (& $tsExe ip -4 2>$null | Select-Object -First 1)
     if ("$line" -match '^100\.') { $TailscaleIp = "$line".Trim() }
   }
 } catch { }
