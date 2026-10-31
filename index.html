@@ -8,10 +8,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#0B0620">
 <title>电子生物缸</title>
-<link rel="stylesheet" href="/css/main.css">
+<!-- 相对路径：GitHub Pages 这类"仓库子路径"部署下，/css/main.css 会解析到域名根、
+     直接 404。本地 server.ps1 从根上服务，相对路径同样正确。 -->
+<link rel="stylesheet" href="./css/main.css">
 </head>
 <body>
 <canvas id="tank"></canvas>
-<script type="module" src="/src/main.js"></script>
+<script type="module" src="./src/main.js"></script>
 </body>
 </html>

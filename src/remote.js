@@ -27,7 +27,13 @@ function json(text) {
 // 的语义完全一样；分开解析会让"PUT 的 409 也要带版本号"那条判据有两份实现。
 export function parseSaveResponse(status, text, mode = 'get') {
   const s = Number(status);
-  if (s === 404) return { kind: 'none' };
+  // 404 分两种，**不能合成一种**：
+  // · 空 body = 我们自己的 server.ps1（"服务器上还没有档"）；
+  // · 非空 body = 别人的静态托管（GitHub Pages 的 404 是一整页 HTML）——
+  //   那说明这台设备是**纯静态部署**，根本没有远端这条路，不是"降级"，不许挂角标。
+  if (s === 404) return String(text === undefined || text === null ? '' : text).trim() === ''
+    ? { kind: 'none' }
+    : { kind: 'static', reason: 'static-host' };
   const body = json(text);
   if (s === 200) {
     const rev = body ? intOrNull(body.revision) : null;

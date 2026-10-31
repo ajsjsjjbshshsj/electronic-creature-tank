@@ -16,8 +16,14 @@ test('parseSaveResponse：四种归类，别的一律 error', () => {
   }
   assert.equal(parseSaveResponse(500, 'boom').kind, 'error');
   assert.equal(parseSaveResponse(409, 'no-json').kind, 'error', '409 也要有可读的 revision');
-  // 404 不看 body：服务器给的 404 没有约定形状
-  assert.deepEqual(parseSaveResponse(404, 'whatever'), { kind: 'none' });
+  // 404 要分两种，**不能合成一种**：
+  // · 空 body = 我们自己的服务器（"还没有档"）；
+  // · 非空 body = 静态托管的 404（GitHub Pages 给的是一整页 HTML）⇒ 纯静态部署。
+  // 合成一种的症状：Pages 上每次打开都挂「本地存档（服务器不可达）」，看起来像坏了。
+  assert.deepEqual(parseSaveResponse(404, ''), { kind: 'none' });
+  assert.deepEqual(parseSaveResponse(404, '   '), { kind: 'none' });
+  assert.deepEqual(parseSaveResponse(404, '<!DOCTYPE html><h1>404</h1>'),
+    { kind: 'static', reason: 'static-host' });
   // PUT 的回执只有 revision、没有 doc —— 用 GET 的规矩去读它就会把一次成功的保存
   // 判成 error，然后降级写本机（远端模式下"两份真相"就是这么来的）。
   assert.deepEqual(parseSaveResponse(200, '{"revision":6}', 'put'), { kind: 'ok', revision: 6 });

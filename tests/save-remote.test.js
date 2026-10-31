@@ -8,6 +8,7 @@ import { CONFIG } from '../src/config.js';
 import { boot, primeRemote } from '../src/main.js';
 import { createWorld } from '../src/sim.js';
 import { serialize } from '../src/save.js';
+import { saveBadgeFor } from '../src/hud.js';
 
 const KEY = CONFIG.save.key;
 
@@ -264,4 +265,19 @@ test('清档的 DELETE 失败时只 warn 一次，且本机照清（不许因为
   assert.equal(store.has(KEY), false, '服务器没清掉时本机仍然要清 —— 这是玩家按的那个键');
   const mine = warns.filter((w) => /服务器上那份没清掉/.test(w));
   assert.equal(mine.length, 1, `必须恰好一条警告，实测 ${mine.length}：${JSON.stringify(warns)}`);
+}));
+
+test('纯静态部署（Pages 那种 404+HTML）：本机档是正常形态，不挂"本地存档"角标，也不发 PUT', () => withRemoteTank({
+  remote: { kind: 'static', reason: 'static-host' },
+  fetch: fakeServer([{ status: 404, body: '<!DOCTYPE html><h1>404</h1>' }]),
+}, async ({ controller, store, run }) => {
+  assert.equal(controller.remoteState.backend, 'local');
+  assert.equal(controller.saveState.staticHost, true);
+  assert.equal(controller.saveState.fallbackReason, null,
+    '静态部署不是降级：fallbackReason 一旦非空，HUD 就会挂一个永久的"服务器不可达"');
+  assert.equal(saveBadgeFor(controller.saveState).show, false, '角标必须不出现');
+  run(CONFIG.save.everySimSec + 2);
+  await tick();
+  assert.ok(store.has(KEY), '照常写本机');
+  assert.equal(controller.remoteState.stats.puts, 0, '静态站上不许对着 /api/save 反复撞');
 }));
