@@ -1,5 +1,6 @@
 # 运行时数据（每台设备/每次游玩不同，不入库）
 save.json
+access-token.txt
 save.json.tmp
 save.corrupt-*.json
 
