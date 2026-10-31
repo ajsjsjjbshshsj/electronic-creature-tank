@@ -109,6 +109,16 @@ try {
   // ⑨ 坏 body → 400，且不写盘
   r = await fetch(`${base}/api/save`, { method: 'PUT', body: '{oops' });
   check('PUT 坏 JSON → 400', r.status === 400, `status=${r.status}`);
+
+  // ⑩ DELETE → 200，之后再 GET 是 404（清档的远端一半）
+  r = await fetch(`${base}/api/save`, { method: 'DELETE' });
+  check('DELETE → 200', r.status === 200, `status=${r.status}`);
+  r = await fetch(`${base}/api/save`);
+  check('DELETE 之后 GET → 404', r.status === 404, `status=${r.status}`);
+  check('DELETE 之后磁盘文件也没了', !existsSync(savePath));
+  // 幂等：本来就没有时再删一次也是 200
+  r = await fetch(`${base}/api/save`, { method: 'DELETE' });
+  check('DELETE 幂等（没有档也 200）', r.status === 200, `status=${r.status}`);
 } finally {
   srv.kill();
   await wait(300);

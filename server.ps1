@@ -113,6 +113,14 @@ function Invoke-SaveApi($ctx) {
     else { Write-ApiJson $ctx 200 ([pscustomobject]@{ revision = $cur; doc = $doc }) }
     return
   }
+  if ($method -eq 'DELETE') {
+    # 清档：删掉磁盘上那一份（幂等 —— 本来就没有也返回 200）。
+    # 这条路由是"清档"按钮的远端一半：少了它，远端模式下按清档只清本机，
+    # 刷新之后服务器那份又回来了（用户看到的是"清档没生效"）。
+    if (Test-Path -LiteralPath $SaveFile) { Remove-Item -LiteralPath $SaveFile -Force }
+    Write-ApiJson $ctx 200 ([pscustomobject]@{ revision = 0 })
+    return
+  }
   if ($method -ne 'PUT') { Write-ApiJson $ctx 405 $null; return }
 
   $reader = New-Object System.IO.StreamReader($ctx.Request.InputStream, $Utf8NoBom)

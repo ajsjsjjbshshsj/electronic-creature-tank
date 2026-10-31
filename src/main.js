@@ -910,6 +910,23 @@ function attachSaveTier(probe, options) {
     },
     saveNow() { return write('manual', clockMs); },
     clearSave() {
+      // 共享存档（2026-10-29）：远端模式下服务器那份也必须一起清，否则刷新就回来 ——
+      // 用户看到的是"清档没生效"。DELETE 在服务器端是幂等的（本来没有也返回 200）。
+      // 只要**开缸时远端可达**就发这一条，不管当前 backend 是 remote 还是已降级：
+      // "清档"的语义是毁掉这条缸，而共享缸的另一半在服务器上。失败只 warn 一次。
+      if (remoteReachable && fetcher) {
+        Promise.resolve()
+          .then(() => fetcher(SAVE_PATH, { method: 'DELETE' }))
+          .then(async (res) => {
+            const body = res && typeof res.text === 'function' ? await res.text() : '';
+            const r = parseSaveResponse(res ? res.status : 0, body, 'put');
+            if (r.kind === 'ok') { remote.revision = 0; state.revision = 0; return; }
+            savedWarnOnce(warned, 'clear-remote',
+              `服务器上那份没清掉（${r.reason || r.kind}）：下次开缸会把它读回来。`);
+          })
+          .catch((err) => savedWarnOnce(warned, 'clear-remote',
+            `服务器上那份没清掉（${String((err && err.message) || err)}）：下次开缸会把它读回来。`));
+      }
       if (!store) return 0;
       let removed = 0;
       for (const key of [SAVE_KEY, SAVE_CORRUPT_KEY]) {
