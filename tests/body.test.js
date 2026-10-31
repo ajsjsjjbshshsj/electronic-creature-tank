@@ -1162,3 +1162,27 @@ test('updateBodies 每子步都会对齐一次（接线判据，防"函数写了
   assert.ok(phaseGap(bodies, 'a', 'b') < 0.02,
     `updateBodies 之后两只仍然不同步：${bodies.get('a').phase} vs ${bodies.get('b').phase}`);
 });
+
+test('同步的两只**脉率不同**时也必须锁得住（旧值 1.6 在这里每半秒对穿一次）', () => {
+  // 真页面实测（2026-10-31）：一对 arousal 0.34 / 1.00 的伙伴，脉率 1.78 / 3.50 拍每秒，
+  // 相位差在 0.03 与 0.47 之间来回扫 —— "对上拍子"这句话在旧参数下是假的。
+  // 这条测试就是那个场景的最小复现：只改 arousal，其余相同。
+  const world = { creatures: [] };
+  const bodies = new Map();
+  const a = mkBonder('a', 77);
+  const b = mkBonder('b', 88);
+  a.emotions.arousal = 0.34;
+  b.emotions.arousal = 1.00;
+  a.bondId = 'b'; a.bondSync = CONFIG.social.syncSeconds;
+  b.bondId = 'a'; b.bondSync = CONFIG.social.syncSeconds;
+  world.creatures.push(a, b);
+  for (let i = 0; i < Math.round(6 / DT); i += 1) updateBodies(bodies, world, DT);
+  const gap = phaseGap(bodies, 'a', 'b');
+  assert.ok(gap < 0.12,
+    `脉率差 1.7 拍/秒的一对，6 秒后相位差还有 ${gap.toFixed(3)} 圈（应当 < 0.12）`);
+  // 反空转：同一个世界把两只的脉率调成一样，差距只能更小 —— 否则这条判据测的是别的东西。
+  a.emotions.arousal = 0.34;
+  b.emotions.arousal = 0.34;
+  for (let i = 0; i < Math.round(6 / DT); i += 1) updateBodies(bodies, world, DT);
+  assert.ok(phaseGap(bodies, 'a', 'b') <= gap + 1e-9, '同脉率的一对不该比不同脉率更差');
+});

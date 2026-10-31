@@ -719,7 +719,8 @@ test('软体弹簧的三十个常量齐备，且两端都欠阻尼（spec §4.7 
   // 2026-10-27 新增 syncPhaseLerp（同步脉动的相位对齐速率）：29 → 30。
   // 它是 body.phase 唯一的对齐来源，render 里不得再算第二份 —— 由 tests/render-body.test.js
   // 那条"breatheOf 绝不自建时钟"守着。
-  assert.equal(B.syncPhaseLerp, 1.6);
+  // 2026-10-31：1.6 → 40 —— 只拉相位拉不住不同脉率的一对（真页面实测每半秒对穿一次）。
+  assert.equal(B.syncPhaseLerp, 40);
   assert.equal(B.stiffnessAtZeroWobble, 220);
   assert.equal(B.stiffnessAtFullWobble, 80);
   assert.equal(B.zetaAtZeroWobble, 0.70);
