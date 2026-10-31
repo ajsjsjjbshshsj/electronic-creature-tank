@@ -424,6 +424,8 @@ test('五角星 / 卷毛 / 尾巴 / 眨眼四组的常量被字面量钉住（�
   assert.ok(CONFIG.fluff.pokeSpread > 0 && CONFIG.fluff.pokeSpread < CONFIG.fluff.petSpread,
     '炸毛扇区要比抚摸倒伏窄');
   assert.ok(CONFIG.fluff.pokeCount >= 3 && CONFIG.fluff.pokeCount <= 12);
+  assert.ok(CONFIG.fluff.pokeSpread > 1 && CONFIG.fluff.pokeSpread < Math.PI / 2,
+    '扇区必须宽到能从手掌外缘露出来，但又小于半圈');
   assert.ok(CONFIG.fluff.pokeLen > 0 && CONFIG.fluff.pokeLen < 1, '伸出长度小于一个半径');
   assert.ok(CONFIG.fluff.pokeAlpha > CONFIG.fluff.petPressAlpha,
     '炸毛要比压毛带亮：戳是"惊"，摸是"贴"');
