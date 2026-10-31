@@ -68,8 +68,23 @@ if ($LanMode) {
     Write-Host "  同一 WiFi： http://$($ip.IPAddress):$Port/" -ForegroundColor Green
   }
 } else {
-  Write-Host '  ⚠ 目前只能本机访问。要让手机打开同一个缸，用管理员 PowerShell 跑一次：' -ForegroundColor Yellow
+  Write-Host '  ⚠ 目前只能本机访问。要让手机/朋友打开同一个缸，用管理员 PowerShell 跑一次：' -ForegroundColor Yellow
   Write-Host "     netsh http add urlacl url=http://+:$Port/ user=$env:USERNAME" -ForegroundColor Yellow
+}
+
+# Tailscale（异地共享这一档）：装了并把这一台加进 tailnet，就把 100.x 那条地址打出来 ——
+# 朋友要开的就是它。没装 / 没登录 / 命令失败一律安静跳过，不许因为探测失败把服务器搞崩。
+# ⚠️ 它仍然走同一个端口与同一套 URL ACL：上面那条 urlacl 没跑的话，Tailscale 也连不上。
+$TailscaleIp = $null
+try {
+  $ts = Get-Command tailscale -ErrorAction SilentlyContinue
+  if ($ts) {
+    $line = (& $ts.Source ip -4 2>$null | Select-Object -First 1)
+    if ("$line" -match '^100\.') { $TailscaleIp = "$line".Trim() }
+  }
+} catch { }
+if ($TailscaleIp) {
+  Write-Host "  异地（Tailscale）： http://$($TailscaleIp):$Port/   ← 发给朋友的就是这条" -ForegroundColor Green
 }
 Write-Host '  关掉本窗口或 Ctrl+C 即停止。' -ForegroundColor DarkGray
 Write-Host ''
