@@ -40,6 +40,57 @@ $RootFull = [System.IO.Path]::GetFullPath($Root)
 # 目录穿越守卫就漏了一个真实可越权读取的兄弟目录。
 $RootPrefix = $RootFull.TrimEnd('\') + '\'
 
+# ---- 访问口令（2026-10-31）----
+# 为什么需要它：tailscale funnel 会把这条缸挂到**公网**上，而 /api/save 本身没有认证
+# —— 谁拿到网址谁就能读、能改、能清档。所以给整个服务器加一道 Cookie 门：
+# 页面与接口都要过，口令存在本地文件里（不进版本库），第一次启动自动生成。
+# 分享时发"含口令的链接"（`?k=...`）：浏览器会记住 Cookie，之后不再需要带它。
+$TokenFile = Join-Path $RootFull 'access-token.txt'
+$Utf8Token = New-Object System.Text.UTF8Encoding($false)
+if (-not (Test-Path -LiteralPath $TokenFile -PathType Leaf)) {
+  $bytes = New-Object byte[] 18
+  [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+  $tok = [Convert]::ToBase64String($bytes).Replace('+', '-').Replace('/', '_').Replace('=', '')
+  [System.IO.File]::WriteAllText($TokenFile, $tok, $Utf8Token)
+}
+$AccessToken = ([System.IO.File]::ReadAllText($TokenFile, $Utf8Token)).Trim()
+
+function Test-Access($ctx) {
+  # 返回 'ok'（Cookie 已对上）/ 'grant'（这次带了 ?k=，要对上并种 Cookie）/ 'deny'
+  try {
+    $c = $ctx.Request.Cookies['tank']
+    if ($null -ne $c -and "$($c.Value)" -ceq $AccessToken) { return 'ok' }
+  } catch { }
+  $k = $ctx.Request.QueryString['k']
+  if ($null -ne $k -and "$k" -ceq $AccessToken) { return 'grant' }
+  return 'deny'
+}
+
+function Send-PasswordPage($ctx) {
+  $res = $ctx.Response
+  $res.StatusCode = 401
+  $res.ContentType = 'text/html; charset=utf-8'
+  $res.Headers.Add('Cache-Control', 'no-store')
+  $html = '<!doctype html><meta charset="utf-8"><title>要口令</title>' +
+    '<style>body{background:#0B0620;color:#ffd9e8;font:16px/1.6 system-ui;display:grid;place-items:center;height:100vh;margin:0}' +
+    'form{text-align:center}input{font:inherit;padding:8px 12px;border-radius:10px;border:1px solid #ffd9e8;background:#1A0B2E;color:inherit}' +
+    'button{font:inherit;padding:8px 16px;border-radius:10px;border:0;background:#ffd9e8;color:#2d1240;margin-left:8px}</style>' +
+    '<form method="get"><div>这条缸要口令</div><input name="k" autofocus autocomplete="off"><button>进</button></form>'
+  $bytes = $Utf8Token.GetBytes($html)
+  $res.ContentLength64 = $bytes.Length
+  $res.OutputStream.Write($bytes, 0, $bytes.Length)
+  $res.Close()
+}
+
+function Send-Granted($ctx) {
+  $res = $ctx.Response
+  $res.StatusCode = 302
+  $res.Headers.Add('Set-Cookie', "tank=$AccessToken; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax")
+  $res.Headers.Add('Location', $ctx.Request.Url.AbsolutePath)
+  $res.ContentLength64 = 0
+  $res.Close()
+}
+
 function Start-Listener([string]$Prefix) {
   $l = New-Object System.Net.HttpListener
   $l.Prefixes.Add($Prefix)
@@ -98,8 +149,11 @@ try {
   }
 } catch { }
 if ($TailscaleIp) {
-  Write-Host "  异地（Tailscale）： http://$($TailscaleIp):$Port/   ← 发给朋友的就是这条" -ForegroundColor Green
+  Write-Host "  异地（Tailscale）： http://$($TailscaleIp):$Port/" -ForegroundColor Green
 }
+Write-Host "  含口令的链接： http://localhost:$Port/?k=$AccessToken" -ForegroundColor Cyan
+Write-Host "     （发给朋友的就是这一条；他打开一次就记住，之后不用再带口令）" -ForegroundColor DarkGray
+Write-Host "     换口令：删掉 $TokenFile 再重启。" -ForegroundColor DarkGray
 Write-Host '  关掉本窗口或 Ctrl+C 即停止。' -ForegroundColor DarkGray
 Write-Host ''
 
@@ -184,6 +238,11 @@ try {
     $Context = $Listener.GetContext()
     $Res = $Context.Response
     try {
+      # 访问口令门：整台服务器（页面 + 接口）都过这一道，见上面 $TokenFile 那段。
+      $access = Test-Access $Context
+      if ($access -eq 'deny') { Send-PasswordPage $Context; continue }
+      if ($access -eq 'grant') { Send-Granted $Context; continue }
+
       $Raw = $Context.Request.Url.AbsolutePath
       if ($Raw -eq '/') { $Raw = '/index.html' }
 
