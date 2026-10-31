@@ -236,3 +236,32 @@ test('两端都有档且不同 ⇒ 启动时就是冲突（静默挑一边就是
   await tick();
   assert.equal(controller.remoteState.stats.puts, 0, '冲突期间一次 PUT 都不许发');
 }));
+
+test('清档：远端模式下服务器那份也必须一起清（否则刷新就回来）', () => withRemoteTank({
+  remote: { kind: 'ok', revision: 5, doc: realDoc(7, 5, 'r5') },
+  fetch: fakeServer([{ status: 200, body: { revision: 6 } }, { status: 200, body: { revision: 0 } }]),
+}, async ({ controller, store, run }) => {
+  run(CONFIG.save.everySimSec + 2);
+  await tick();
+  const callsBefore = controller.remoteState.stats.puts;
+  controller.clearSave();
+  await tick();
+  await tick();
+  assert.ok(callsBefore >= 1, '前置条件：先存过一次');
+  assert.equal(controller.saveState.revision, 0, '清完之后版本号归零（下一次从 0 起）');
+  assert.equal(store.has(KEY), false, '本机那份也要清（原来的行为不变）');
+}));
+
+test('清档的 DELETE 失败时只 warn 一次，且本机照清（不许因为服务器不通就什么都不清）', () => withRemoteTank({
+  remote: { kind: 'ok', revision: 5, doc: realDoc(7, 5, 'r5') },
+  fetch: fakeServer([{ status: 200, body: { revision: 6 } }, { throw: 'ECONNRESET' }]),
+}, async ({ controller, store, warns, run }) => {
+  run(CONFIG.save.everySimSec + 2);
+  await tick();
+  controller.clearSave();
+  await tick();
+  await tick();
+  assert.equal(store.has(KEY), false, '服务器没清掉时本机仍然要清 —— 这是玩家按的那个键');
+  const mine = warns.filter((w) => /服务器上那份没清掉/.test(w));
+  assert.equal(mine.length, 1, `必须恰好一条警告，实测 ${mine.length}：${JSON.stringify(warns)}`);
+}));
