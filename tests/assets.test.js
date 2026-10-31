@@ -84,9 +84,13 @@ test('.hud-radar 的轴名文字必须有 fill 规则（SVG 文字默认黑色 =
   assert.match(css, /\.hud-radar\s+text\s*\{[^}]*fill:/);
 });
 
-test('index.html 用 type="module" 引 /src/main.js，且声明了 viewport-fit=cover', () => {
+test('index.html 用 type="module" 引 ./src/main.js（必须是相对路径），且声明了 viewport-fit=cover', () => {
   const html = read('../index.html');
-  assert.match(html, /<script[^>]+type=["']module["'][^>]+src=["']\/src\/main\.js["']/);
+  // 2026-10-31：/src/main.js → ./src/main.js。GitHub Pages 这类"仓库子路径"部署下，
+  // 绝对路径会解析到**域名根**（/src/main.js），于是一整页 404 —— 而本地 server.ps1
+  // 从根上服务，两种都通。这条断言同时钉住"样式表也必须是相对路径"。
+  assert.match(html, /<script[^>]+type=["']module["'][^>]+src=["']\.\/src\/main\.js["']/);
+  assert.match(html, /<link[^>]+href=["']\.\/css\/main\.css["']/);
   // viewport-fit=cover 是 iOS 安全区（env(safe-area-inset-*)）生效的前提，
   // 少了它 css 里那几条 padding 恒为 0，刘海屏上 HUD 会被挖掉一块。
   assert.match(html, /viewport-fit=cover/);

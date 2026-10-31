@@ -550,6 +550,9 @@ function attachSaveTier(probe, options) {
     revision: 0,                     // 最近一次**服务器确认**的版本号（客户端从不自行 +1）
     fallbackReason: null,            // 非 null = 从远端降到这里的原因；角标只在它非空时挂
     conflict: null,                  // { remoteRevision } | null
+    // 纯静态部署（GitHub Pages 之类）：没有 /api/save，本机存档是**正常形态**而不是降级。
+    // 角标只读 fallbackReason，所以这里不设它；这个字段只给取证用。
+    staticHost: false,
   };
   // 探针分得出两种"没有存储"：这台设备**根本没有**（不吵，enabled=false 就是证据），
   // 与**一摸就抛**（Safari 隐私模式）。后者是降级，必须响一次（§7.7）。
@@ -680,6 +683,10 @@ function attachSaveTier(probe, options) {
         remote.conflict = { remoteRevision: remote.revision };
       }
     }
+  } else if (R && R.kind === 'static') {
+    // 静态站：本机存档就是它的正常形态，**不挂角标**（§7.6 的角标是给"降级"用的，
+    // 而这里根本没有远端可降）。写盘、读档、settings 的读数一切照旧。
+    state.staticHost = true;
   } else if (R && R.kind !== 'none') {
     state.fallbackReason = String(R.reason || R.kind);
   }

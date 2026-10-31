@@ -1964,3 +1964,36 @@ spec 只在 §4.8 那句"affection 由互动累积：……守巢与共同孵化
 两缸都仍是"非零且远小于 tick 数"，验收判据不变；差异本身是预期的 —— 亲人之间撞得更少、
 好感掉得更少，`affMin` 那道门被越过的组合就跟着变了。**伙伴对数仍然是 0**（无人喂的缸），
 与 §19.1 的结论一致。
+
+---
+
+## 24. 追加（2026-10-31，纯静态部署：不同设备各玩各的）
+
+需求收窄成"**不需要同一个缸，不同设备都能玩就行**"——于是不需要服务器，只要页面能被 HTTP 加载。
+
+### 24.1 改了三处
+
+1. `index.html` 的两条资源引用 `/css/main.css`、`/src/main.js` → **`./` 相对路径**：
+   子路径部署（`user.github.io/repo/`）下绝对路径会解析到域名根、整页 404。
+2. `parseSaveResponse` 把 404 拆成两种：**空 body = 自己的服务器（还没档）**、
+   **非空 body = 别人的静态托管**（Pages 的 404 是一整页 HTML）。新增 `kind:'static'`。
+3. `main.js`：`static` ⇒ `saveState.staticHost = true`、`backend` 仍是 `local`、
+   **`fallbackReason` 保持 null**（角标不挂），也不对 `/api/save` 发任何请求。
+
+### 24.2 判据与实测
+
+- `tests/remote.test.js`：`404 + ''` / `404 + '   '` → `none`；`404 + HTML` → `static`。
+- `tests/save-remote.test.js` 一条 boot 级：`staticHost === true`、`fallbackReason === null`、
+  `saveBadgeFor(...).show === false`、跑过节奏后本机主键有档、`puts === 0`。
+- `tests/assets.test.js` 那条 index.html 断言改成**必须相对路径**（顺带钉样式表）。
+- 全套 **1245/1245**。
+- **真页面实测**：用 `python -m http.server 8131` 冒充静态站（它的 404 正好是 HTML）：
+  `staticHost: true / backend: 'local' / fallbackReason: null`、角标 `hidden: true`、
+  `saveNow()` 写入 13430 字节、**刷新后 `source: 'restored'` 且 8 只都在**。
+
+### 24.3 仍未做的
+
+- **开 Pages** 是仓库设置里的一次外部操作，还没做。开完地址是
+  `https://ajsjsjjbshshsj.github.io/electronic-creature-tank/`。
+- 静态部署**没有共享存档**（这是需求收窄后的预期），也没有 service worker ⇒ 断网打不开已加载之外的页面。
+- 手机真机仍未上手，所有触摸仍是合成 PointerEvent。
