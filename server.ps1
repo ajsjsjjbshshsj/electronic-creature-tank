@@ -63,8 +63,19 @@ Write-Host ''
 Write-Host '  电子生物缸 · 本地服务器已启动' -ForegroundColor Magenta
 Write-Host "  本机打开： http://localhost:$Port/" -ForegroundColor Cyan
 if ($LanMode) {
-  foreach ($ip in (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                   Where-Object { $_.IPAddress -ne '127.0.0.1' })) {
+  # 只列**别人真能连上**的地址：169.254.*（链路本地，没拿到 DHCP 时的兜底）连不上，
+  # 列出来只会让人挑错。192.168.* 排前面（家庭局域网里最常见的那一类）。
+  # 2026-10-31 实测：不过滤时横幅里六行有五行是 169.254，唯一的 192.168 夹在中间。
+  # 100.64–100.127 是 Tailscale 用的 CGNAT 段：它由下面那条"异地（Tailscale）"专行列，
+  # 混在"同一 WiFi"里会让人以为那是家里局域网的地址。
+  $candidates = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.IPAddress -ne '127.0.0.1' -and
+      $_.IPAddress -notlike '169.254.*' -and
+      $_.IPAddress -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.'
+    } |
+    Sort-Object @{ Expression = { if ($_.IPAddress -like '192.168.*') { 0 } else { 1 } } }, IPAddress
+  foreach ($ip in $candidates) {
     Write-Host "  同一 WiFi： http://$($ip.IPAddress):$Port/" -ForegroundColor Green
   }
 } else {
